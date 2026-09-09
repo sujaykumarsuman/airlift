@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/session"
@@ -52,6 +53,7 @@ type Options struct {
 	RateCreate     Rate           // per-address create budget (0 disables)
 	RateJoin       Rate           // per-address and per-session join budget
 	RateFrames     Rate           // per-address frames budget
+	RatePing       Rate           // per-address ping budget
 	Now            func() time.Time
 	OnCreate       func(s *session.Session, joinURL string)
 	Logf           func(format string, args ...any)
@@ -59,9 +61,10 @@ type Options struct {
 
 // Server is the tower's HTTP surface.
 type Server struct {
-	opts Options
-	mux  *http.ServeMux
-	lim  *limiter
+	opts   Options
+	mux    *http.ServeMux
+	lim    *limiter
+	metaMu sync.Mutex // serialises session.json writes
 }
 
 // New wires the routes and installs the completion hook on the store.
@@ -80,10 +83,15 @@ func New(opts Options) *Server {
 		rlCreate: opts.RateCreate,
 		rlJoin:   opts.RateJoin,
 		rlFrames: opts.RateFrames,
+		rlPing:   opts.RatePing,
 	})
+	if opts.Now != nil {
+		opts.Store.SetNow(opts.Now)
+	}
 	opts.Store.SetCompleteHook(srv.finalize)
 	opts.Store.SetEvictHook(srv.removeSessionDir)
 	opts.Store.SetBeamEvictHook(srv.removeBeamDir)
+	opts.Store.SetTerminateHook(srv.writeSessionJSON)
 	srv.routes()
 	return srv
 }
@@ -100,6 +108,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("GET /api/sessions/{sid}", srv.client(srv.getSession))
 	m.HandleFunc("GET /api/sessions/{sid}/events", srv.client(srv.events))
 	m.HandleFunc("POST /api/sessions/{sid}/frames", srv.client(srv.frames))
+	m.HandleFunc("POST /api/sessions/{sid}/ping", srv.client(srv.ping))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.client(srv.download))
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.sessionAdmin(srv.deleteSession))
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
@@ -215,8 +224,9 @@ func (srv *Server) client(h clientHandler) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "client id does not match your address")
 			return
 		}
-		s.Touch()
-		s.MarkActive(c)
+		// Presence alone is not activity: only a frames POST with progress, a
+		// download or a ping resets the inactive clock (each handler calls
+		// MarkActivity). A bare call no longer refreshes the session.
 		h(w, r, s, c)
 	})
 }
@@ -236,13 +246,37 @@ func (srv *Server) getSession(w http.ResponseWriter, _ *http.Request, s *session
 	writeJSON(w, http.StatusOK, s.Snapshot())
 }
 
+// deleteSession soft-terminates the session (ADR 0013): the transfer freezes,
+// the files stay for terminated_ttl, then the sweep deletes them.
 func (srv *Server) deleteSession(w http.ResponseWriter, _ *http.Request, s *session.Session, _ *session.Client) {
-	srv.opts.Store.Delete(s.ID)
-	srv.opts.Logf("session %s deleted", s.ID)
+	if !s.Terminate("session admin", "terminated by session admin") {
+		writeError(w, http.StatusConflict, "session is already terminated")
+		return
+	}
+	srv.writeSessionJSON(s)
+	srv.opts.Logf("session %s terminated by admin", s.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+// ping counts as activity, resetting the inactive clock (client tier, rate_ping).
+func (srv *Server) ping(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
+	if s.Status() != session.StatusOpen {
+		writeError(w, http.StatusConflict, "session is not open")
+		return
+	}
+	if d, ok := srv.lim.allow(rlPing, srv.clientAddr(r)); !ok {
+		retryAfter(w, d)
+		return
+	}
+	s.MarkActivity(c)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
+	if s.Status() != session.StatusOpen {
+		writeError(w, http.StatusConflict, "session is not open")
+		return
+	}
 	if d, ok := srv.lim.allow(rlFrames, srv.clientAddr(r)); !ok {
 		retryAfter(w, d)
 		return
@@ -265,6 +299,9 @@ func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Ses
 		return
 	}
 	res := s.Ingest(req.Frames)
+	if res.Accepted+res.Dup > 0 {
+		s.MarkActivity(c) // real progress resets the inactive clock
+	}
 	completed := res.CompletedBeams
 	if completed == nil {
 		completed = []string{}
@@ -295,6 +332,7 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	sentTerminated := false
 	send := func() bool {
 		if sub.Evicted() {
 			fmt.Fprint(w, "event: evicted\ndata: {}\n\n")
@@ -306,11 +344,18 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 			flusher.Flush()
 			return false
 		}
-		data, err := json.Marshal(s.Snapshot())
+		snap := s.Snapshot()
+		data, err := json.Marshal(snap)
 		if err != nil {
 			return false
 		}
-		if _, err := fmt.Fprintf(w, "event: state\ndata: %s\n\n", data); err != nil {
+		// Announce the move to TERMINATED once (with the full snapshot), then
+		// keep pushing state until the cleanup delete fires event: closed.
+		name := "state"
+		if snap.Status == session.StatusTerminated && !sentTerminated {
+			name, sentTerminated = "terminated", true
+		}
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data); err != nil {
 			return false
 		}
 		flusher.Flush()
@@ -338,12 +383,13 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 	}
 }
 
-func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
 	sender, perr := strconv.ParseUint(r.URL.Query().Get("beam"), 16, 32)
 	if perr != nil {
 		writeError(w, http.StatusBadRequest, "missing or malformed beam id")
 		return
 	}
+	s.MarkActivity(c) // a download counts as activity (a no-op once terminated)
 	as := r.URL.Query().Get("as")
 	d, ok := s.BeamDownload(uint32(sender), as)
 	if !ok {

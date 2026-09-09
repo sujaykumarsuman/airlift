@@ -93,6 +93,7 @@ func runServe(ctx context.Context, cfg *config.Config, headless bool, stdout io.
 
 	store := session.NewStore(cfg.InactiveTTL, cfg.Sessions)
 	store.SetLimits(cfg.MaxBeams, cfg.MaxGzBytes)
+	store.SetLifecycle(cfg.IdleTTL, cfg.InactiveTTL, cfg.MaxAge, cfg.TerminatedTTL)
 	go store.Run(ctx, sweepEvery)
 	srv := server.New(server.Options{
 		Store:          store,
@@ -114,6 +115,7 @@ func runServe(ctx context.Context, cfg *config.Config, headless bool, stdout io.
 		RateCreate: server.Rate(cfg.RateCreate),
 		RateJoin:   server.Rate(cfg.RateJoin),
 		RateFrames: server.Rate(cfg.RateFrames),
+		RatePing:   server.Rate(cfg.RatePing),
 		OnCreate:   func(s *session.Session, join string) { printJoin(stdout, s.ID, join) },
 		Logf:       logger.Printf,
 	})

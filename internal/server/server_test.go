@@ -752,7 +752,7 @@ func readEvent(t *testing.T, r *bufio.Reader) (string, session.Snapshot) {
 			data = strings.TrimPrefix(line, "data: ")
 		case line == "" && name != "":
 			var snap session.Snapshot
-			if name == "state" {
+			if name == "state" || name == "terminated" {
 				if err := json.Unmarshal([]byte(data), &snap); err != nil {
 					t.Fatal(err)
 				}
@@ -803,18 +803,22 @@ func TestSSE(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// Deleting the session ends the stream with a closed event.
+	// A session-admin DELETE now soft-terminates: the stream gets event:
+	// terminated (once), and the session stays (TERMINATED) with its files.
 	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete: %s", resp.Status)
+		t.Fatalf("terminate: %s", resp.Status)
 	}
 	for {
-		name, _ := readEvent(t, vr)
-		if name == "closed" {
+		name, snap := readEvent(t, vr)
+		if name == "terminated" {
+			if snap.Status != session.StatusTerminated || snap.Terminated == nil || snap.Terminated.By != "session admin" {
+				t.Fatalf("terminated event %+v", snap)
+			}
 			break
 		}
 	}
-	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("after delete: %s", resp.Status)
+	if snap := h.snapshot(t, c); snap.Status != session.StatusTerminated {
+		t.Fatalf("session should be TERMINATED, got %s", snap.Status)
 	}
 }
 
@@ -1402,22 +1406,41 @@ func TestPersistFailureFallsBackToMemory(t *testing.T) {
 	}
 }
 
-// TestDeleteRemovesSessionData: deleting a session reclaims its on-disk tree.
-func TestDeleteRemovesSessionData(t *testing.T) {
-	h := start(t, nil)
+// TestDeleteTerminatesThenReclaims: a session-admin DELETE soft-terminates
+// (files kept, status TERMINATED); the sweep reclaims them after terminated_ttl.
+func TestDeleteTerminatesThenReclaims(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	h := start(t, func(o *Options) {
+		o.Now = clk.now
+		st := session.NewStore(time.Hour, 32)
+		st.SetLifecycle(time.Hour, time.Hour, 0, 30*time.Minute) // terminated_ttl 30m
+		o.Store = st
+	})
 	c := h.create(t)
 	if rep := h.replay(t, c, loadVectors(t), replay.Options{}); rep.State != session.StateReady {
 		t.Fatalf("%+v", rep)
 	}
 	dir := filepath.Join(h.dataDir, c.SID)
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("no session dir before delete: %v", err)
-	}
 	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete: %s", resp.Status)
+		t.Fatalf("terminate: %s", resp.Status)
 	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("terminate must keep the files: %v", err)
+	}
+	if h.snapshot(t, c).Status != session.StatusTerminated {
+		t.Fatal("session should be TERMINATED after DELETE")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "session.json")); err != nil {
+		t.Fatalf("session.json missing after terminate: %v", err)
+	}
+	// After terminated_ttl the sweep deletes the session and its data.
+	clk.add(31 * time.Minute)
+	h.store.Sweep(clk.now())
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("session dir survived delete: %v", err)
+		t.Fatalf("data survived cleanup: %v", err)
+	}
+	if h.store.Len() != 0 {
+		t.Fatal("session not deleted at cleanup")
 	}
 }
 
@@ -1594,8 +1617,117 @@ func TestRemoveBeamDirGuard(t *testing.T) {
 	(&Server{opts: Options{Logf: t.Logf}}).removeBeamDir("x", "y")
 }
 
-// TestSweepRemovesSessionData: sweeping an expired session reclaims its data
-// (exercises the evict hook off the store, not only DELETE).
+func TestPing(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	h := start(t, func(o *Options) { o.Now = clk.now; o.RatePing = Rate{N: 2, Per: time.Minute} })
+	c := h.create(t)
+	// A ping needs a registered client.
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/ping", c.Token, "", nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("ping without a client: %s", resp.Status)
+	}
+	for i := 0; i < 2; i++ {
+		if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/ping", c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("ping %d: %s", i, resp.Status)
+		}
+	}
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/ping", c.Token, c.ClientID, nil); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("ping over rate: %s", resp.Status)
+	}
+	// After terminate, ping is 409 (status is checked before the rate limit).
+	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil)
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/ping", c.Token, c.ClientID, nil); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("ping after terminate: %s", resp.Status)
+	}
+}
+
+func TestFreezeWhenTerminated(t *testing.T) {
+	h := start(t, nil)
+	c := h.create(t)
+	h.replay(t, c, loadVectors(t), replay.Options{})
+	b := h.oneBeam(t, c)
+	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("terminate: %s", resp.Status)
+	}
+	// Every mutating/transfer action is frozen with 409.
+	frozen := []struct{ method, path string }{
+		{"POST", "/api/sessions/" + c.SID + "/frames"},
+		{"POST", "/api/sessions/" + c.SID + "/ping"},
+		{"PATCH", "/api/sessions/" + c.SID},
+		{"DELETE", "/api/sessions/" + c.SID + "/beams/" + b.BID},
+		{"DELETE", "/api/sessions/" + c.SID}, // a second terminate
+	}
+	for _, f := range frozen {
+		if resp, _ := h.do(t, f.method, f.path, c.Token, c.ClientID, []byte(`{}`)); resp.StatusCode != http.StatusConflict {
+			t.Errorf("%s %s: %s, want 409", f.method, f.path, resp.Status)
+		}
+	}
+	// A READY beam's download still works, and the snapshot reports TERMINATED.
+	if resp, _ := h.download(t, c, b.BID, "raw"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("download after terminate: %s", resp.Status)
+	}
+	snap := h.snapshot(t, c)
+	if snap.Status != session.StatusTerminated || snap.Terminated == nil {
+		t.Fatalf("snapshot %+v", snap)
+	}
+}
+
+func TestSessionJSON(t *testing.T) {
+	h := start(t, nil)
+	const password = "sekret-pw"
+	_, c := h.createOpts(t, `{"label":"demo","password":"`+password+`"}`)
+	h.replay(t, c, loadVectors(t), replay.Options{})
+	path := filepath.Join(h.dataDir, c.SID, "session.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("session.json: %v", err)
+	}
+	var m struct {
+		SID       string           `json:"sid"`
+		Label     string           `json:"label"`
+		Status    string           `json:"status"`
+		StartedAt *time.Time       `json:"started_at"`
+		Senders   []uint32         `json:"senders"`
+		Beams     []map[string]any `json:"beams"`
+		Events    []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("session.json decode: %v", err)
+	}
+	if m.SID != c.SID || m.Label != "demo" || m.Status != "OPEN" || m.StartedAt == nil {
+		t.Fatalf("meta %+v", m)
+	}
+	if len(m.Senders) != 1 || len(m.Beams) != 1 || m.Beams[0]["meta"] != m.Beams[0]["bid"].(string)+"/meta.json" {
+		t.Fatalf("beams %+v", m.Beams)
+	}
+	if len(m.Events) < 2 || m.Events[0]["event"] != "created" {
+		t.Fatalf("events %+v", m.Events)
+	}
+	// No secret leaks the token or the password into the receipt.
+	if s := string(raw); strings.Contains(s, c.Token) || strings.Contains(s, password) {
+		t.Fatal("session.json leaked a secret")
+	}
+	// Terminating rewrites it with the terminated record and event.
+	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil)
+	raw, _ = os.ReadFile(path)
+	var after struct {
+		Status     string          `json:"status"`
+		Terminated *map[string]any `json:"terminated"`
+	}
+	json.Unmarshal(raw, &after)
+	if after.Status != "TERMINATED" || after.Terminated == nil {
+		t.Fatalf("after terminate: %s %v", after.Status, after.Terminated)
+	}
+	// No leftover temp files.
+	entries, _ := os.ReadDir(filepath.Join(h.dataDir, c.SID))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".session-") {
+			t.Fatalf("leftover temp %s", e.Name())
+		}
+	}
+}
+
+// TestSweepRemovesSessionData: the two-phase clock sweep terminates an idle
+// session, then reclaims its data after terminated_ttl.
 func TestSweepRemovesSessionData(t *testing.T) {
 	h := start(t, func(o *Options) { o.Store = session.NewStore(150*time.Millisecond, 32) })
 	c := h.create(t)
@@ -1606,10 +1738,19 @@ func TestSweepRemovesSessionData(t *testing.T) {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("no session dir before sweep: %v", err)
 	}
-	if ids := h.store.Sweep(time.Now().Add(time.Hour)); len(ids) != 1 {
-		t.Fatalf("swept %v", ids)
+	// Phase one: past the idle deadline → TERMINATED, files kept.
+	t1 := time.Now().Add(time.Hour)
+	if ids := h.store.Sweep(t1); len(ids) != 0 {
+		t.Fatalf("terminate should not delete: %v", ids)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("terminate kept no files: %v", err)
+	}
+	// Phase two: past cleanup_at → deleted and reclaimed.
+	if ids := h.store.Sweep(t1.Add(time.Second)); len(ids) != 1 {
+		t.Fatalf("expected one delete: %v", ids)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("session dir survived sweep: %v", err)
+		t.Fatalf("session dir survived cleanup: %v", err)
 	}
 }

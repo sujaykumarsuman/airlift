@@ -15,23 +15,62 @@ var ErrTooManySessions = errors.New("too many sessions")
 
 // Store holds every live session.
 type Store struct {
-	mu          sync.Mutex
-	sessions    map[string]*Session
-	ttl         time.Duration
-	max         int
-	maxBeams    int
-	maxGz       int64
+	mu       sync.Mutex
+	sessions map[string]*Session
+	max      int
+	maxBeams int
+	maxGz    int64
+
+	// Lifecycle defaults new sessions inherit (ADR 0013); SetLifecycle overrides
+	// them from config. A bare store uses the NewStore inactive value for all
+	// three windows and disables max_age, so it behaves like the old single TTL.
+	idleTTL       time.Duration
+	inactiveTTL   time.Duration
+	maxAge        time.Duration
+	terminatedTTL time.Duration
+
 	now         func() time.Time
 	onComplete  func(*Session, *Beam)
 	onEvict     func(string)
 	onBeamEvict func(sid, bid string)
+	onTerminate func(*Session) // writes session.json on a lifecycle transition
 }
 
-// NewStore creates a store with the given TTL and session concurrency limit.
-// The per-place beam cap defaults to defaultMaxBeams and the per-beam gzip
-// ceiling is off until SetLimits sets them (the tower does, from config).
-func NewStore(ttl time.Duration, max int) *Store {
-	return &Store{sessions: map[string]*Session{}, ttl: ttl, max: max, maxBeams: defaultMaxBeams, now: time.Now}
+// NewStore creates a store with the given inactive TTL and session concurrency
+// limit. The per-place beam cap defaults to defaultMaxBeams and the per-beam
+// gzip ceiling is off until SetLimits sets them (the tower does, from config).
+func NewStore(inactive time.Duration, max int) *Store {
+	return &Store{
+		sessions: map[string]*Session{}, max: max, maxBeams: defaultMaxBeams, now: time.Now,
+		idleTTL: inactive, inactiveTTL: inactive, terminatedTTL: inactive,
+	}
+}
+
+// SetLifecycle sets the three lifecycle clocks and the terminated-file window new
+// sessions inherit (ADR 0013). Set it before creating sessions; a zero duration
+// disables that clock.
+func (st *Store) SetLifecycle(idle, inactive, maxAge, terminated time.Duration) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.idleTTL, st.inactiveTTL, st.maxAge, st.terminatedTTL = idle, inactive, maxAge, terminated
+}
+
+// SetTerminateHook installs the function run, off the store lock, when a session
+// transitions to TERMINATED (it writes session.json). Set it before creating
+// sessions.
+func (st *Store) SetTerminateHook(fn func(*Session)) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.onTerminate = fn
+}
+
+// SetNow overrides the clock (tests). Set it before creating sessions.
+func (st *Store) SetNow(fn func() time.Time) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if fn != nil {
+		st.now = fn
+	}
 }
 
 // SetLimits sets the per-place beam cap and per-beam gzip ceiling new sessions
@@ -107,26 +146,30 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	}
 	now := st.now()
 	s := &Session{
-		ID:           hex.EncodeToString(idBytes),
-		Token:        base64.RawURLEncoding.EncodeToString(tokenBytes),
-		CreatedAt:    now,
-		now:          st.now,
-		ttl:          st.ttl,
-		expiresAt:    now.Add(st.ttl),
-		maxBeams:     st.maxBeams,
-		maxGz:        maxGz,
-		beams:        map[uint32]*Beam{},
-		subs:         map[*Subscriber]struct{}{},
-		onComplete:   st.onComplete,
-		onBeamEvict:  st.onBeamEvict,
-		clients:      map[string]*Client{},
-		byAddr:       map[string]*Client{},
-		usedNames:    map[string]bool{},
-		evicted:      map[string]bool{},
-		label:        p.Label,
-		joinersAdmin: p.JoinersAdmin,
-		idleTTL:      p.IdleTTL,
-		inactiveTTL:  p.InactiveTTL,
+		ID:            hex.EncodeToString(idBytes),
+		Token:         base64.RawURLEncoding.EncodeToString(tokenBytes),
+		CreatedAt:     now,
+		now:           st.now,
+		status:        StatusOpen,
+		lastActivity:  now,
+		lastEmptyAt:   now, // presence starts at zero, so the idle clock runs from creation
+		idleTTL:       orDur(p.IdleTTL, st.idleTTL),
+		inactiveTTL:   orDur(p.InactiveTTL, st.inactiveTTL),
+		maxAge:        st.maxAge, // the per-session max_age override is Phase 7
+		terminatedTTL: st.terminatedTTL,
+		events:        []LifecycleEvent{{At: now, Event: "created"}},
+		maxBeams:      st.maxBeams,
+		maxGz:         maxGz,
+		beams:         map[uint32]*Beam{},
+		subs:          map[*Subscriber]struct{}{},
+		onComplete:    st.onComplete,
+		onBeamEvict:   st.onBeamEvict,
+		clients:       map[string]*Client{},
+		byAddr:        map[string]*Client{},
+		usedNames:     map[string]bool{},
+		evicted:       map[string]bool{},
+		label:         p.Label,
+		joinersAdmin:  p.JoinersAdmin,
 	}
 	if p.Password != "" {
 		s.salt = newSalt()
@@ -167,28 +210,46 @@ func (st *Store) Len() int {
 	return len(st.sessions)
 }
 
-// Sweep deletes sessions expired at now, reclaims their on-disk data and returns
-// their ids.
+// Sweep runs the two-phase lifecycle sweep at now: an OPEN session past its
+// deadline is TERMINATED (its files kept for terminated_ttl), and a TERMINATED
+// session past its cleanup time is deleted and its on-disk data reclaimed. It
+// returns the ids of the deleted sessions.
 func (st *Store) Sweep(now time.Time) []string {
 	st.mu.Lock()
-	var expired []*Session
+	var terminated, deleted []*Session
 	for id, s := range st.sessions {
-		if s.Expired(now) {
-			expired = append(expired, s)
+		switch s.sweepStep(now) {
+		case sweepTerminated:
+			terminated = append(terminated, s)
+		case sweepExpired:
+			deleted = append(deleted, s)
 			delete(st.sessions, id)
 		}
 	}
-	hook := st.onEvict
+	evict, term := st.onEvict, st.onTerminate
 	st.mu.Unlock()
-	ids := make([]string, 0, len(expired))
-	for _, s := range expired {
+	for _, s := range terminated {
+		if term != nil {
+			term(s) // session.json; the SSE event already fired under the lock
+		}
+	}
+	ids := make([]string, 0, len(deleted))
+	for _, s := range deleted {
 		s.close()
 		ids = append(ids, s.ID)
-		if hook != nil {
-			hook(s.ID)
+		if evict != nil {
+			evict(s.ID)
 		}
 	}
 	return ids
+}
+
+// orDur returns v when positive, else the default.
+func orDur(v, def time.Duration) time.Duration {
+	if v > 0 {
+		return v
+	}
+	return def
 }
 
 // Run sweeps every interval until ctx is done.

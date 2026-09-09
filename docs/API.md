@@ -21,11 +21,12 @@ GET    /api/sessions/{sid}            client → place snapshot
 GET    /api/sessions/{sid}/events     client → SSE place snapshots
 POST   /api/sessions/{sid}/frames     client → body {frames:[base45,...]}
                                              → {accepted, dup, bad, completed_beams}
+POST   /api/sessions/{sid}/ping       client → 204; activity, resets the inactive clock
 GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes
 PATCH  /api/sessions/{sid}            admin  → body {password} (set or, with "", clear)
 DELETE /api/sessions/{sid}/clients/{cid}  admin  → evict a client's address
 DELETE /api/sessions/{sid}/beams/{bid}    admin  → remove a beam and its files
-DELETE /api/sessions/{sid}            admin  → delete the session
+DELETE /api/sessions/{sid}            admin  → terminate the session (freeze, keep files)
 GET    /api/info                      public → {version, public_url, base_path, admin_enabled, caps}
 GET    /                              tower dashboard
 GET    /s/{sid}                       scan page (token arrives in #t=)
@@ -75,7 +76,9 @@ streaming `fetch` with a small SSE parser instead of `EventSource`, and
 Unknown `sid` → `404`. Missing or wrong token → `401`. A valid token with no or
 an unknown client → `401`; a client id from a different address, a non-admin on
 an admin route, or an evicted address → `403` (an evicted address gets
-`{"error":"evicted"}`). Every authenticated call refreshes the session's TTL.
+`{"error":"evicted"}`). A `409` means the action is not allowed in the session's
+current status (e.g. frames, ping, patch or beam-removal on a TERMINATED
+session). Session expiry is no longer refreshed by every call — see Lifecycle.
 
 ## Limits
 
@@ -132,10 +135,12 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `sid` | string | tower session id |
+| `status` | string | `OPEN` or `TERMINATED` (see Lifecycle) |
 | `relays` | int | open event streams that declared `role=relay` |
 | `beams` | object[] | the beams read into the place, in arrival order |
 | `clients` | object[] | the registered clients: `{client_id, name, roles, session_admin, connected, last_active}` |
-| `expires_at` | RFC 3339 | refreshed on every authenticated call |
+| `terminated` | object or null | `{by, reason, at, cleanup_at}` once TERMINATED; null while OPEN |
+| `expires_at` | RFC 3339 | the earliest applicable deadline (see Lifecycle); a TERMINATED session's `cleanup_at` |
 
 Each entry of `beams` is:
 
@@ -186,11 +191,34 @@ error. DATA/FOUNTAIN frames that arrive before their own MANIFEST are held —
 up to 8 pending senders, 65 536 frames across them — and adopted when that
 sender's manifest arrives, without disturbing any other beam.
 
+## Lifecycle
+
+A session has a `status`: `OPEN` or `TERMINATED` (ADR 0013). While OPEN its
+`expires_at` is the earliest of three clocks:
+
+- **idle** — `idle_ttl` after the last client stream leaves (runs only while no
+  stream is connected).
+- **inactive** — `inactive_ttl` after the last activity while streams are
+  connected.
+- **max_age** — `max_age` from creation, when set.
+
+*Activity* — a frames POST that accepted or duplicated ≥ 1 frame, a download, or
+a ping — resets the inactive clock. A bare snapshot, an open stream, a
+register/join and an all-bad POST are presence, not activity, and no longer
+refresh anything. A session admin's `DELETE` and any clock firing move the
+session `OPEN → TERMINATED`, recording `terminated {by, reason, at, cleanup_at}`.
+A TERMINATED session freezes the transfer (frames, ping, patch and beam-removal
+return `409`) but keeps its files and keeps serving READY downloads and the
+snapshot; `terminated_ttl` later the session and its `<data_dir>/<sid>` directory
+are deleted (`event: closed`). The airlift-admin terminate with a warning, and
+the extension/review flow, are a later phase (ADR 0014).
+
 ## Events
 
 `GET /api/sessions/{sid}/events` → `text/event-stream`: a snapshot on
 connect, one per change (coalesced), a `: keepalive` comment every 15 s,
-`event: closed` when the session is deleted or expires, and `event: evicted`
+`event: terminated` (once, carrying the snapshot) when the session is
+terminated, `event: closed` when it is finally deleted, and `event: evicted`
 when the viewer's address has been evicted (the stream then ends). `?role=relay`
 counts the connection under `relays` and adds `relay` to the client's roles.
 
@@ -225,12 +253,19 @@ On READY a beam's verified output is written under `<data_dir>/<sid>/<bid>/`
 (ADR 0016):
 
 ```
-raw/<name>        the byte-identical input (always)
-tree/…            the unpacked repobundle tree, modes preserved (a bundle)
-<stem>.zip        the zip of the tree (a bundle of more than one file)
-meta.json         sid, bid, sender_session, name, state, sizes, hashes,
-                  verdicts, bundle summary, downloads, started_at, finished_at
+<sid>/session.json   the session receipt: sid, label, status, terminated,
+                     created/started/finished, senders, clients, per-beam refs,
+                     the lifecycle event log (ADR 0013; no token/password/address)
+<sid>/<bid>/         one directory per beam (ADR 0016):
+    raw/<name>       the byte-identical input (always)
+    tree/…           the unpacked repobundle tree, modes preserved (a bundle)
+    <stem>.zip       the zip of the tree (a bundle of more than one file)
+    meta.json        sid, bid, sender_session, name, state, sizes, hashes,
+                     verdicts, bundle summary, downloads, started_at, finished_at
 ```
+
+`session.json` is (re)written on each beam READY and on every lifecycle
+transition, atomically (temp + rename). The per-beam files stay as ADR 0016.
 
 The three download kinds are served from these files and the in-memory copies
 freed; `saved_path` is the beam directory. Writes are staged in a sibling temp

@@ -20,6 +20,7 @@ const (
 	rlCreate rateKind = iota
 	rlJoin
 	rlFrames
+	rlPing
 )
 
 type bucket struct {

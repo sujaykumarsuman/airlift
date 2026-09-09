@@ -128,6 +128,8 @@ func (srv *Server) finalize(s *session.Session, b *session.Beam) {
 	s.FinishBeam(b, out)
 	srv.opts.Logf("session %s beam %s READY: %s, %d bytes, gz %s, orig %s%s", s.ID, bid, name, len(data),
 		res.GzSHA.Actual[:12], res.OrigSHA.Actual[:12], describeBundle(out.Bundle))
+	// Update the session-level receipt now that a beam is READY (ADR 0013).
+	srv.writeSessionJSON(s)
 }
 
 func describeBad(b *bundle.Bundle, bad []string) string {

@@ -21,9 +21,11 @@ const beam = (over: Partial<Beam> = {}): Beam => ({
 
 const place = (beams: Beam[]): Snapshot => ({
   sid: "s",
+  status: "OPEN",
   relays: 0,
   beams,
   clients: [],
+  terminated: null,
   expires_at: "2026-09-09T12:00:00Z",
 });
 

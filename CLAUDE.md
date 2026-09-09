@@ -95,6 +95,12 @@ directly (out of scope; see non-goals).
     salted-SHA-256 password join, per-address/session rate limits (429 +
     `Retry-After`), address eviction, and operator beam removal + auto-evict of
     the oldest terminal beam at the cap. (ADR 0017)
+16. Session lifecycle: `status` is OPEN or TERMINATED; `expires_at` is the
+    earliest of three clocks (idle/inactive/max_age), moved by activity (a frames
+    POST with progress, a download, a ping) not by presence; a session-admin
+    DELETE or a clock soft-terminates (freeze + keep files), then the two-phase
+    sweep deletes after `terminated_ttl`; a session-level `session.json` receipt.
+    (ADR 0013; the admin terminate/extension/review is Phase 7, ADR 0014.)
 
 ## Non-goals
 

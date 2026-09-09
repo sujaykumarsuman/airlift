@@ -48,7 +48,17 @@
   lists clients with evict/remove controls; the scan page has a password-join
   form. API.md/CLAUDE.md + ADR 0017. Landed in three commits; Go gates green
   under `-race`, web tsc/eslint/vitest green.
-- **Next**: lifecycle (6.6), web lifecycle UI (6.7).
+- **6.6 session lifecycle** (done, ADR 0013): `status` OPEN/TERMINATED; three
+  clocks (idle/inactive/max_age, earliest-wins) replacing the single inactive
+  TTL; the activity-vs-presence model + `POST …/ping` (rate_ping); a session-admin
+  `DELETE` and any clock soft-terminate (freeze frames/ping/patch/beam-removal
+  with 409, keep files), then the two-phase `Sweep` deletes after
+  `terminated_ttl`; `event: terminated`; a session-level `session.json` receipt
+  (atomic, no secrets). Web `types.ts` gained `status`/`terminated`; the
+  terminated-page UX + ping emission are 6.7. API.md/CLAUDE.md + ADR 0013. Go
+  gates green under `-race`, web green. Extension/review/admin-terminate deferred
+  to Phase 7.
+- **Next**: web lifecycle UI (6.7), then Phase 7 admin.
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
@@ -84,13 +94,14 @@
 
 ## Next
 
-- 6.6 lifecycle (the `status` machine `OPEN/TERMINATING/TERMINATED/
-  PENDING_REVIEW/REJECTED` + three clocks `idle_ttl`/`inactive_ttl`/`max_age` +
-  the activity model + `POST …/ping` + terminate/extend/review/reopen; the
-  session-level `session.json` with clients and lifecycle events; directory
-  cleanup tied to `TERMINATED`/`REJECTED`), 6.7 web lifecycle UI. ADR 0013. The
-  airlift-admin-only per-session `max_age` override needs the admin tier, so it
-  waits for Phase 7.
+- 6.7 web lifecycle UI: the terminated page (who ended it, why, the countdown to
+  `cleanup_at`), the clients list, `saved_path` display, and browser ping
+  emission gated on visibility + within 5 min of pointer/key/touch input.
+- Phase 7 admin (ADR 0014): `/admin` + `/api/admin/*` + `admin_token`; the
+  airlift-admin terminate with the `warning_ttl` countdown + `TERMINATING` +
+  cancel; the extension request + `PENDING_REVIEW` + review (accept→reopen /
+  reject) + `REJECTED`; the airlift-admin-only per-session `max_age` override;
+  activation of `warning_ttl`/`review_ttl`/`rate_extension`/`rate_admin`.
 
 ## Open questions
 

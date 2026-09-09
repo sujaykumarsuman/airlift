@@ -135,26 +135,120 @@ func TestTooManySessions(t *testing.T) {
 	}
 }
 
-func TestSweepAndTouch(t *testing.T) {
-	st, c := newStore(t, time.Hour, 32)
-	old, _ := st.Create()
+func TestSweepTerminatesThenDeletes(t *testing.T) {
+	st, c := newStore(t, time.Hour, 32) // idle = inactive = terminated = 1h, max_age off
+	s, _ := st.Create()                 // no stream → the idle clock runs from creation
+	// Before the idle deadline: kept, still OPEN.
 	c.t = c.t.Add(30 * time.Minute)
-	fresh, _ := st.Create()
-	c.t = c.t.Add(31 * time.Minute) // old is 61 min, fresh 31 min
-	fresh.Touch()
-	if ids := st.Sweep(c.t); len(ids) != 1 || ids[0] != old.ID {
-		t.Fatalf("swept %v", ids)
+	if ids := st.Sweep(c.t); len(ids) != 0 || s.Status() != StatusOpen {
+		t.Fatalf("swept early: %v %s", ids, s.Status())
 	}
-	if !old.Closed() || fresh.Closed() {
-		t.Fatal("closed flags")
-	}
-	c.t = c.t.Add(59 * time.Minute)
+	// Past the idle deadline: TERMINATED (not deleted, not closed), reason idle_ttl.
+	c.t = c.t.Add(31 * time.Minute) // t0+61m > t0+60m
 	if ids := st.Sweep(c.t); len(ids) != 0 {
-		t.Fatalf("touched session swept: %v", ids)
+		t.Fatalf("terminate should not delete: %v", ids)
 	}
-	c.t = c.t.Add(2 * time.Minute)
-	if ids := st.Sweep(c.t); len(ids) != 1 {
-		t.Fatalf("expected fresh to expire, got %v", ids)
+	if s.Status() != StatusTerminated || s.Closed() {
+		t.Fatalf("expected TERMINATED not closed, got %s closed=%v", s.Status(), s.Closed())
+	}
+	if term := s.Terminated(); term == nil || term.By != "system" || term.Reason != "idle_ttl" {
+		t.Fatalf("termination %+v", s.Terminated())
+	}
+	// Before cleanup_at (t0+61m + 1h = t0+121m): kept.
+	c.t = c.t.Add(59 * time.Minute) // t0+120m
+	if ids := st.Sweep(c.t); len(ids) != 0 {
+		t.Fatalf("deleted before cleanup: %v", ids)
+	}
+	// Past cleanup_at: deleted and closed.
+	c.t = c.t.Add(2 * time.Minute) // t0+122m
+	if ids := st.Sweep(c.t); len(ids) != 1 || ids[0] != s.ID {
+		t.Fatalf("expected delete, got %v", ids)
+	}
+	if !s.Closed() || st.Len() != 0 {
+		t.Fatal("not deleted")
+	}
+}
+
+// TestLifecycleClocks exercises the earliest-of-three deadline and activity.
+func TestLifecycleClocks(t *testing.T) {
+	// idle 10m, inactive 30m, no max_age, terminated 1h.
+	mk := func() (*Store, *clock, *Session) {
+		c := &clock{t: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
+		st := NewStore(time.Hour, 32)
+		st.now = c.now
+		st.SetLifecycle(10*time.Minute, 30*time.Minute, 0, time.Hour)
+		s, _ := st.CreateWith(CreateParams{})
+		return st, c, s
+	}
+	// (a) No stream → idle clock from creation.
+	st, c, s := mk()
+	if got := s.ExpiresAt(); !got.Equal(c.t.Add(10 * time.Minute)) {
+		t.Fatalf("idle deadline %v", got)
+	}
+	c.t = c.t.Add(10 * time.Minute)
+	if st.Sweep(c.t); s.Status() != StatusTerminated || s.Terminated().Reason != "idle_ttl" {
+		t.Fatalf("idle terminate %s %+v", s.Status(), s.Terminated())
+	}
+	// (b) A connected stream switches to the inactive clock; activity resets it.
+	st, c, s = mk()
+	sub := s.Subscribe(nil, RoleViewer)
+	if got := s.ExpiresAt(); !got.Equal(s.lastActivity.Add(30 * time.Minute)) {
+		t.Fatalf("inactive deadline %v", got)
+	}
+	c.t = c.t.Add(20 * time.Minute)
+	s.MarkActivity(nil) // resets inactive to now+30m
+	c.t = c.t.Add(20 * time.Minute)
+	if st.Sweep(c.t); s.Status() != StatusOpen { // 40m elapsed but activity at +20m
+		t.Fatalf("activity did not reset inactive: %s", s.Status())
+	}
+	c.t = c.t.Add(11 * time.Minute) // now 31m since the last activity
+	if st.Sweep(c.t); s.Status() != StatusTerminated || s.Terminated().Reason != "inactive_ttl" {
+		t.Fatalf("inactive terminate %s %+v", s.Status(), s.Terminated())
+	}
+	s.Unsubscribe(sub)
+	// (c) max_age caps an actively-fed connected session.
+	c2 := &clock{t: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
+	st2 := NewStore(time.Hour, 32)
+	st2.now = c2.now
+	st2.SetLifecycle(10*time.Minute, 30*time.Minute, 5*time.Minute, time.Hour)
+	s2, _ := st2.CreateWith(CreateParams{})
+	s2.Subscribe(nil, RoleViewer)
+	for i := 0; i < 6; i++ { // keep it active every minute
+		c2.t = c2.t.Add(time.Minute)
+		s2.MarkActivity(nil)
+		st2.Sweep(c2.t)
+	}
+	if s2.Status() != StatusTerminated || s2.Terminated().Reason != "max_age" {
+		t.Fatalf("max_age terminate %s %+v", s2.Status(), s2.Terminated())
+	}
+}
+
+// TestTerminateFreezes: a TERMINATED session refuses ingest but still serves.
+func TestTerminateFreezes(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	d := vectors(t)
+	s.Ingest(d.Frames)
+	b := beamOf(s, d.SenderSession)
+	s.FinishBeam(b, Outcome{Downloads: map[string]Download{"raw": {Name: "x", Src: MemBlob([]byte("x"))}}})
+	if !s.Terminate("session admin", "done") {
+		t.Fatal("terminate")
+	}
+	if s.Terminate("session admin", "again") {
+		t.Fatal("second terminate should be a no-op")
+	}
+	if r := s.Ingest(vectors(t).Frames); r.Accepted != 0 || r.Bad != 0 {
+		t.Fatalf("ingest after terminate: %+v", r)
+	}
+	if _, ok := s.BeamDownload(d.SenderSession, "raw"); !ok {
+		t.Fatal("READY download lost after terminate")
+	}
+	snap := s.Snapshot()
+	if snap.Status != StatusTerminated || snap.Terminated == nil || snap.Terminated.By != "session admin" {
+		t.Fatalf("snapshot %+v", snap)
+	}
+	if !snap.ExpiresAt.Equal(snap.Terminated.CleanupAt) {
+		t.Fatal("expires_at should be cleanup_at once terminated")
 	}
 }
 

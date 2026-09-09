@@ -113,14 +113,6 @@ func (s *Session) Evicted(addr string) bool {
 	return s.evicted[addr]
 }
 
-// MarkActive records a client as just seen (coarse; 6.6 refines the activity
-// model that drives the clocks).
-func (s *Session) MarkActive(c *Client) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c.lastActive = s.now()
-}
-
 // Label is the session's operator-set label.
 func (s *Session) Label() string {
 	s.mu.Lock()

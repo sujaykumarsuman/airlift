@@ -42,12 +42,22 @@ export interface ClientSummary {
   last_active: string;
 }
 
-/** A place: identity, relay count, the beams read into it and its clients. */
+/** How and when a session was terminated (ADR 0013). */
+export interface Termination {
+  by: string;
+  reason: string;
+  at: string;
+  cleanup_at: string;
+}
+
+/** A place: identity, lifecycle status, relay count, beams and clients. */
 export interface Snapshot {
   sid: string;
+  status: "OPEN" | "TERMINATED";
   relays: number;
   beams: Beam[];
   clients: ClientSummary[];
+  terminated: Termination | null;
   expires_at: string;
 }
 

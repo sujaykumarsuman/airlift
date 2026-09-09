@@ -147,7 +147,6 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
-	s.Touch()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"client_id":     c.ID,
 		"name":          c.Name,
@@ -200,7 +199,6 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
-	s.Touch()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":     s.Token,
 		"client_id": c.ID,
@@ -211,6 +209,10 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 // patchSession changes session settings; presently only the join password
 // (session admin). A null password field is a 400, an empty string clears it.
 func (srv *Server) patchSession(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+	if s.Status() != session.StatusOpen {
+		writeError(w, http.StatusConflict, "session is not open")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
 	var req struct {
 		Password *string `json:"password"`
@@ -250,6 +252,10 @@ func (srv *Server) evictClient(w http.ResponseWriter, r *http.Request, s *sessio
 // deleteBeam removes a beam from the place and reclaims its on-disk directory
 // (session admin).
 func (srv *Server) deleteBeam(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+	if s.Status() != session.StatusOpen {
+		writeError(w, http.StatusConflict, "session is not open")
+		return
+	}
 	sender, err := strconv.ParseUint(r.PathValue("bid"), 16, 32)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "malformed beam id")

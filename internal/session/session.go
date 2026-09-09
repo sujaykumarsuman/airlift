@@ -154,11 +154,22 @@ type Session struct {
 	Token     string
 	CreatedAt time.Time
 
-	mu        sync.Mutex
-	now       func() time.Time
-	ttl       time.Duration
-	expiresAt time.Time
-	closed    bool
+	mu     sync.Mutex
+	now    func() time.Time
+	closed bool
+
+	// Lifecycle (6.6, ADR 0013). While OPEN the expiry is the earliest of three
+	// clocks (idle/inactive/max_age); a TERMINATED session freezes the transfer,
+	// keeps its files, and is deleted terminated_ttl later.
+	status        Status
+	term          *Termination     // nil while OPEN
+	events        []LifecycleEvent // the lifecycle log, written into session.json
+	lastActivity  time.Time        // moved only by real activity while OPEN
+	lastEmptyAt   time.Time        // when presence last dropped to zero (idle origin)
+	idleTTL       time.Duration    // after the last client stream leaves
+	inactiveTTL   time.Duration    // after the last activity while clients are connected
+	maxAge        time.Duration    // overall from CreatedAt; 0 disables
+	terminatedTTL time.Duration    // how long a TERMINATED session's files are kept
 
 	maxBeams int
 	maxGz    int64 // per-beam gzip ceiling; 0 disables the check
@@ -184,11 +195,36 @@ type Session struct {
 
 	label        string
 	joinersAdmin bool
-	idleTTL      time.Duration // stored and clamped; the clocks that read it are 6.6
-	inactiveTTL  time.Duration // stored and clamped; the clocks that read it are 6.6
 
 	salt     []byte // join-password salt; nil when no password
 	passHash []byte // sha256(salt || password); nil when no password
+}
+
+// Status is the session's lifecycle state. Phase 7 (ADR 0014) adds the reserved
+// TERMINATING / PENDING_REVIEW / REJECTED states; they are not declared yet.
+type Status string
+
+// Lifecycle states reachable in 6.6.
+const (
+	StatusOpen       Status = "OPEN"
+	StatusTerminated Status = "TERMINATED"
+)
+
+// Termination records how and when a session was terminated (ADR 0013).
+type Termination struct {
+	By        string    `json:"by"`     // "session admin", "system"; "airlift admin" joins in Phase 7
+	Reason    string    `json:"reason"` // "terminated by session admin", "idle_ttl", "inactive_ttl", "max_age"
+	At        time.Time `json:"at"`
+	CleanupAt time.Time `json:"cleanup_at"` // when the session and its files are deleted
+}
+
+// LifecycleEvent is one entry of the session's append-only lifecycle log.
+type LifecycleEvent struct {
+	At     time.Time `json:"at"`
+	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminated
+	By     string    `json:"by,omitempty"`
+	Reason string    `json:"reason,omitempty"`
+	BID    string    `json:"bid,omitempty"`
 }
 
 // TokenMatches compares in constant time.
@@ -196,23 +232,148 @@ func (s *Session) TokenMatches(token string) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.Token)) == 1
 }
 
-// Touch refreshes the TTL.
-func (s *Session) Touch() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.expiresAt = s.now().Add(s.ttl)
+// deadlineLocked is when the OPEN session next expires: the earliest of the
+// three clocks (ADR 0013). Idle counts only while no client stream is connected
+// (from the later of the last departure and the last activity, so a stream-less
+// but actively-fed relay is not reaped); inactive counts while streams are
+// connected; max_age counts from creation. A zero limit disables that clock; a
+// zero result means no clock applies and the session never expires.
+func (s *Session) deadlineLocked() (time.Time, string) {
+	var best time.Time
+	var why string
+	consider := func(t time.Time, w string) {
+		if t.IsZero() {
+			return
+		}
+		if best.IsZero() || t.Before(best) {
+			best, why = t, w
+		}
+	}
+	if len(s.subs) == 0 {
+		if s.idleTTL > 0 {
+			base := s.lastEmptyAt
+			if s.lastActivity.After(base) {
+				base = s.lastActivity
+			}
+			consider(base.Add(s.idleTTL), "idle_ttl")
+		}
+	} else if s.inactiveTTL > 0 {
+		consider(s.lastActivity.Add(s.inactiveTTL), "inactive_ttl")
+	}
+	if s.maxAge > 0 {
+		consider(s.CreatedAt.Add(s.maxAge), "max_age")
+	}
+	return best, why
 }
 
-// ExpiresAt is the current expiry.
+// bindingDeadlineLocked is the instant the snapshot reports as expires_at: the
+// OPEN deadline, or a TERMINATED session's cleanup time.
+func (s *Session) bindingDeadlineLocked() time.Time {
+	if s.status == StatusTerminated {
+		if s.term != nil {
+			return s.term.CleanupAt
+		}
+		return time.Time{}
+	}
+	d, _ := s.deadlineLocked()
+	return d
+}
+
+// ExpiresAt is the instant the session next expires (its binding deadline).
 func (s *Session) ExpiresAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.expiresAt
+	return s.bindingDeadlineLocked()
 }
 
-// Expired reports whether the session is past its TTL at now.
-func (s *Session) Expired(now time.Time) bool {
-	return !now.Before(s.ExpiresAt())
+// Status is the session's lifecycle state.
+func (s *Session) Status() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status
+}
+
+// Terminated returns a copy of the termination record, or nil while OPEN.
+func (s *Session) Terminated() *Termination {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.term == nil {
+		return nil
+	}
+	t := *s.term
+	return &t
+}
+
+// LifecycleLog returns a copy of the lifecycle event log.
+func (s *Session) LifecycleLog() []LifecycleEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]LifecycleEvent(nil), s.events...)
+}
+
+// MarkActivity records real activity (a frames POST with progress, a download,
+// or a ping) while OPEN, resetting the inactive clock. Presence alone is not
+// activity, so a reconnecting stream does not call this.
+func (s *Session) MarkActivity(c *Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != StatusOpen {
+		return
+	}
+	now := s.now()
+	s.lastActivity = now
+	if c != nil {
+		c.lastActive = now
+	}
+}
+
+// terminateLocked moves an OPEN session to TERMINATED with a reason and starts
+// its cleanup clock, waking its streams. It does NOT set the closed flag — only
+// the final cleanup delete does — so a beam finishing in the terminated window
+// still persists and ADR 0016's orphan-reclaim reasoning holds.
+func (s *Session) terminateLocked(now time.Time, by, reason string) bool {
+	if s.status != StatusOpen {
+		return false
+	}
+	s.status = StatusTerminated
+	s.term = &Termination{By: by, Reason: reason, At: now, CleanupAt: now.Add(s.terminatedTTL)}
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "terminated", By: by, Reason: reason})
+	s.notifyLocked()
+	return true
+}
+
+// Terminate soft-terminates the session; returns false if it was not OPEN.
+func (s *Session) Terminate(by, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.terminateLocked(s.now(), by, reason)
+}
+
+// sweepResult tells the store what the sweep should do with a session.
+type sweepResult int
+
+const (
+	sweepKeep       sweepResult = iota // no change
+	sweepTerminated                    // OPEN → TERMINATED this sweep (still in the store)
+	sweepExpired                       // TERMINATED past cleanup → delete now
+)
+
+// sweepStep advances one session's lifecycle at now, under its own lock.
+func (s *Session) sweepStep(now time.Time) sweepResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch s.status {
+	case StatusOpen:
+		if d, why := s.deadlineLocked(); !d.IsZero() && !now.Before(d) {
+			s.terminateLocked(now, "system", why)
+			return sweepTerminated
+		}
+	case StatusTerminated:
+		if s.term != nil && !now.Before(s.term.CleanupAt) {
+			return sweepExpired
+		}
+	}
+	return sweepKeep
 }
 
 // Closed reports whether the place was deleted or swept.
@@ -300,11 +461,15 @@ func (s *Session) Subscribe(client *Client, role Role) *Subscriber {
 	return sub
 }
 
-// Unsubscribe removes a subscriber.
+// Unsubscribe removes a subscriber. When it was the last stream, the idle clock
+// starts running from now.
 func (s *Session) Unsubscribe(sub *Subscriber) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.subs, sub)
+	if len(s.subs) == 0 {
+		s.lastEmptyAt = s.now()
+	}
 	s.notifyLocked()
 }
 
@@ -345,6 +510,10 @@ type IngestResult struct {
 // before their MANIFEST. Every beam decodes, verifies and completes on its own.
 func (s *Session) Ingest(texts []string) IngestResult {
 	s.mu.Lock()
+	if s.status != StatusOpen { // a TERMINATED session's transfer is frozen
+		s.mu.Unlock()
+		return IngestResult{}
+	}
 	now := s.now()
 	var r IngestResult
 	var completed []*Beam
@@ -369,8 +538,8 @@ func (s *Session) Ingest(texts []string) IngestResult {
 		}
 	}
 	// Only real progress is worth a snapshot push: an all-bad noise POST changes
-	// nothing, so it wakes no subscribers. The TTL is refreshed by auth.Touch on
-	// every authenticated call (docs/API.md), not here.
+	// nothing, so it wakes no subscribers. The frames handler records the activity
+	// (the inactive clock), not Ingest.
 	if r.Accepted+r.Dup > 0 {
 		s.notifyLocked()
 	}
@@ -618,8 +787,10 @@ func (s *Session) FinishBeam(b *Beam, o Outcome) {
 	}
 	if o.Err != "" {
 		b.state = StateFailed
+		s.events = append(s.events, LifecycleEvent{At: b.finishedAt, Event: "beam_failed", BID: b.BID()})
 	} else {
 		b.state = StateReady
+		s.events = append(s.events, LifecycleEvent{At: b.finishedAt, Event: "beam_ready", BID: b.BID()})
 	}
 	s.notifyLocked()
 }
@@ -652,11 +823,13 @@ func (s *Session) BeamDownload(sender uint32, as string) (Download, bool) {
 // (docs/API.md): the beams in arrival order, each with its own progress and
 // verdicts.
 type Snapshot struct {
-	SID       string           `json:"sid"`
-	Relays    int              `json:"relays"`
-	Beams     []BeamSnapshot   `json:"beams"`
-	Clients   []ClientSnapshot `json:"clients"`
-	ExpiresAt time.Time        `json:"expires_at"`
+	SID        string           `json:"sid"`
+	Status     Status           `json:"status"`
+	Relays     int              `json:"relays"`
+	Beams      []BeamSnapshot   `json:"beams"`
+	Clients    []ClientSnapshot `json:"clients"`
+	Terminated *Termination     `json:"terminated"` // nil while OPEN
+	ExpiresAt  time.Time        `json:"expires_at"` // the earliest applicable deadline
 }
 
 // BeamSnapshot is one beam's state within a place.
@@ -683,7 +856,11 @@ func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	snap := Snapshot{SID: s.ID, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.expiresAt}
+	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.bindingDeadlineLocked()}
+	if s.term != nil {
+		t := *s.term
+		snap.Terminated = &t
+	}
 	// One pass over the streams: count relays and fold each client's open
 	// streams into its connected flag and role set.
 	connected := map[string]bool{}
