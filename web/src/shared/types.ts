@@ -32,11 +32,22 @@ export interface Beam {
   finished_at?: string | null;
 }
 
-/** A place: identity, relay count and the list of beams read into it. */
+/** One participant of a place, as it appears in the snapshot. */
+export interface ClientSummary {
+  client_id: string;
+  name: string;
+  roles: string[];
+  session_admin: boolean;
+  connected: boolean;
+  last_active: string;
+}
+
+/** A place: identity, relay count, the beams read into it and its clients. */
 export interface Snapshot {
   sid: string;
   relays: number;
   beams: Beam[];
+  clients: ClientSummary[];
   expires_at: string;
 }
 
@@ -59,6 +70,33 @@ export interface Created {
   token: string;
   join_url: string;
   expires_at: string;
+  client_id: string;
+  name: string;
+}
+
+/** Options for POST /api/sessions; every field is optional. */
+export interface CreateOptions {
+  label?: string;
+  password?: string;
+  joiners_admin?: boolean;
+  max_gz_bytes?: number;
+  idle_ttl?: number; // seconds
+  inactive_ttl?: number; // seconds
+}
+
+/** The response to registering a client (POST .../clients). */
+export interface Client {
+  client_id: string;
+  name: string;
+  session_admin: boolean;
+  roles: string[];
+}
+
+/** The response to a password join (POST .../join). */
+export interface Joined {
+  token: string;
+  client_id: string;
+  name: string;
 }
 
 export interface IngestResult {

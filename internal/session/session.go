@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/proto"
@@ -105,9 +106,13 @@ type heldKey struct {
 }
 
 // Subscriber receives a (coalesced) signal on C whenever the snapshot changes.
+// It carries the client and stream role behind the connection so the snapshot
+// can report presence and per-client roles.
 type Subscriber struct {
-	C     chan struct{}
-	relay bool
+	C       chan struct{}
+	role    Role
+	client  *Client     // nil for an anonymous stream (unit tests)
+	evicted atomic.Bool // set when the client's address is evicted (6.5)
 }
 
 // Beam is one named payload accumulating in a session, identified by the
@@ -163,6 +168,20 @@ type Session struct {
 
 	subs       map[*Subscriber]struct{}
 	onComplete func(*Session, *Beam)
+
+	// Access layer (6.5, ADR 0017): one client per address, a stable listing
+	// order, the names in use for uniqueness, and the addresses evicted for the
+	// session's life.
+	clients     map[string]*Client
+	byAddr      map[string]*Client
+	clientOrder []string
+	usedNames   map[string]bool
+	evicted     map[string]bool
+
+	label        string
+	joinersAdmin bool
+	idleTTL      time.Duration // stored and clamped; the clocks that read it are 6.6
+	inactiveTTL  time.Duration // stored and clamped; the clocks that read it are 6.6
 }
 
 // TokenMatches compares in constant time.
@@ -207,16 +226,19 @@ func (s *Session) BeamState(sender uint32) (State, bool) {
 	return b.state, true
 }
 
-// Subscribe registers for change signals. relay marks a scanner, which the
-// snapshot counts under `relays`.
-func (s *Session) Subscribe(relay bool) *Subscriber {
-	sub := &Subscriber{C: make(chan struct{}, 1), relay: relay}
+// Subscribe registers a stream for change signals. client is the registered
+// client behind it (nil for an anonymous unit-test stream); role is the stream's
+// role, which the snapshot counts under `relays` and folds into the client's
+// roles. Presence and roles show in every snapshot, so any (un)subscribe is a
+// change — notify unconditionally.
+func (s *Session) Subscribe(client *Client, role Role) *Subscriber {
+	sub := &Subscriber{C: make(chan struct{}, 1), role: role, client: client}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subs[sub] = struct{}{}
-	if relay {
-		s.notifyLocked()
-	}
+	// Wake the OTHER streams about the new presence; the new stream gets its
+	// first snapshot from the handler's initial send, not a self-signal.
+	s.notifyOthersLocked(sub)
 	return sub
 }
 
@@ -225,13 +247,17 @@ func (s *Session) Unsubscribe(sub *Subscriber) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.subs, sub)
-	if sub.relay {
-		s.notifyLocked()
-	}
+	s.notifyLocked()
 }
 
-func (s *Session) notifyLocked() {
+func (s *Session) notifyLocked() { s.notifyOthersLocked(nil) }
+
+// notifyOthersLocked signals every subscriber except `except` (nil signals all).
+func (s *Session) notifyOthersLocked(except *Subscriber) {
 	for sub := range s.subs {
+		if sub == except {
+			continue
+		}
 		select {
 		case sub.C <- struct{}{}:
 		default:
@@ -554,10 +580,11 @@ func (s *Session) BeamDownload(sender uint32, as string) (Download, bool) {
 // (docs/API.md): the beams in arrival order, each with its own progress and
 // verdicts.
 type Snapshot struct {
-	SID       string         `json:"sid"`
-	Relays    int            `json:"relays"`
-	Beams     []BeamSnapshot `json:"beams"`
-	ExpiresAt time.Time      `json:"expires_at"`
+	SID       string           `json:"sid"`
+	Relays    int              `json:"relays"`
+	Beams     []BeamSnapshot   `json:"beams"`
+	Clients   []ClientSnapshot `json:"clients"`
+	ExpiresAt time.Time        `json:"expires_at"`
 }
 
 // BeamSnapshot is one beam's state within a place.
@@ -584,11 +611,38 @@ func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	snap := Snapshot{SID: s.ID, Beams: []BeamSnapshot{}, ExpiresAt: s.expiresAt}
+	snap := Snapshot{SID: s.ID, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.expiresAt}
+	// One pass over the streams: count relays and fold each client's open
+	// streams into its connected flag and role set.
+	connected := map[string]bool{}
+	roleSet := map[string]map[Role]bool{}
 	for sub := range s.subs {
-		if sub.relay {
+		if sub.role == RoleRelay {
 			snap.Relays++
 		}
+		if sub.client != nil {
+			connected[sub.client.ID] = true
+			if roleSet[sub.client.ID] == nil {
+				roleSet[sub.client.ID] = map[Role]bool{}
+			}
+			roleSet[sub.client.ID][sub.role] = true
+		}
+	}
+	for _, id := range s.clientOrder {
+		c := s.clients[id]
+		if c == nil {
+			continue
+		}
+		roles := []string{}
+		for _, role := range []Role{RoleRelay, RoleViewer} {
+			if roleSet[id][role] {
+				roles = append(roles, string(role))
+			}
+		}
+		snap.Clients = append(snap.Clients, ClientSnapshot{
+			ID: c.ID, Name: c.Name, Roles: roles, SessionAdmin: c.SessionAdmin,
+			Connected: connected[id], LastActive: c.lastActive,
+		})
 	}
 	for _, sender := range s.order {
 		b := s.beams[sender]

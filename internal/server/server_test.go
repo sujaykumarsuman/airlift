@@ -69,6 +69,8 @@ type created struct {
 	Token     string    `json:"token"`
 	JoinURL   string    `json:"join_url"`
 	ExpiresAt time.Time `json:"expires_at"`
+	ClientID  string    `json:"client_id"`
+	Name      string    `json:"name"`
 }
 
 func (h *harness) create(t *testing.T) created {
@@ -89,11 +91,28 @@ func (h *harness) create(t *testing.T) created {
 	return c
 }
 
-func (h *harness) do(t *testing.T, method, path, token string, body []byte) (*http.Response, []byte) {
+// do issues a request with the session token and (when non-empty) the
+// X-Airlift-Client id. Client-tier calls pass the creator's client id; public
+// routes pass "".
+func (h *harness) do(t *testing.T, method, path, token, clientID string, body []byte) (*http.Response, []byte) {
+	t.Helper()
+	return h.doXFF(t, method, path, token, clientID, "", body)
+}
+
+// doXFF is do with an X-Forwarded-For, so a test can present a distinct client
+// address (the default harness trusts loopback and ignores XFF; the multi-client
+// tests set TrustedProxies).
+func (h *harness) doXFF(t *testing.T, method, path, token, clientID, xff string, body []byte) (*http.Response, []byte) {
 	t.Helper()
 	req, _ := http.NewRequest(method, h.ts.URL+path, bytes.NewReader(body))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if clientID != "" {
+		req.Header.Set("X-Airlift-Client", clientID)
+	}
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
 	}
 	resp, err := h.ts.Client().Do(req)
 	if err != nil {
@@ -104,9 +123,26 @@ func (h *harness) do(t *testing.T, method, path, token string, body []byte) (*ht
 	return resp, data
 }
 
+// registerAs registers a fresh client for the session from address xff (a viewer)
+// and returns its client id.
+func (h *harness) registerAs(t *testing.T, c created, xff string) string {
+	t.Helper()
+	resp, body := h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/clients", c.Token, "", xff, []byte(`{"role":"viewer"}`))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register %s: %s %s", xff, resp.Status, body)
+	}
+	var out struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.ClientID
+}
+
 func (h *harness) snapshot(t *testing.T, c created) session.Snapshot {
 	t.Helper()
-	resp, body := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, nil)
+	resp, body := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("snapshot: %s %s", resp.Status, body)
 	}
@@ -131,7 +167,7 @@ func (h *harness) oneBeam(t *testing.T, c created) session.BeamSnapshot {
 // download fetches one beam's result by bid and `as` key.
 func (h *harness) download(t *testing.T, c created, bid, as string) (*http.Response, []byte) {
 	t.Helper()
-	return h.do(t, "GET", "/api/sessions/"+c.SID+"/download?beam="+bid+"&as="+as, c.Token, nil)
+	return h.do(t, "GET", "/api/sessions/"+c.SID+"/download?beam="+bid+"&as="+as, c.Token, c.ClientID, nil)
 }
 
 func (h *harness) replay(t *testing.T, c created, d *beam.Dump, opts replay.Options) *replay.Report {
@@ -308,7 +344,7 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 		t.Fatalf("file download: %s", resp.Status)
 	}
 	// late frames after READY are harmless
-	resp, body = h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(`{"frames":["`+d.Frames[1]+`"]}`))
+	resp, body = h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(`{"frames":["`+d.Frames[1]+`"]}`))
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"dup":1`) {
 		t.Fatalf("late frame: %s %s", resp.Status, body)
 	}
@@ -415,25 +451,41 @@ func TestBundleWithBadFileFails(t *testing.T) {
 }
 
 func TestAuth(t *testing.T) {
-	h := start(t, nil)
-	c := h.create(t)
+	h := start(t, func(o *Options) { o.TrustedProxies = ParseTrustedProxies([]string{"127.0.0.1", "::1"}) })
+	c := h.create(t) // the creator registers from loopback (no XFF)
 	paths := []struct{ method, path string }{
 		{"GET", "/api/sessions/" + c.SID},
 		{"GET", "/api/sessions/" + c.SID + "/events"},
 		{"POST", "/api/sessions/" + c.SID + "/frames"},
-		{"GET", "/api/sessions/" + c.SID + "/download?as=raw"},
+		{"GET", "/api/sessions/" + c.SID + "/download?beam=00000001&as=raw"},
 		{"DELETE", "/api/sessions/" + c.SID},
 	}
 	for _, p := range paths {
+		// A missing or wrong token is 401 whatever the client id (the token is
+		// checked first).
 		for _, token := range []string{"", "wrong", c.Token[:21] + "x"} {
-			if resp, _ := h.do(t, p.method, p.path, token, []byte(`{"frames":[]}`)); resp.StatusCode != http.StatusUnauthorized {
+			if resp, _ := h.do(t, p.method, p.path, token, c.ClientID, []byte(`{"frames":[]}`)); resp.StatusCode != http.StatusUnauthorized {
 				t.Errorf("%s %s token %q: %s", p.method, p.path, token, resp.Status)
 			}
 		}
+		// A valid token but no registered client → 401 (register first).
+		if resp, _ := h.do(t, p.method, p.path, c.Token, "", []byte(`{"frames":[]}`)); resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s no client: %s", p.method, p.path, resp.Status)
+		}
+		// Unknown session → 404.
 		other := strings.Replace(p.path, c.SID, "0000000000000000", 1)
-		if resp, _ := h.do(t, p.method, other, c.Token, []byte(`{"frames":[]}`)); resp.StatusCode != http.StatusNotFound {
+		if resp, _ := h.do(t, p.method, other, c.Token, c.ClientID, []byte(`{"frames":[]}`)); resp.StatusCode != http.StatusNotFound {
 			t.Errorf("%s %s: %s", p.method, other, resp.Status)
 		}
+	}
+	// A client id presented from a different address → 403.
+	if resp, _ := h.doXFF(t, "GET", "/api/sessions/"+c.SID, c.Token, c.ClientID, "9.9.9.9", nil); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("foreign address: %s", resp.Status)
+	}
+	// A plain (non-admin) client cannot use a session-admin route.
+	plain := h.registerAs(t, c, "8.8.8.8")
+	if resp, _ := h.doXFF(t, "DELETE", "/api/sessions/"+c.SID, c.Token, plain, "8.8.8.8", nil); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("plain client delete: %s", resp.Status)
 	}
 	if len(h.snapshot(t, c).Beams) != 0 {
 		t.Fatal("session damaged by unauthorised calls")
@@ -447,21 +499,21 @@ func TestLimits(t *testing.T) {
 		o.Store = session.NewStore(time.Hour, 1)
 	})
 	c := h.create(t)
-	if resp, body := h.do(t, "POST", "/api/sessions", "", nil); resp.StatusCode != http.StatusTooManyRequests {
+	if resp, body := h.do(t, "POST", "/api/sessions", "", "", nil); resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("33rd session: %s %s", resp.Status, body)
 	}
 	four := `{"frames":["A","B","C","D"]}`
-	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(four)); resp.StatusCode != http.StatusRequestEntityTooLarge {
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(four)); resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("4 frames: %s", resp.Status)
 	}
 	big := `{"frames":["` + strings.Repeat("A", 300) + `"]}`
-	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(big)); resp.StatusCode != http.StatusRequestEntityTooLarge {
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(big)); resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("big body: %s", resp.Status)
 	}
-	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(`nope`)); resp.StatusCode != http.StatusBadRequest {
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(`nope`)); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad json: %s", resp.Status)
 	}
-	resp, body := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(`{"frames":["A","B"]}`))
+	resp, body := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(`{"frames":["A","B"]}`))
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"bad":2`) {
 		t.Fatalf("two garbage frames: %s %s", resp.Status, body)
 	}
@@ -501,6 +553,7 @@ func TestSSE(t *testing.T) {
 	open := func(role string) (*http.Response, *bufio.Reader) {
 		req, _ := http.NewRequest("GET", h.ts.URL+"/api/sessions/"+c.SID+"/events"+role, nil)
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("X-Airlift-Client", c.ClientID)
 		resp, err := h.ts.Client().Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -522,7 +575,7 @@ func TestSSE(t *testing.T) {
 	if _, snap := readEvent(t, vr); snap.Relays != 1 {
 		t.Fatalf("viewer not told about the relay: %+v", snap)
 	}
-	h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(`{"frames":["`+d.Frames[0]+`","`+d.Frames[1]+`"]}`))
+	h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(`{"frames":["`+d.Frames[0]+`","`+d.Frames[1]+`"]}`))
 	if _, snap := readEvent(t, vr); len(snap.Beams) != 1 || snap.Beams[0].State != session.StateReceiving || snap.Beams[0].Have != 1 || snap.Beams[0].Total != d.Manifest.Total() {
 		t.Fatalf("after frames: %+v", snap)
 	}
@@ -535,7 +588,7 @@ func TestSSE(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// Deleting the session ends the stream with a closed event.
-	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, nil); resp.StatusCode != http.StatusNoContent {
+	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete: %s", resp.Status)
 	}
 	for {
@@ -544,7 +597,7 @@ func TestSSE(t *testing.T) {
 			break
 		}
 	}
-	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, nil); resp.StatusCode != http.StatusNotFound {
+	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("after delete: %s", resp.Status)
 	}
 }
@@ -552,16 +605,16 @@ func TestSSE(t *testing.T) {
 func TestStaticAndInfo(t *testing.T) {
 	h := start(t, func(o *Options) { o.Version = "test-1"; o.Caps = Caps{Sessions: 4, MaxGzBytes: 64 << 20} })
 	for _, p := range []string{"/", "/s/abc"} {
-		resp, body := h.do(t, "GET", p, "", nil)
+		resp, body := h.do(t, "GET", p, "", "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(string(body), "airlift") {
 			t.Fatalf("%s: %s %q", p, resp.Status, body)
 		}
 	}
-	if resp, _ := h.do(t, "GET", "/nope", "", nil); resp.StatusCode != http.StatusNotFound {
+	if resp, _ := h.do(t, "GET", "/nope", "", "", nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown path: %s", resp.Status)
 	}
 	// /api/info is unauthenticated and advertises version, base path and caps.
-	resp, body := h.do(t, "GET", "/api/info", "", nil)
+	resp, body := h.do(t, "GET", "/api/info", "", "", nil)
 	var info struct {
 		Version      string         `json:"version"`
 		BasePath     string         `json:"base_path"`
@@ -587,22 +640,22 @@ func TestStaticAndInfo(t *testing.T) {
 	h2 := start(t, func(o *Options) { o.Web = web })
 	for p, want := range map[string]string{"/": "dash", "/s/xyz": "scan", "/assets/app.js": "console.log(1)",
 		"/sw.js": "self.x=1", "/manifest.webmanifest": "airlift", "/icons/icon-192.png": "PNG"} {
-		resp, body := h2.do(t, "GET", p, "", nil)
+		resp, body := h2.do(t, "GET", p, "", "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(string(body), want) {
 			t.Fatalf("%s: %s %q", p, resp.Status, body)
 		}
 	}
 	// The served pages carry a <base href> (base_path is "" here → "/").
-	if _, body := h2.do(t, "GET", "/", "", nil); !strings.Contains(string(body), `<base href="/">`) {
+	if _, body := h2.do(t, "GET", "/", "", "", nil); !strings.Contains(string(body), `<base href="/">`) {
 		t.Fatalf("no <base> in dashboard: %s", body)
 	}
-	if resp, _ := h2.do(t, "GET", "/manifest.webmanifest", "", nil); resp.Header.Get("Content-Type") != "application/manifest+json" || resp.Header.Get("Cache-Control") != "no-cache" {
+	if resp, _ := h2.do(t, "GET", "/manifest.webmanifest", "", "", nil); resp.Header.Get("Content-Type") != "application/manifest+json" || resp.Header.Get("Cache-Control") != "no-cache" {
 		t.Fatalf("manifest headers: %v", resp.Header)
 	}
-	if resp, _ := h2.do(t, "GET", "/sw.js", "", nil); !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/javascript") {
+	if resp, _ := h2.do(t, "GET", "/sw.js", "", "", nil); !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/javascript") {
 		t.Fatalf("sw.js content type %q", resp.Header.Get("Content-Type"))
 	}
-	if resp, _ := h.do(t, "GET", "/sw.js", "", nil); resp.StatusCode != http.StatusNotFound {
+	if resp, _ := h.do(t, "GET", "/sw.js", "", "", nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("sw.js without a build: %s", resp.Status)
 	}
 }
@@ -787,10 +840,10 @@ func TestTokensNeverLogged(t *testing.T) {
 		}
 	})
 	c := h.create(t)
-	h.do(t, "GET", "/api/sessions/"+c.SID, "wrong-"+c.Token, nil)
+	h.do(t, "GET", "/api/sessions/"+c.SID, "wrong-"+c.Token, "", nil)
 	h.replay(t, c, loadVectors(t), replay.Options{})
 	h.download(t, c, h.oneBeam(t, c).BID, "zip")
-	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, nil)
+	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(logs) < 3 {
@@ -814,6 +867,7 @@ func TestSessionExpiryClosesStreams(t *testing.T) {
 	c := h.create(t)
 	req, _ := http.NewRequest("GET", h.ts.URL+"/api/sessions/"+c.SID+"/events", nil)
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("X-Airlift-Client", c.ClientID)
 	resp, err := h.ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -833,7 +887,7 @@ func TestSessionExpiryClosesStreams(t *testing.T) {
 			t.Fatal("no closed event after expiry")
 		}
 	}
-	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, nil); resp.StatusCode != http.StatusNotFound {
+	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expired session still served: %s", resp.Status)
 	}
 	if h.store.Len() != 0 {
@@ -884,8 +938,22 @@ func TestServesUnderPathPrefix(t *testing.T) {
 	if !strings.HasPrefix(join, "http://proxy.example/airlift/s/"+s.ID+"#t=") {
 		t.Fatalf("join_url = %q", join)
 	}
+	// A headless session has no creator client; register one through the proxy,
+	// then post frames as a client — both must route through the stripped prefix.
+	reg, _ := http.NewRequest("POST", front.URL+prefix+"/api/sessions/"+s.ID+"/clients", strings.NewReader(`{"role":"relay"}`))
+	reg.Header.Set("Authorization", "Bearer "+s.Token)
+	rr, err := http.DefaultClient.Do(reg)
+	if err != nil || rr.StatusCode != 200 {
+		t.Fatalf("register through the stripping proxy: %v status %v", err, rr)
+	}
+	var client struct {
+		ClientID string `json:"client_id"`
+	}
+	json.NewDecoder(rr.Body).Decode(&client)
+	rr.Body.Close()
 	req, _ := http.NewRequest("POST", front.URL+prefix+"/api/sessions/"+s.ID+"/frames", strings.NewReader(`{"frames":[]}`))
 	req.Header.Set("Authorization", "Bearer "+s.Token)
+	req.Header.Set("X-Airlift-Client", client.ClientID)
 	r2, err := http.DefaultClient.Do(req)
 	if err != nil || r2.StatusCode != 200 {
 		t.Fatalf("frames through the stripping proxy: %v status %v", err, r2)
@@ -1126,7 +1194,7 @@ func TestDeleteRemovesSessionData(t *testing.T) {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("no session dir before delete: %v", err)
 	}
-	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, nil); resp.StatusCode != http.StatusNoContent {
+	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete: %s", resp.Status)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {

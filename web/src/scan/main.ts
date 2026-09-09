@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { eventsURL, postFrames } from "../shared/api";
+import { eventsURL, postFrames, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw } from "../shared/dom";
 import { subscribe, type SSEStatus } from "../shared/sse";
@@ -63,9 +63,11 @@ let message = "";
 let cameraLabel = "";
 let wakeLock: WakeLockSentinel | null = null;
 let torchOn = false;
+let clientID = "";
+let ownName = "";
 
 const relay = new Relay({
-  post: (frames) => postFrames(sid, token, frames),
+  post: (frames) => postFrames(sid, token, frames, clientID),
   onUpdate: (s) => {
     relayStats = s;
     render();
@@ -105,6 +107,7 @@ function render(): void {
       parts.push(`buffered ${relayStats.buffered}${relayStats.failures ? ` · retrying (${relayStats.lastError ?? "network"})` : ""}`);
     }
   }
+  if (ownName) parts.push(`you: ${ownName}`);
   if (snap && snap.beams.length > 1) parts.push(`${snap.beams.length} beams`);
   if (beam) parts.push(`beam ${beam.bid}`);
   if (connection !== "open") parts.push(`link: ${connection}`);
@@ -137,6 +140,7 @@ function subscribeProgress(as: "viewer" | "relay"): () => void {
         render();
       },
     },
+    { clientId: clientID },
   );
 }
 
@@ -226,9 +230,22 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
 }
 navigator.mediaDevices?.addEventListener?.("devicechange", () => void fillCameraList());
 
-stopEvents = subscribeProgress("viewer");
-render();
-void startCamera();
+// Register a client (so the client-tier routes admit us), then watch and scan.
+async function init(): Promise<void> {
+  try {
+    const c = await registerClient(sid, token, { role: "relay" });
+    clientID = c.client_id;
+    ownName = c.name;
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err);
+    render();
+    return;
+  }
+  stopEvents = subscribeProgress("viewer");
+  render();
+  void startCamera();
+}
+void init();
 
 // Hardware-free testing: inject decoded strings as if the camera saw them.
 (window as unknown as { airliftScan: unknown }).airliftScan = {

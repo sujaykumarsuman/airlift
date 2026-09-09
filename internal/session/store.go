@@ -61,8 +61,22 @@ func (st *Store) SetEvictHook(fn func(string)) {
 	st.onEvict = fn
 }
 
-// Create mints a session with a random id and 128-bit token.
-func (st *Store) Create() (*Session, error) {
+// CreateParams are the options a session is created with (ADR 0017). The zero
+// value reproduces the old open, unlabelled, password-less session.
+type CreateParams struct {
+	Label        string
+	JoinersAdmin bool
+	MaxGz        int64         // 0 = the store default
+	IdleTTL      time.Duration // stored for 6.6; 0 = unset
+	InactiveTTL  time.Duration // stored for 6.6; 0 = unset
+}
+
+// Create mints an open, option-less session (headless use and tests).
+func (st *Store) Create() (*Session, error) { return st.CreateWith(CreateParams{}) }
+
+// CreateWith mints a session with a random id and 128-bit token, applying the
+// given options (limits already clamped by the caller).
+func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if len(st.sessions) >= st.max {
@@ -76,19 +90,31 @@ func (st *Store) Create() (*Session, error) {
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, err
 	}
+	maxGz := st.maxGz
+	if p.MaxGz > 0 {
+		maxGz = p.MaxGz
+	}
 	now := st.now()
 	s := &Session{
-		ID:         hex.EncodeToString(idBytes),
-		Token:      base64.RawURLEncoding.EncodeToString(tokenBytes),
-		CreatedAt:  now,
-		now:        st.now,
-		ttl:        st.ttl,
-		expiresAt:  now.Add(st.ttl),
-		maxBeams:   st.maxBeams,
-		maxGz:      st.maxGz,
-		beams:      map[uint32]*Beam{},
-		subs:       map[*Subscriber]struct{}{},
-		onComplete: st.onComplete,
+		ID:           hex.EncodeToString(idBytes),
+		Token:        base64.RawURLEncoding.EncodeToString(tokenBytes),
+		CreatedAt:    now,
+		now:          st.now,
+		ttl:          st.ttl,
+		expiresAt:    now.Add(st.ttl),
+		maxBeams:     st.maxBeams,
+		maxGz:        maxGz,
+		beams:        map[uint32]*Beam{},
+		subs:         map[*Subscriber]struct{}{},
+		onComplete:   st.onComplete,
+		clients:      map[string]*Client{},
+		byAddr:       map[string]*Client{},
+		usedNames:    map[string]bool{},
+		evicted:      map[string]bool{},
+		label:        p.Label,
+		joinersAdmin: p.JoinersAdmin,
+		idleTTL:      p.IdleTTL,
+		inactiveTTL:  p.InactiveTTL,
 	}
 	st.sessions[s.ID] = s
 	return s, nil

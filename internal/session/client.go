@@ -1,0 +1,138 @@
+package session
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"strconv"
+	"time"
+)
+
+// Role is a stream's role within a session.
+type Role string
+
+// Stream roles.
+const (
+	RoleRelay  Role = "relay"
+	RoleViewer Role = "viewer"
+)
+
+// Valid reports whether r is a known role.
+func (r Role) Valid() bool { return r == RoleRelay || r == RoleViewer }
+
+// Client is one participant, bound to the address it registered from: one client
+// per address per session (ADR 0017). A client may hold several streams. The id
+// is not a secret — every authenticated call rechecks it against the caller's
+// address — so it can travel in a header and appear in the snapshot.
+type Client struct {
+	ID           string
+	Name         string
+	Addr         string
+	SessionAdmin bool
+	createdAt    time.Time
+	lastActive   time.Time
+}
+
+// ClientSnapshot is one client in the place document.
+type ClientSnapshot struct {
+	ID           string    `json:"client_id"`
+	Name         string    `json:"name"`
+	Roles        []string  `json:"roles"`
+	SessionAdmin bool      `json:"session_admin"`
+	Connected    bool      `json:"connected"`
+	LastActive   time.Time `json:"last_active"`
+}
+
+// RegisterClient returns the client bound to addr, creating it on first sight
+// with a unique name. A repeat registration keeps the existing client (the
+// proposed name is ignored) and may only UPGRADE it to session admin, never
+// downgrade. The caller must reject an evicted address before calling.
+func (s *Session) RegisterClient(addr, proposed string, admin bool) *Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.byAddr[addr]; ok {
+		if admin {
+			c.SessionAdmin = true
+		}
+		c.lastActive = s.now()
+		s.notifyLocked()
+		return c
+	}
+	c := &Client{
+		ID:           s.mintClientIDLocked(),
+		Name:         s.uniqueNameLocked(proposed),
+		Addr:         addr,
+		SessionAdmin: admin,
+		createdAt:    s.now(),
+		lastActive:   s.now(),
+	}
+	s.clients[c.ID] = c
+	s.byAddr[addr] = c
+	s.clientOrder = append(s.clientOrder, c.ID)
+	s.usedNames[c.Name] = true
+	s.notifyLocked()
+	return c
+}
+
+func (s *Session) mintClientIDLocked() string {
+	for {
+		b := make([]byte, 8)
+		if _, err := rand.Read(b); err != nil {
+			continue
+		}
+		id := hex.EncodeToString(b)
+		if _, clash := s.clients[id]; !clash {
+			return id
+		}
+	}
+}
+
+// ClientByID returns a registered client.
+func (s *Session) ClientByID(id string) (*Client, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clients[id]
+	return c, ok
+}
+
+// Evicted reports whether an address has been barred from the session.
+func (s *Session) Evicted(addr string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evicted[addr]
+}
+
+// MarkActive records a client as just seen (coarse; 6.6 refines the activity
+// model that drives the clocks).
+func (s *Session) MarkActive(c *Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.lastActive = s.now()
+}
+
+// Label is the session's operator-set label.
+func (s *Session) Label() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.label
+}
+
+// JoinersAdmin reports whether password/token joiners become session admins.
+func (s *Session) JoinersAdmin() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.joinersAdmin
+}
+
+// uniqueNameLocked cleans a proposed name (or generates one) and makes it unique
+// within the session with a " 2", " 3", … suffix.
+func (s *Session) uniqueNameLocked(proposed string) string {
+	base := cleanName(proposed)
+	if base == "" {
+		base = generateName()
+	}
+	name := base
+	for i := 2; s.usedNames[name]; i++ {
+		name = base + " " + strconv.Itoa(i)
+	}
+	return name
+}

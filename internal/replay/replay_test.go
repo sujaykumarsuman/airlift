@@ -151,6 +151,14 @@ func fakeTower(t *testing.T, st *session.Store) *httptest.Server {
 		return s, true
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/sessions/{sid}/clients", func(w http.ResponseWriter, r *http.Request) {
+		s, ok := get(w, r)
+		if !ok {
+			return
+		}
+		c := s.RegisterClient("replay-addr", "replay", false)
+		json.NewEncoder(w).Encode(map[string]any{"client_id": c.ID, "name": c.Name})
+	})
 	mux.HandleFunc("POST /api/sessions/{sid}/frames", func(w http.ResponseWriter, r *http.Request) {
 		s, ok := get(w, r)
 		if !ok {

@@ -1,4 +1,4 @@
-import type { FetchFn } from "./api";
+import { clientHeaders, type FetchFn } from "./api";
 
 export interface SSEEvent {
   event: string;
@@ -59,6 +59,7 @@ export interface SubscribeOptions {
   fetchFn?: FetchFn;
   backoffMs?: number[];
   sleep?: (ms: number) => Promise<void>;
+  clientId?: string;
 }
 
 const defaultBackoff = [500, 1000, 2000, 4000, 8000];
@@ -87,7 +88,7 @@ export function subscribe(
       status("connecting");
       try {
         const resp = await fetchFn(url, {
-          headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+          headers: { ...clientHeaders(token, opts.clientId), Accept: "text/event-stream" },
           cache: "no-store",
           signal: ctrl.signal,
         });

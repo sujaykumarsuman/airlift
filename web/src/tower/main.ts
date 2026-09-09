@@ -1,10 +1,10 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteSession, eventsURL, fetchDownload, getSnapshot } from "../shared/api";
+import { ApiError, createSession, deleteSession, eventsURL, fetchDownload, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { Beam, Snapshot, State, Verdict } from "../shared/types";
+import type { Beam, ClientSummary, Snapshot, State, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
 import { type BeamView, failedStage, initialView, parseDeepLink, reduce, tick, type View } from "./state";
 
@@ -12,6 +12,8 @@ interface Stored {
   sid: string;
   token: string;
   join_url: string;
+  client_id: string;
+  name: string;
 }
 
 const STORAGE_KEY = "airlift.session";
@@ -50,7 +52,7 @@ function viewerLink(s: Stored): string {
 async function boot(): Promise<void> {
   const deep = parseDeepLink(location.hash);
   if (deep) {
-    current = { ...deep, join_url: new URL(`s/${deep.sid}#t=${deep.token}`, appBase).toString() };
+    current = { sid: deep.sid, token: deep.token, join_url: new URL(`s/${deep.sid}#t=${deep.token}`, appBase).toString(), client_id: "", name: "" };
     history.replaceState(null, "", location.pathname);
   } else {
     const saved = sessionStorage.getItem(STORAGE_KEY);
@@ -58,7 +60,12 @@ async function boot(): Promise<void> {
   }
   if (current) {
     try {
-      await getSnapshot(current.sid, current.token);
+      // Registering (idempotent per address) both validates the session and
+      // gives this dashboard its viewer client id.
+      const cl = await registerClient(current.sid, current.token, { role: "viewer" });
+      current.client_id = cl.client_id;
+      current.name = cl.name;
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(current));
     } catch (err) {
       notice = err instanceof ApiError && err.status === 404 ? "The previous session has expired." : "";
       current = null;
@@ -73,7 +80,7 @@ async function create(): Promise<void> {
   notice = "";
   try {
     const c = await createSession();
-    current = { sid: c.sid, token: c.token, join_url: c.join_url };
+    current = { sid: c.sid, token: c.token, join_url: c.join_url, client_id: c.client_id, name: c.name };
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(current));
     attach(current);
   } catch (err) {
@@ -86,18 +93,23 @@ function attach(s: Stored): void {
   view = initialView;
   connection = "connecting";
   stopEvents?.();
-  stopEvents = subscribe(eventsURL(s.sid, "viewer"), s.token, {
-    onEvent: (ev) => {
-      if (ev.event === "state") view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
-      else if (ev.event === "closed") notice = "The session was closed.";
-      renderStatus();
+  stopEvents = subscribe(
+    eventsURL(s.sid, "viewer"),
+    s.token,
+    {
+      onEvent: (ev) => {
+        if (ev.event === "state") view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
+        else if (ev.event === "closed") notice = "The session was closed.";
+        renderStatus();
+      },
+      onStatus: (status, detail) => {
+        connection = status;
+        if (status === "stopped" && detail?.startsWith("HTTP")) notice = `Session gone (${detail}).`;
+        renderStatus();
+      },
     },
-    onStatus: (status, detail) => {
-      connection = status;
-      if (status === "stopped" && detail?.startsWith("HTTP")) notice = `Session gone (${detail}).`;
-      renderStatus();
-    },
-  });
+    { clientId: s.client_id },
+  );
   if (ticker === null) {
     ticker = setInterval(() => {
       const next = tick(view, Date.now());
@@ -114,7 +126,7 @@ function attach(s: Stored): void {
 async function reset(): Promise<void> {
   if (current) {
     try {
-      await deleteSession(current.sid, current.token);
+      await deleteSession(current.sid, current.token, current.client_id);
     } catch {
       /* already gone */
     }
@@ -129,7 +141,7 @@ async function reset(): Promise<void> {
 async function download(bid: string, as: string): Promise<void> {
   if (!current || !bid) return;
   try {
-    const { blob, filename } = await fetchDownload(current.sid, current.token, bid, as);
+    const { blob, filename } = await fetchDownload(current.sid, current.token, bid, as, current.client_id);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -194,6 +206,7 @@ function renderStatus(): void {
         <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
       </div>
       ${s.beams.length === 0 ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
+      ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl))}</ul>` : ""}
     </div>
     ${view.beams.map((bv) => beamCard(bv))}
     ${notice ? html`<p class="warn">${notice}</p>` : ""}
@@ -207,6 +220,17 @@ function renderStatus(): void {
   statusEl.querySelectorAll<HTMLButtonElement>("[data-download]").forEach((btn) =>
     btn.addEventListener("click", () => void download(btn.dataset.beam ?? "", btn.dataset.download ?? "raw")),
   );
+}
+
+/** One client in the place's people list. */
+function clientRow(cl: ClientSummary): Raw {
+  const tags: string[] = [];
+  if (cl.session_admin) tags.push("admin");
+  tags.push(...cl.roles);
+  if (current && cl.client_id === current.client_id) tags.push("you");
+  return html`<li class="${cl.connected ? "on" : "off"}">
+    <span class="who">${cl.name}</span>${tags.length ? html` <span class="tags">${tags.join(" · ")}</span>` : ""}
+  </li>`;
 }
 
 /** One beam's card: progress, then a verified or failed panel once terminal. */

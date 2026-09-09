@@ -106,7 +106,7 @@ func TestCreateGetDelete(t *testing.T) {
 	if len(s.Snapshot().Beams) != 0 || st.Len() != 1 {
 		t.Fatal("a new place has no beams")
 	}
-	sub := s.Subscribe(false)
+	sub := s.Subscribe(nil, RoleViewer)
 	if !st.Delete(s.ID) || st.Delete(s.ID) || st.Len() != 0 {
 		t.Fatal("Delete")
 	}
@@ -428,8 +428,8 @@ func TestFPSCounter(t *testing.T) {
 func TestRelaysAndNotifications(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	s, _ := st.Create()
-	viewer := s.Subscribe(false)
-	relay := s.Subscribe(true)
+	viewer := s.Subscribe(nil, RoleViewer)
+	relay := s.Subscribe(nil, RoleRelay)
 	select {
 	case <-viewer.C:
 	default:

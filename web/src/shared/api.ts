@@ -1,4 +1,4 @@
-import type { Created, IngestResult, Info, Snapshot } from "./types";
+import type { Client, Created, CreateOptions, IngestResult, Info, Snapshot } from "./types";
 
 export type FetchFn = typeof fetch;
 
@@ -22,8 +22,12 @@ export class ApiError extends Error {
   }
 }
 
-export function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}` };
+/** Every authenticated call carries the token and, once registered, the client
+ *  id (ADR 0017). */
+export function clientHeaders(token: string, clientId?: string): Record<string, string> {
+  const h: Record<string, string> = { Authorization: `Bearer ${token}` };
+  if (clientId) h["X-Airlift-Client"] = clientId;
+  return h;
 }
 
 async function expectJSON<T>(resp: Response): Promise<T> {
@@ -45,13 +49,31 @@ export function getInfo(fetchFn: FetchFn = fetch): Promise<Info> {
   return fetchFn(apiURL("api/info"), { headers: { accept: "application/json" } }).then((r) => expectJSON<Info>(r));
 }
 
-export function createSession(fetchFn: FetchFn = fetch): Promise<Created> {
-  return fetchFn(apiURL("api/sessions"), { method: "POST" }).then((r) => expectJSON<Created>(r));
+export function createSession(opts: CreateOptions = {}, fetchFn: FetchFn = fetch): Promise<Created> {
+  return fetchFn(apiURL("api/sessions"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  }).then((r) => expectJSON<Created>(r));
 }
 
-export function getSnapshot(sid: string, token: string, fetchFn: FetchFn = fetch): Promise<Snapshot> {
-  return fetchFn(apiURL(`api/sessions/${sid}`), { headers: authHeaders(token), cache: "no-store" }).then((r) =>
-    expectJSON<Snapshot>(r),
+/** Registers (or returns) the client bound to the caller's address. */
+export function registerClient(
+  sid: string,
+  token: string,
+  opts: { name?: string; role?: string } = {},
+  fetchFn: FetchFn = fetch,
+): Promise<Client> {
+  return fetchFn(apiURL(`api/sessions/${sid}/clients`), {
+    method: "POST",
+    headers: { ...clientHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  }).then((r) => expectJSON<Client>(r));
+}
+
+export function getSnapshot(sid: string, token: string, clientId?: string, fetchFn: FetchFn = fetch): Promise<Snapshot> {
+  return fetchFn(apiURL(`api/sessions/${sid}`), { headers: clientHeaders(token, clientId), cache: "no-store" }).then(
+    (r) => expectJSON<Snapshot>(r),
   );
 }
 
@@ -59,17 +81,26 @@ export function postFrames(
   sid: string,
   token: string,
   frames: string[],
+  clientId?: string,
   fetchFn: FetchFn = fetch,
 ): Promise<IngestResult> {
   return fetchFn(apiURL(`api/sessions/${sid}/frames`), {
     method: "POST",
-    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    headers: { ...clientHeaders(token, clientId), "Content-Type": "application/json" },
     body: JSON.stringify({ frames }),
   }).then((r) => expectJSON<IngestResult>(r));
 }
 
-export async function deleteSession(sid: string, token: string, fetchFn: FetchFn = fetch): Promise<void> {
-  const resp = await fetchFn(apiURL(`api/sessions/${sid}`), { method: "DELETE", headers: authHeaders(token) });
+export async function deleteSession(
+  sid: string,
+  token: string,
+  clientId?: string,
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}`), {
+    method: "DELETE",
+    headers: clientHeaders(token, clientId),
+  });
   if (!resp.ok && resp.status !== 404) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
@@ -84,11 +115,12 @@ export async function fetchDownload(
   token: string,
   bid: string,
   as: string,
+  clientId?: string,
   fetchFn: FetchFn = fetch,
 ): Promise<{ blob: Blob; filename: string }> {
   const query = `beam=${encodeURIComponent(bid)}&as=${encodeURIComponent(as)}`;
   const resp = await fetchFn(apiURL(`api/sessions/${sid}/download?${query}`), {
-    headers: authHeaders(token),
+    headers: clientHeaders(token, clientId),
   });
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
   return { blob: await resp.blob(), filename: parseFilename(resp.headers.get("Content-Disposition"), as) };

@@ -75,6 +75,12 @@ func Run(ctx context.Context, client *http.Client, base, sid, token string, dump
 	rng := rand.New(rand.NewSource(opts.Seed))
 	bid := fmt.Sprintf("%08x", dump.SenderSession)
 	rep := &Report{State: session.StateReceiving}
+	// Register as a scanner named "replay" so the client tier admits our frames
+	// and snapshot polls (ADR 0017).
+	clientID, err := registerClient(ctx, client, base, sid, token)
+	if err != nil {
+		return rep, err
+	}
 	url := base + "/api/sessions/" + sid + "/frames"
 	filled := false // our beam has every chunk
 	for pass := 1; pass <= opts.Passes && !filled; pass++ {
@@ -87,7 +93,7 @@ func Run(ctx context.Context, client *http.Client, base, sid, token string, dump
 					return rep, err
 				}
 			}
-			resp, err := post(ctx, client, url, token, part)
+			resp, err := post(ctx, client, url, token, clientID, part)
 			if err != nil {
 				return rep, err
 			}
@@ -105,7 +111,7 @@ func Run(ctx context.Context, client *http.Client, base, sid, token string, dump
 	}
 	deadline := time.Now().Add(opts.Timeout)
 	for {
-		snap, bs, err := getBeamSnapshot(ctx, client, base, sid, token, bid)
+		snap, bs, err := getBeamSnapshot(ctx, client, base, sid, token, clientID, bid)
 		if err != nil {
 			return rep, err
 		}
@@ -160,7 +166,35 @@ func pause(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func post(ctx context.Context, client *http.Client, url, token string, frames []string) (ingestResponse, error) {
+// registerClient registers a "replay" scanner client and returns its id, which
+// the client tier requires on every frames POST and snapshot GET.
+func registerClient(ctx context.Context, client *http.Client, base, sid, token string) (string, error) {
+	body, _ := json.Marshal(map[string]any{"name": "replay", "role": "relay"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/sessions/"+sid+"/clients", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("register client: %s: %s", resp.Status, bytes.TrimSpace(msg))
+	}
+	var out struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("register client: %w", err)
+	}
+	return out.ClientID, nil
+}
+
+func post(ctx context.Context, client *http.Client, url, token, clientID string, frames []string) (ingestResponse, error) {
 	body, err := json.Marshal(map[string]any{"frames": frames})
 	if err != nil {
 		return ingestResponse{}, err
@@ -170,6 +204,7 @@ func post(ctx context.Context, client *http.Client, url, token string, frames []
 		return ingestResponse{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Airlift-Client", clientID)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -197,12 +232,13 @@ type beamProbe struct {
 
 // getBeamSnapshot fetches the place snapshot and returns the beam with the given
 // bid (nil if it has not appeared yet).
-func getBeamSnapshot(ctx context.Context, client *http.Client, base, sid, token, bid string) (json.RawMessage, *beamProbe, error) {
+func getBeamSnapshot(ctx context.Context, client *http.Client, base, sid, token, clientID, bid string) (json.RawMessage, *beamProbe, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/sessions/"+sid, nil)
 	if err != nil {
 		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Airlift-Client", clientID)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, err
