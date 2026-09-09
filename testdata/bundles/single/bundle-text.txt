@@ -1,0 +1,5 @@
+#repobundle v1 format=text
+@@@FILE@@@ 15 e1cc01ce15ec7edc36dfd95788131edea4809a77efd3dd6adf6f28bd0aacd0a1 644 hello.txt
+hello, airlift
+
+@@@END@@@

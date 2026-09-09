@@ -12,7 +12,7 @@ with tooling wired and a passing no-op test each.
 
 Exit: `pre-commit run --all-files` green. Commit.
 
-## Phase 1 — Protocol + sender
+## Phase 1 — Protocol + sender ✔
 
 `sender/airlift.py` with subcommands:
 

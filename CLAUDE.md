@@ -84,6 +84,11 @@ directly (out of scope; see non-goals).
   tower-all` cross-compiles. `web/dist/.gitkeep` must survive so `embed.go`
   compiles on a fresh clone.
 - Python tooling runs through `uv` (`uv run --directory sender ...`).
+- Shared fixtures: `testdata/bundles/` (trees plus the bundles
+  `tools/repobundle.py` packs from them) and `sender/testdata/vectors.json`
+  (`airlift.py frames --seed 1` over the multi base64 bundle). Regenerate
+  only when their inputs change, with the commands in their READMEs, and
+  commit inputs and outputs together.
 - `STATUS.md` updated at the end of every phase: done / next / open questions.
 - British English in docs.
 - Tokens are never logged.

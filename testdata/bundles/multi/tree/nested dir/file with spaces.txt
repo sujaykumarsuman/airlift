@@ -1,0 +1,1 @@
+paths with spaces survive the bundle header

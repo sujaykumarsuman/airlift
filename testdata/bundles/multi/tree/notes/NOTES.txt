@@ -1,0 +1,25 @@
+Notes on the multi fixture
+==========================
+
+This tree exists to exercise the unpack path in every way a real repository
+bundle might: an executable script whose mode must survive, a binary blob
+that the text format has to skip and the base64 format has to carry, an
+empty file whose header announces zero bytes, a file whose relative path
+contains spaces (the bundle header is split into exactly five fields, so the
+path may contain any number of them), and a text file with multi-byte UTF-8.
+
+The binary blob is twelve thousand bytes of seeded pseudo-random data. It
+does not compress, which keeps the packed bundle honest about size: gzip
+gains almost nothing on it, so the frame count in the sender's vectors is
+dominated by real payload rather than by repetition.
+
+This file, by contrast, compresses well. Prose is redundant; that is what
+lets the sender's gzip stage earn its place in the pipeline. The ratio
+reported by `airlift beam` for the whole bundle sits somewhere between the
+two extremes, which is what a real repository looks like too: mostly text,
+with the occasional image or archive that refuses to shrink.
+
+Nothing here is secret and nothing here matters. If a test fails against
+this tree, the test is telling you that the bundle stage changed behaviour,
+not that the fixture needs updating. Regenerate the bundles only when the
+tree itself changes, and commit both together.

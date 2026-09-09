@@ -1,0 +1,48 @@
+#repobundle v1 format=text
+@@@FILE@@@ 228 9b4f3b31f56b1a575a63961864e096ffc6f0286fcc038c93186ece0d21f20582 644 README.md
+# multi fixture
+
+A small tree with a binary, an empty file, an executable, a path with spaces
+and some UTF-8, packed by `tools/repobundle.py` in both formats. The Go bundle
+stage must restore it byte for byte and mode for mode.
+
+@@@FILE@@@ 37 788f20acbd48944b5dd12011d3dcb3d6f2834c7dd4a6ba0b2246e00fd57a7ef0 755 bin/run.sh
+#!/bin/sh
+echo "airlift fixture: $0"
+
+@@@FILE@@@ 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 644 data/empty
+
+@@@FILE@@@ 44 e4e51814321a49851e5c23ac9e0840938fe258263e91d36c8f7d4f9be2397aed 644 nested dir/file with spaces.txt
+paths with spaces survive the bundle header
+
+@@@FILE@@@ 1407 1560a45bd13c5519e1c272766ad17d944645ef49cc1765bfc08d912f7f1ca8c4 644 notes/NOTES.txt
+Notes on the multi fixture
+==========================
+
+This tree exists to exercise the unpack path in every way a real repository
+bundle might: an executable script whose mode must survive, a binary blob
+that the text format has to skip and the base64 format has to carry, an
+empty file whose header announces zero bytes, a file whose relative path
+contains spaces (the bundle header is split into exactly five fields, so the
+path may contain any number of them), and a text file with multi-byte UTF-8.
+
+The binary blob is twelve thousand bytes of seeded pseudo-random data. It
+does not compress, which keeps the packed bundle honest about size: gzip
+gains almost nothing on it, so the frame count in the sender's vectors is
+dominated by real payload rather than by repetition.
+
+This file, by contrast, compresses well. Prose is redundant; that is what
+lets the sender's gzip stage earn its place in the pipeline. The ratio
+reported by `airlift beam` for the whole bundle sits somewhere between the
+two extremes, which is what a real repository looks like too: mostly text,
+with the occasional image or archive that refuses to shrink.
+
+Nothing here is secret and nothing here matters. If a test fails against
+this tree, the test is telling you that the bundle stage changed behaviour,
+not that the fixture needs updating. Regenerate the bundles only when the
+tree itself changes, and commit both together.
+
+@@@FILE@@@ 31 f68d68cadc3388a417d52973d03e4f2c593f3465ee8ae9765deb39944627cbc0 644 notes/unicode.txt
+naïve café — ✓ 日本語
+
+@@@END@@@

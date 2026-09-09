@@ -9,8 +9,9 @@ the file, verifies it hash by hash, unpacks it if it is a
 [`repobundle`](tools/repobundle.py), and serves the result to a dashboard and
 to disk.
 
-Status: **Phase 0 (scaffold)**. Nothing transfers yet. See
-[`STATUS.md`](STATUS.md) and [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md).
+Status: **Phase 1 (sender)**. The sender works end to end on its own; the
+tower and the phone page are next. See [`STATUS.md`](STATUS.md) and
+[`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md).
 
 ## Pieces
 
@@ -22,6 +23,30 @@ Status: **Phase 0 (scaffold)**. Nothing transfers yet. See
 
 Design: [`docs/PROTOCOL.md`](docs/PROTOCOL.md), [`docs/API.md`](docs/API.md),
 [`docs/adr/`](docs/adr/).
+
+## Sender (inside the air gap)
+
+Copy [`sender/airlift.py`](sender/airlift.py) in. It is one file; it needs
+Python 3.9+ and the pure-Python `segno` package, which can be vendored next to
+it. Then:
+
+```bash
+python3 repobundle.py pack --format base64 --out repo-bundle.txt
+```
+
+```bash
+python3 airlift.py beam --in repo-bundle.txt --out beam.html
+```
+
+Open `beam.html` in any browser, make it full-screen, and point the phone at
+it. `beam` prints the chunk count, the QR version, the compression ratio and
+the seconds per pass. Tuning: `--chunk` (payload bytes per frame, default
+600, at most 2242 at ECC M), `--ecc L|M|Q|H`, `--fps`, `--manifest-every`.
+Keys in the player: space pause · ←/→ step · +/- fps · f fullscreen.
+
+`airlift.py frames` dumps the frames as JSON and `airlift.py decode` rebuilds
+the file from such a dump, no camera involved; both need only the standard
+library.
 
 ## Developing
 

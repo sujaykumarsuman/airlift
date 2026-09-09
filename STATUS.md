@@ -1,15 +1,17 @@
 # STATUS
 
-## Phase 0 — Scaffold: done
+## Phase 1 — Protocol + sender: done
 
-- Layout, `CLAUDE.md`, `docs/{BUILD-PLAN,PROTOCOL,API}.md`, ADRs 0001–0008.
-- Pre-commit gate wired for all three components; each has a passing no-op test.
-- `make web` / `make tower` / `make tower-all` work end to end on the stubs.
+- `sender/airlift.py`: `beam`, `frames`, `decode`; base45, frame codec,
+  manifest, gzip/chunk pipeline, reference decoder, SVG renderer, HTML player.
+- `sender/testdata/vectors.json` (`--seed 1` over the multi base64 bundle) and
+  `testdata/bundles/` (single + multi trees, text + base64 bundles).
+- Sender suite runs green on Python 3.9 and 3.14.
 
-## Next — Phase 1: Protocol + sender
+## Next — Phase 2: Tower core
 
-- `sender/airlift.py`: `beam`, `frames`, `decode`.
-- `sender/testdata/vectors.json` from `--seed 1`; `testdata/bundles/` fixtures.
+- `internal/proto` against `vectors.json`; `internal/bundle` against
+  `testdata/bundles/`; session, verify, tlsca, server; `--replay`.
 
 ## Open questions
 

@@ -1,0 +1,4 @@
+* text=auto eol=lf
+# Fixtures carry sha256 sums over their exact bytes: never normalise them.
+testdata/bundles/** -text
+sender/testdata/** -text
