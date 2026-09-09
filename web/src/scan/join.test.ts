@@ -9,15 +9,15 @@ test("parses sid from the path and the token from the fragment", () => {
   expect(parseJoin("/s/abc/", "#t=IArmTtXFjcbAMpWOwO6NAg&x=1")).toEqual({ sid: "abc", token: "IArmTtXFjcbAMpWOwO6NAg" });
 });
 
-test("rejects a missing sid or token", () => {
+test("rejects a missing sid, and offers a password join when the token is absent", () => {
   expect(parseJoin("/", "#t=IArmTtXFjcbAMpWOwO6NAg").error).toMatch(/not a join link/);
   expect(parseJoin("/s/", "#t=IArmTtXFjcbAMpWOwO6NAg").error).toMatch(/not a join link/);
   expect(parseJoin("/s/abc/extra", "#t=IArmTtXFjcbAMpWOwO6NAg").error).toBeDefined();
-  expect(parseJoin("/s/abc", "").error).toMatch(/token/);
-  expect(parseJoin("/s/abc", "#t=").error).toMatch(/token/);
-  expect(parseJoin("/s/abc", "#t=short").error).toMatch(/token/);
-  expect(parseJoin("/s/abc", "#t=has space in it!").error).toMatch(/token/);
   expect(parseJoin("/s/../x", "#t=IArmTtXFjcbAMpWOwO6NAg").error).toBeDefined();
+  // A valid /s/{sid} with no usable token → the password-join path.
+  for (const hash of ["", "#t=", "#t=short", "#t=has space in it!"]) {
+    expect(parseJoin("/s/abc", hash)).toEqual({ sid: "abc", needsPassword: true });
+  }
 });
 
 function memory(): Map<string, string> & { getItem(k: string): string | null; setItem(k: string, v: string): void } {
@@ -42,8 +42,8 @@ test("a join is remembered and /s/last reopens it", () => {
   const broken = memory();
   broken.set(LAST_KEY, "{not json");
   expect(resolveJoin("/s/last", "", broken).error).toBeDefined();
-  expect(resolveJoin("/s/nope", "", store).error).toMatch(/token/);
-  expect(JSON.parse(store.get(LAST_KEY) ?? "").sid).toBe("abc"); // a failed join does not overwrite
+  expect(resolveJoin("/s/nope", "", store).needsPassword).toBe(true);
+  expect(JSON.parse(store.get(LAST_KEY) ?? "").sid).toBe("abc"); // a token-less join does not overwrite
 });
 
 test("a path prefix is stripped before matching /s/…", () => {

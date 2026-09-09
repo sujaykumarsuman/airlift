@@ -49,6 +49,10 @@ type Options struct {
 	Caps           Caps           // limits advertised by /api/info
 	MaxBody        int64          // request body limit (default 8 MiB)
 	MaxFrames      int            // frames per POST (default 500)
+	RateCreate     Rate           // per-address create budget (0 disables)
+	RateJoin       Rate           // per-address and per-session join budget
+	RateFrames     Rate           // per-address frames budget
+	Now            func() time.Time
 	OnCreate       func(s *session.Session, joinURL string)
 	Logf           func(format string, args ...any)
 }
@@ -57,6 +61,7 @@ type Options struct {
 type Server struct {
 	opts Options
 	mux  *http.ServeMux
+	lim  *limiter
 }
 
 // New wires the routes and installs the completion hook on the store.
@@ -71,6 +76,11 @@ func New(opts Options) *Server {
 		opts.Logf = func(string, ...any) {}
 	}
 	srv := &Server{opts: opts, mux: http.NewServeMux()}
+	srv.lim = newLimiter(opts.Now, map[rateKind]Rate{
+		rlCreate: opts.RateCreate,
+		rlJoin:   opts.RateJoin,
+		rlFrames: opts.RateFrames,
+	})
 	opts.Store.SetCompleteHook(srv.finalize)
 	opts.Store.SetEvictHook(srv.removeSessionDir)
 	srv.routes()
@@ -83,6 +93,8 @@ func (srv *Server) Handler() http.Handler { return srv.mux }
 func (srv *Server) routes() {
 	m := srv.mux
 	m.HandleFunc("POST /api/sessions", srv.createSession)
+	m.HandleFunc("POST /api/sessions/{sid}/join", srv.withSession(srv.join))
+	m.HandleFunc("PATCH /api/sessions/{sid}", srv.sessionAdmin(srv.patchSession))
 	m.HandleFunc("POST /api/sessions/{sid}/clients", srv.tokenOnly(srv.registerClient))
 	m.HandleFunc("GET /api/sessions/{sid}", srv.client(srv.getSession))
 	m.HandleFunc("GET /api/sessions/{sid}/events", srv.client(srv.events))
@@ -228,6 +240,10 @@ func (srv *Server) deleteSession(w http.ResponseWriter, _ *http.Request, s *sess
 }
 
 func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+	if d, ok := srv.lim.allow(rlFrames, srv.clientAddr(r)); !ok {
+		retryAfter(w, d)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
 	var req struct {
 		Frames []string `json:"frames"`

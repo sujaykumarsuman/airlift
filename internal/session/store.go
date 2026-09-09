@@ -66,6 +66,7 @@ func (st *Store) SetEvictHook(fn func(string)) {
 type CreateParams struct {
 	Label        string
 	JoinersAdmin bool
+	Password     string        // "" = no join password
 	MaxGz        int64         // 0 = the store default
 	IdleTTL      time.Duration // stored for 6.6; 0 = unset
 	InactiveTTL  time.Duration // stored for 6.6; 0 = unset
@@ -115,6 +116,10 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 		joinersAdmin: p.JoinersAdmin,
 		idleTTL:      p.IdleTTL,
 		inactiveTTL:  p.InactiveTTL,
+	}
+	if p.Password != "" {
+		s.salt = newSalt()
+		s.passHash = hashPassword(s.salt, p.Password)
 	}
 	st.sessions[s.ID] = s
 	return s, nil

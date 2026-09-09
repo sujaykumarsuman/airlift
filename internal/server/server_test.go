@@ -91,6 +91,38 @@ func (h *harness) create(t *testing.T) created {
 	return c
 }
 
+// createOpts posts a create body and returns the response and (on 201) the
+// decoded session.
+func (h *harness) createOpts(t *testing.T, body string) (*http.Response, created) {
+	t.Helper()
+	resp, data := h.do(t, "POST", "/api/sessions", "", "", []byte(body))
+	var c created
+	if resp.StatusCode == http.StatusCreated {
+		if err := json.Unmarshal(data, &c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return resp, c
+}
+
+// testClock is a controllable clock for the rate-limiter tests.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
 // do issues a request with the session token and (when non-empty) the
 // X-Airlift-Client id. Client-tier calls pass the creator's client id; public
 // routes pass "".
@@ -499,8 +531,8 @@ func TestLimits(t *testing.T) {
 		o.Store = session.NewStore(time.Hour, 1)
 	})
 	c := h.create(t)
-	if resp, body := h.do(t, "POST", "/api/sessions", "", "", nil); resp.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("33rd session: %s %s", resp.Status, body)
+	if resp, body := h.do(t, "POST", "/api/sessions", "", "", nil); resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("session cap: %s %s retry=%q", resp.Status, body, resp.Header.Get("Retry-After"))
 	}
 	four := `{"frames":["A","B","C","D"]}`
 	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(four)); resp.StatusCode != http.StatusRequestEntityTooLarge {
@@ -516,6 +548,182 @@ func TestLimits(t *testing.T) {
 	resp, body := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(`{"frames":["A","B"]}`))
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"bad":2`) {
 		t.Fatalf("two garbage frames: %s %s", resp.Status, body)
+	}
+}
+
+func TestJoinAndPassword(t *testing.T) {
+	h := start(t, func(o *Options) { o.TrustedProxies = ParseTrustedProxies([]string{"127.0.0.1", "::1"}) })
+	c := h.create(t)
+	// No password → join is 404 (indistinguishable from a missing session).
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/join", "", "", []byte(`{"password":"x"}`)); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("join without password: %s", resp.Status)
+	}
+	// The admin sets a password; a wrong one is 401, the right one joins.
+	if resp, _ := h.do(t, "PATCH", "/api/sessions/"+c.SID, c.Token, c.ClientID, []byte(`{"password":"hunter2"}`)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("set password: %s", resp.Status)
+	}
+	if resp, _ := h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/join", "", "", "9.9.9.9", []byte(`{"password":"nope"}`)); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong password: %s", resp.Status)
+	}
+	resp, body := h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/join", "", "", "9.9.9.9", []byte(`{"password":"hunter2","name":"guest"}`))
+	var j struct {
+		Token    string `json:"token"`
+		ClientID string `json:"client_id"`
+		Name     string `json:"name"`
+	}
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &j) != nil {
+		t.Fatalf("join: %s %s", resp.Status, body)
+	}
+	if j.Token != c.Token || j.ClientID == "" || j.Name != "guest" {
+		t.Fatalf("join response %+v", j)
+	}
+	// The joiner is listed and is not a session admin (joiners_admin off).
+	found := false
+	for _, cl := range h.snapshot(t, c).Clients {
+		if cl.Name == "guest" {
+			found = true
+			if cl.SessionAdmin {
+				t.Fatal("joiner should not be a session admin")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("joiner not in the clients list")
+	}
+	// Clearing the password makes join 404 again.
+	if resp, _ := h.do(t, "PATCH", "/api/sessions/"+c.SID, c.Token, c.ClientID, []byte(`{"password":""}`)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("clear password: %s", resp.Status)
+	}
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/join", "", "", []byte(`{"password":"hunter2"}`)); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("join after clear: %s", resp.Status)
+	}
+	// A plain client cannot PATCH.
+	plain := h.registerAs(t, c, "8.8.8.8")
+	if resp, _ := h.doXFF(t, "PATCH", "/api/sessions/"+c.SID, c.Token, plain, "8.8.8.8", []byte(`{"password":"x"}`)); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("plain client patch: %s", resp.Status)
+	}
+	// PATCH with no password field is a 400.
+	if resp, _ := h.do(t, "PATCH", "/api/sessions/"+c.SID, c.Token, c.ClientID, []byte(`{}`)); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty patch: %s", resp.Status)
+	}
+}
+
+func TestJoinersAdmin(t *testing.T) {
+	h := start(t, func(o *Options) { o.TrustedProxies = ParseTrustedProxies([]string{"127.0.0.1", "::1"}) })
+	_, c := h.createOpts(t, `{"password":"p","joiners_admin":true}`)
+	resp, body := h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/join", "", "", "9.9.9.9", []byte(`{"password":"p"}`))
+	var j struct {
+		ClientID string `json:"client_id"`
+	}
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &j) != nil {
+		t.Fatalf("join: %s %s", resp.Status, body)
+	}
+	// A joiner admin can drive a session-admin route.
+	if resp, _ := h.doXFF(t, "PATCH", "/api/sessions/"+c.SID, c.Token, j.ClientID, "9.9.9.9", []byte(`{"password":"q"}`)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("joiner-admin patch: %s", resp.Status)
+	}
+}
+
+func TestCreateOptionClamps(t *testing.T) {
+	h := start(t, func(o *Options) {
+		o.Caps = Caps{MaxGzBytes: 1 << 20, IdleTTL: 10 * time.Minute, InactiveTTL: 30 * time.Minute, Sessions: 4}
+	})
+	over := map[string]string{
+		"max_gz_bytes": `{"max_gz_bytes":2097152}`,
+		"idle_ttl":     `{"idle_ttl":9999}`,
+		"inactive_ttl": `{"inactive_ttl":9999}`,
+	}
+	for key, body := range over {
+		resp, data := h.do(t, "POST", "/api/sessions", "", "", []byte(body))
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(data), key) {
+			t.Fatalf("%s over cap: %s %s", key, resp.Status, data)
+		}
+	}
+	// At/below the caps creates, and the creator is a session admin.
+	resp, c := h.createOpts(t, `{"label":"demo","max_gz_bytes":1024,"idle_ttl":60}`)
+	if resp.StatusCode != http.StatusCreated || c.ClientID == "" {
+		t.Fatalf("create with options: %s", resp.Status)
+	}
+	admin := false
+	for _, cl := range h.snapshot(t, c).Clients {
+		if cl.ID == c.ClientID {
+			admin = cl.SessionAdmin
+		}
+	}
+	if !admin {
+		t.Fatal("creator should be a session admin")
+	}
+}
+
+func TestRateLimitCreate(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	h := start(t, func(o *Options) { o.Now = clk.now; o.RateCreate = Rate{N: 2, Per: time.Minute} })
+	for i := 0; i < 2; i++ {
+		if resp, _ := h.do(t, "POST", "/api/sessions", "", "", nil); resp.StatusCode != http.StatusCreated {
+			t.Fatalf("create %d: %s", i, resp.Status)
+		}
+	}
+	resp, _ := h.do(t, "POST", "/api/sessions", "", "", nil)
+	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("3rd create: %s retry=%q", resp.Status, resp.Header.Get("Retry-After"))
+	}
+	clk.add(time.Minute)
+	if resp, _ := h.do(t, "POST", "/api/sessions", "", "", nil); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create after refill: %s", resp.Status)
+	}
+}
+
+func TestRateLimitFrames(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	h := start(t, func(o *Options) { o.Now = clk.now; o.RateFrames = Rate{N: 2, Per: time.Second} })
+	c := h.create(t) // rate_create is zero here → unlimited
+	body := []byte(`{"frames":[]}`)
+	for i := 0; i < 2; i++ {
+		if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, body); resp.StatusCode != 200 {
+			t.Fatalf("frames %d: %s", i, resp.Status)
+		}
+	}
+	// The rate check precedes the body read, so it fires even on an empty POST.
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, body); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("3rd frames: %s", resp.Status)
+	}
+	clk.add(time.Second)
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, body); resp.StatusCode != 200 {
+		t.Fatalf("frames after refill: %s", resp.Status)
+	}
+}
+
+func TestLimiterUnit(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	l := newLimiter(clk.now, map[rateKind]Rate{rlCreate: {N: 2, Per: time.Second}, rlFrames: {}})
+	if _, ok := l.allow(rlFrames, "a"); !ok {
+		t.Fatal("a zero-N kind must always allow")
+	}
+	if _, ok := l.allow(rlCreate, "a"); !ok {
+		t.Fatal("token 1")
+	}
+	if _, ok := l.allow(rlCreate, "a"); !ok {
+		t.Fatal("token 2")
+	}
+	if d, ok := l.allow(rlCreate, "a"); ok || d <= 0 {
+		t.Fatalf("token 3 should deny with a wait, got %v %v", d, ok)
+	}
+	if _, ok := l.allow(rlCreate, "b"); !ok {
+		t.Fatal("a different key starts full")
+	}
+	clk.add(time.Second)
+	if _, ok := l.allow(rlCreate, "a"); !ok {
+		t.Fatal("a refills after Per")
+	}
+	rec := httptest.NewRecorder()
+	retryAfter(rec, 1500*time.Millisecond)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "2" {
+		t.Fatalf("retryAfter ceil: %d %q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	rec = httptest.NewRecorder()
+	retryAfter(rec, 0)
+	if rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("retryAfter floor: %q", rec.Header().Get("Retry-After"))
 	}
 }
 
@@ -839,8 +1047,11 @@ func TestTokensNeverLogged(t *testing.T) {
 			logs = append(logs, fmt.Sprintf(format, args...))
 		}
 	})
-	c := h.create(t)
+	const secret = "s3cr3t-passw0rd"
+	_, c := h.createOpts(t, `{"password":"`+secret+`"}`)
 	h.do(t, "GET", "/api/sessions/"+c.SID, "wrong-"+c.Token, "", nil)
+	h.do(t, "PATCH", "/api/sessions/"+c.SID, c.Token, c.ClientID, []byte(`{"password":"`+secret+`2"}`))
+	h.do(t, "POST", "/api/sessions/"+c.SID+"/join", "", "", []byte(`{"password":"wrong"}`))
 	h.replay(t, c, loadVectors(t), replay.Options{})
 	h.download(t, c, h.oneBeam(t, c).BID, "zip")
 	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil)
@@ -850,8 +1061,8 @@ func TestTokensNeverLogged(t *testing.T) {
 		t.Fatalf("expected lifecycle logs, got %v", logs)
 	}
 	for _, line := range logs {
-		if strings.Contains(line, c.Token) {
-			t.Fatalf("token leaked into the log: %q", line)
+		if strings.Contains(line, c.Token) || strings.Contains(line, secret) {
+			t.Fatalf("secret leaked into the log: %q", line)
 		}
 	}
 	if !strings.Contains(strings.Join(h.joins, " "), c.Token) {

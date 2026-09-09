@@ -1,4 +1,4 @@
-import type { Client, Created, CreateOptions, IngestResult, Info, Snapshot } from "./types";
+import type { Client, Created, CreateOptions, IngestResult, Info, Joined, Snapshot } from "./types";
 
 export type FetchFn = typeof fetch;
 
@@ -69,6 +69,19 @@ export function registerClient(
     headers: { ...clientHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify(opts),
   }).then((r) => expectJSON<Client>(r));
+}
+
+/** Joins a password-protected session (no token needed); returns a token. */
+export function joinSession(
+  sid: string,
+  body: { password: string; name?: string },
+  fetchFn: FetchFn = fetch,
+): Promise<Joined> {
+  return fetchFn(apiURL(`api/sessions/${sid}/join`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((r) => expectJSON<Joined>(r));
 }
 
 export function getSnapshot(sid: string, token: string, clientId?: string, fetchFn: FetchFn = fetch): Promise<Snapshot> {

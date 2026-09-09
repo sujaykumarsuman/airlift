@@ -15,6 +15,7 @@ import (
 // optional; an empty body creates an open, option-less session.
 type createReq struct {
 	Label        string `json:"label"`
+	Password     string `json:"password"`
 	JoinersAdmin bool   `json:"joiners_admin"`
 	MaxGzBytes   *int64 `json:"max_gz_bytes"` // bytes
 	IdleTTL      *int64 `json:"idle_ttl"`     // seconds
@@ -22,6 +23,11 @@ type createReq struct {
 }
 
 func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
+	addr := srv.clientAddr(r)
+	if d, ok := srv.lim.allow(rlCreate, addr); !ok {
+		retryAfter(w, d)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
 	var req createReq
 	if err := decodeOptionalJSON(r.Body, &req); err != nil {
@@ -40,6 +46,7 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s, join, err := srv.create(p)
 	if errors.Is(err, session.ErrTooManySessions) {
+		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusTooManyRequests, err.Error())
 		return
 	}
@@ -47,7 +54,7 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	c := s.RegisterClient(srv.clientAddr(r), "", true) // the creator is the first session admin
+	c := s.RegisterClient(addr, "", true) // the creator is the first session admin
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"sid":        s.ID,
 		"token":      s.Token,
@@ -64,7 +71,7 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 // absent max_gz_bytes leaves the store default.
 func (srv *Server) createParams(req createReq) (session.CreateParams, error) {
 	caps := srv.opts.Caps
-	p := session.CreateParams{Label: req.Label, JoinersAdmin: req.JoinersAdmin}
+	p := session.CreateParams{Label: req.Label, JoinersAdmin: req.JoinersAdmin, Password: req.Password}
 	if req.MaxGzBytes != nil {
 		v := *req.MaxGzBytes
 		if v < 1 {
@@ -137,6 +144,78 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		"session_admin": c.SessionAdmin,
 		"roles":         []string{},
 	})
+}
+
+// join admits a client by the session password (no token needed). It is 404
+// when the session has no password, so a token-less caller cannot tell a
+// password-less session from a missing one.
+func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	addr := srv.clientAddr(r)
+	if !s.HasPassword() {
+		writeError(w, http.StatusNotFound, "no such session")
+		return
+	}
+	if d, ok := srv.lim.allow(rlJoin, addr); !ok {
+		retryAfter(w, d)
+		return
+	}
+	if d, ok := srv.lim.allow(rlJoin, "sid:"+s.ID); !ok {
+		retryAfter(w, d)
+		return
+	}
+	if s.Evicted(addr) {
+		writeError(w, http.StatusForbidden, "evicted")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	var req struct {
+		Password string `json:"password"`
+		Name     string `json:"name"`
+	}
+	if err := decodeOptionalJSON(r.Body, &req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if !s.CheckPassword(req.Password) {
+		writeError(w, http.StatusUnauthorized, "wrong password")
+		return
+	}
+	c := s.RegisterClient(addr, req.Name, s.JoinersAdmin())
+	s.Touch()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":     s.Token,
+		"client_id": c.ID,
+		"name":      c.Name,
+	})
+}
+
+// patchSession changes session settings; presently only the join password
+// (session admin). A null password field is a 400, an empty string clears it.
+func (srv *Server) patchSession(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	var req struct {
+		Password *string `json:"password"`
+	}
+	if err := decodeOptionalJSON(r.Body, &req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if req.Password == nil {
+		writeError(w, http.StatusBadRequest, "nothing to change")
+		return
+	}
+	s.SetPassword(*req.Password)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // decodeOptionalJSON decodes a JSON body into v, treating an empty body as no

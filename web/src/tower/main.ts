@@ -4,7 +4,7 @@ import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { Beam, ClientSummary, Snapshot, State, Verdict } from "../shared/types";
+import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
 import { type BeamView, failedStage, initialView, parseDeepLink, reduce, tick, type View } from "./state";
 
@@ -76,10 +76,10 @@ async function boot(): Promise<void> {
   else await renderSession();
 }
 
-async function create(): Promise<void> {
+async function create(opts: CreateOptions = {}): Promise<void> {
   notice = "";
   try {
-    const c = await createSession();
+    const c = await createSession(opts);
     current = { sid: c.sid, token: c.token, join_url: c.join_url, client_id: c.client_id, name: c.name };
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(current));
     attach(current);
@@ -162,9 +162,21 @@ async function renderSession(): Promise<void> {
     sessionEl.innerHTML = html`<div class="card">
       ${notice ? html`<p class="warn">${notice}</p>` : ""}
       <p>No session yet. Create one, then scan its code with the phone.</p>
-      <p><button class="btn primary" id="create">Create session</button></p>
+      <form id="create-form" class="create-options">
+        <label>Label <input id="opt-label" type="text" placeholder="optional" /></label>
+        <label>Join password <input id="opt-password" type="password" placeholder="none — token only" /></label>
+        <label class="check"><input id="opt-admin" type="checkbox" /> Joiners are session admins</label>
+        <p><button class="btn primary" type="submit">Create session</button></p>
+      </form>
     </div>`.html;
-    $<HTMLButtonElement>("#create", sessionEl).addEventListener("click", () => void create());
+    $<HTMLFormElement>("#create-form", sessionEl).addEventListener("submit", (e) => {
+      e.preventDefault();
+      void create({
+        label: $<HTMLInputElement>("#opt-label", sessionEl).value.trim() || undefined,
+        password: $<HTMLInputElement>("#opt-password", sessionEl).value || undefined,
+        joiners_admin: $<HTMLInputElement>("#opt-admin", sessionEl).checked || undefined,
+      });
+    });
     return;
   }
   const link = joinLink(current);

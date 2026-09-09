@@ -182,6 +182,9 @@ type Session struct {
 	joinersAdmin bool
 	idleTTL      time.Duration // stored and clamped; the clocks that read it are 6.6
 	inactiveTTL  time.Duration // stored and clamped; the clocks that read it are 6.6
+
+	salt     []byte // join-password salt; nil when no password
+	passHash []byte // sha256(salt || password); nil when no password
 }
 
 // TokenMatches compares in constant time.

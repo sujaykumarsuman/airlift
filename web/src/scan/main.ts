@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { eventsURL, postFrames, registerClient } from "../shared/api";
+import { eventsURL, joinSession, postFrames, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw } from "../shared/dom";
 import { subscribe, type SSEStatus } from "../shared/sse";
@@ -29,6 +29,7 @@ const messageEl = $<HTMLElement>("#message");
 const cameraSelect = $<HTMLSelectElement>("#camera");
 const startButton = $<HTMLButtonElement>("#start");
 const torchButton = $<HTMLButtonElement>("#torch");
+const joinForm = $<HTMLFormElement>("#join-form");
 
 function safeStorage(): Storage | null {
   try {
@@ -48,7 +49,8 @@ if (join.error !== undefined) {
   cameraSelect.hidden = true;
   throw new Error(join.error);
 }
-const { sid, token } = join;
+const sid = join.sid;
+let token = join.token ?? ""; // filled by a password join when the link has no token
 
 let snap: Snapshot | null = null;
 let relayStats: RelayStats | null = null;
@@ -230,8 +232,21 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
 }
 navigator.mediaDevices?.addEventListener?.("devicechange", () => void fillCameraList());
 
-// Register a client (so the client-tier routes admit us), then watch and scan.
+// With a token in the link we register straight away; without one, the session
+// is password-protected, so we show a join form first.
 async function init(): Promise<void> {
+  if (token) {
+    await register();
+    return;
+  }
+  message = "This session needs a password to join.";
+  joinForm.hidden = false;
+  startButton.hidden = true;
+  render();
+}
+
+// register binds a client to this address and starts watching + scanning.
+async function register(): Promise<void> {
   try {
     const c = await registerClient(sid, token, { role: "relay" });
     clientID = c.client_id;
@@ -245,6 +260,30 @@ async function init(): Promise<void> {
   render();
   void startCamera();
 }
+
+joinForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const password = $<HTMLInputElement>("#join-password").value;
+  const name = $<HTMLInputElement>("#join-name").value.trim();
+  message = "Joining…";
+  render();
+  void joinSession(sid, { password, name: name || undefined })
+    .then((j) => {
+      token = j.token;
+      clientID = j.client_id;
+      ownName = j.name;
+      joinForm.hidden = true;
+      message = "";
+      stopEvents = subscribeProgress("viewer");
+      render();
+      void startCamera();
+    })
+    .catch((err) => {
+      message = err instanceof Error ? err.message : String(err);
+      render();
+    });
+});
+
 void init();
 
 // Hardware-free testing: inject decoded strings as if the camera saw them.

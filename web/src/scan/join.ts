@@ -1,4 +1,7 @@
-export type Join = { sid: string; token: string; error?: undefined } | { error: string; sid?: undefined; token?: undefined };
+export type Join =
+  | { sid: string; token: string; needsPassword?: undefined; error?: undefined }
+  | { sid: string; token?: undefined; needsPassword: true; error?: undefined }
+  | { error: string; sid?: undefined; token?: undefined; needsPassword?: undefined };
 
 /** Strips a path prefix ("/airlift") off a pathname, leaving a rooted "/s/…". */
 function underBase(pathname: string, basePath: string): string {
@@ -12,9 +15,8 @@ export function parseJoin(pathname: string, hash: string, basePath = ""): Join {
   if (!m?.[1]) return { error: "This is not a join link: the address should look like /s/<session>#t=<token>." };
   const params = new URLSearchParams(hash.replace(/^#/, ""));
   const token = params.get("t")?.trim() ?? "";
-  if (!/^[A-Za-z0-9_-]{8,}$/.test(token)) {
-    return { error: "The join link has no session token after #t=. Scan the tower's QR code again." };
-  }
+  // No usable token: the page offers a password join (404s if none is set).
+  if (!/^[A-Za-z0-9_-]{8,}$/.test(token)) return { sid: m[1], needsPassword: true };
   return { sid: m[1], token };
 }
 
@@ -55,7 +57,7 @@ export function resolveJoin(pathname: string, hash: string, storage: JoinStorage
     return { error: "No previous session on this phone. Scan the tower's QR code to join one." };
   }
   const join = parseJoin(pathname, hash, basePath);
-  if (join.error === undefined) {
+  if (join.token !== undefined) {
     try {
       storage?.setItem(LAST_KEY, JSON.stringify({ sid: join.sid, token: join.token }));
     } catch {
