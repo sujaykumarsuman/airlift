@@ -1,34 +1,34 @@
 # STATUS
 
-## Phase 3 — Web + end-to-end: built and verified without hardware
+## Phase 4 — Hardening: built and verified without hardware
 
-- `web/`: `scan` (camera selector, BarcodeDetector or zxing-wasm, relay
-  with dedup/batching/retry, SSE progress, wake lock) and `tower`
-  (session, join QR and CA hint, live grid/fps/elapsed/ETA/relays, verdicts,
-  bundle summary, downloads, reset). Embedded in the binary.
-- Verified in a browser via `vite dev` against the tower: create session,
-  inject frames on the scan page, `--replay --into` over TLS, `READY`,
-  downloads with the right bytes and names, `--dest` written.
-- `airlift-tower --replay FILE --into JOIN_URL` added for that dev loop.
+- Fountain mode end to end: `beam --fountain` (LT, robust soliton, ADR
+  0009), a peeling decoder in Python and Go that share one packet contract
+  (checked seed by seed against `vectors-fountain.json`), sessions that
+  accept chunks and packets from any number of relays.
+- `--version-target`; torch, installable offline-first scan page,
+  `/s/last` resume; `started_at`/`finished_at` in the snapshot; the TLS
+  handshake noise silenced; GitHub Actions for CI and releases; README
+  workflow, tuning table and zero-hop variant.
+- Verified: 1 MB bundle through fountain replay with 20 % loss and
+  reordering in one pass; two relays beat one in the tests; tokens never
+  reach the log; expiry closes streams.
 
-## Pending — the Phase 3 hardware run
+## Pending — the hardware runs
 
-Run on the Mac + Android, per `docs/BUILD-PLAN.md` Phase 3 exit: install
-`/ca.crt` once, scan the join QR, scan `beam.html` off the monitor, reach
-`READY`, compare the zip and `--dest` with the source. Watch for: which
-decoder the scan page picked (shown in its stats line), decode rate at
-8 fps, and whether continuous focus engaged.
+Phase 3: Mac + Android, install `/ca.crt` once, scan the join QR, scan
+`beam.html` off the monitor, compare zip and `--dest` with the source; a
+second run shows no warning. Phase 4: the same with a 1 MB bundle in
+fountain mode at ≥ 8 fps decoded, then with two phones on one session.
+Watch the scan page's stats line for the decoder used and the decode rate.
 
-## Next — Phase 4: Hardening
+## Next
 
-- Fountain mode, `--version-target`, torch and offline-first scan page,
-  review items, README tuning guide, GitHub Actions.
+- Nothing scheduled beyond the hardware runs. Candidates once those are in:
+  tune the default `--chunk`/`--fps` to what the phones actually sustain,
+  and revisit the fountain packet count against measured loss.
 
 ## Open questions
 
-- `net/http` logs a "TLS handshake error … unknown certificate authority"
-  line for every CA-less client (each phone's first visit). Quiet it or keep
-  it as a hint? Decide during Phase 4's review.
-- The dashboard's elapsed time restarts if the page is reloaded mid-transfer
-  (timing lives in the page, not the API). Persist it, or add
-  `started_at` to the snapshot?
+- None. (The handshake log lines are now dropped; elapsed time comes from
+  the tower's clock.)

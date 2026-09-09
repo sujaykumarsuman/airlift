@@ -132,7 +132,7 @@ and by frames injected into the scan page, through to `READY`, verdicts and
 downloads. Still to run by hand: the Android camera path (decoder choice,
 resolution, focus) and the certificate bootstrap.
 
-## Phase 4 — Hardening
+## Phase 4 — Hardening ✔ (hardware runs pending)
 
 - Fountain mode: `beam --fountain`. LT codes, robust soliton degree
   distribution, `seq` carries the PRNG seed so the server regenerates block
@@ -155,3 +155,9 @@ resolution, focus) and the certificate bootstrap.
 Exit: a 1 MB bundle transfers reliably in fountain mode from a monitor at
 ≥ 8 fps decoded; two phones on one session are measurably faster than one.
 Commit.
+
+Done without hardware: a 1 MB base64 bundle (1065 chunks, 1748 packets)
+reaches `READY` through `--replay` with 20 % loss and reordering inside one
+pass, after 1.22 N packets; the server tests show two relays needing fewer
+frames each than one, in both modes. Still to run by hand: the same from a
+monitor, and two phones side by side.

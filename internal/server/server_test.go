@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"math/rand"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -25,8 +27,9 @@ import (
 )
 
 var (
-	vectorsPath = filepath.Join("..", "..", "sender", "testdata", "vectors.json")
-	fixtures    = filepath.Join("..", "..", "testdata", "bundles")
+	vectorsPath  = filepath.Join("..", "..", "sender", "testdata", "vectors.json")
+	fountainPath = filepath.Join("..", "..", "sender", "testdata", "vectors-fountain.json")
+	fixtures     = filepath.Join("..", "..", "testdata", "bundles")
 )
 
 type harness struct {
@@ -47,6 +50,7 @@ func start(t *testing.T, dest string, tweak func(*Options)) *harness {
 	}
 	if tweak != nil {
 		tweak(&opts)
+		h.store = opts.Store
 	}
 	h.srv = New(opts)
 	h.ts = httptest.NewServer(h.srv.Handler())
@@ -525,20 +529,33 @@ func TestStaticAndCA(t *testing.T) {
 	}
 
 	web := fstest.MapFS{
-		"index.html":     {Data: []byte("<title>dash</title>")},
-		"scan.html":      {Data: []byte("<title>scan</title>")},
-		"assets/app.js":  {Data: []byte("console.log(1)")},
-		"assets/app.css": {Data: []byte("body{}")},
+		"index.html":           {Data: []byte("<title>dash</title>")},
+		"scan.html":            {Data: []byte("<title>scan</title>")},
+		"assets/app.js":        {Data: []byte("console.log(1)")},
+		"assets/app.css":       {Data: []byte("body{}")},
+		"sw.js":                {Data: []byte("self.x=1")},
+		"manifest.webmanifest": {Data: []byte(`{"name":"airlift"}`)},
+		"icons/icon-192.png":   {Data: []byte("PNG")},
 	}
 	h2 := start(t, "", func(o *Options) {
 		o.Web = web
 		o.CACertPEM = []byte("-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n")
 	})
-	for p, want := range map[string]string{"/": "dash", "/s/xyz": "scan", "/assets/app.js": "console.log(1)"} {
+	for p, want := range map[string]string{"/": "dash", "/s/xyz": "scan", "/assets/app.js": "console.log(1)",
+		"/sw.js": "self.x=1", "/manifest.webmanifest": "airlift", "/icons/icon-192.png": "PNG"} {
 		resp, body := h2.do(t, "GET", p, "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(string(body), want) {
 			t.Fatalf("%s: %s %q", p, resp.Status, body)
 		}
+	}
+	if resp, _ := h2.do(t, "GET", "/manifest.webmanifest", "", nil); resp.Header.Get("Content-Type") != "application/manifest+json" || resp.Header.Get("Cache-Control") != "no-cache" {
+		t.Fatalf("manifest headers: %v", resp.Header)
+	}
+	if resp, _ := h2.do(t, "GET", "/sw.js", "", nil); !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/javascript") {
+		t.Fatalf("sw.js content type %q", resp.Header.Get("Content-Type"))
+	}
+	if resp, _ := h.do(t, "GET", "/sw.js", "", nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("sw.js without a build: %s", resp.Status)
 	}
 	resp, body := h2.do(t, "GET", "/ca.crt", "", nil)
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/x-x509-ca-cert" || !strings.HasPrefix(string(body), "-----BEGIN CERTIFICATE-----") {
@@ -559,5 +576,152 @@ func TestNames(t *testing.T) {
 		if got := [3]string{s, stem(s), treeDir(s)}; got != want {
 			t.Errorf("%q: got %v, want %v", name, got, want)
 		}
+	}
+}
+
+func loadFountain(t *testing.T) *replay.Dump {
+	t.Helper()
+	d, _, err := replay.Load(fountainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestFountainReplayWithLossAndReorder(t *testing.T) {
+	dest := t.TempDir()
+	h := start(t, dest, nil)
+	d := loadFountain(t)
+	c := h.create(t)
+	rep := h.replay(t, c, d, replay.Options{Drop: 0.3, Shuffle: true, Passes: 4, Seed: 2})
+	if rep.State != session.StateReady {
+		t.Fatalf("not READY after %d passes: %+v\n%s", rep.Passes, rep, rep.Snapshot)
+	}
+	if rep.Passes > 2 || rep.Bad != 0 {
+		t.Fatalf("fountain should finish within two lossy passes: %+v", rep)
+	}
+	snap := h.snapshot(t, c)
+	if snap.Total != d.Manifest.Total() || snap.Have != snap.Total || !snap.Verdicts.OrigSHA.OK || snap.Bundle.Files != 7 {
+		t.Fatalf("%+v", snap)
+	}
+	if snap.StartedAt == nil || snap.FinishedAt == nil || snap.FinishedAt.Before(*snap.StartedAt) {
+		t.Fatalf("timestamps %v %v", snap.StartedAt, snap.FinishedAt)
+	}
+	input, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
+	if got, _ := os.ReadFile(filepath.Join(dest, "bundle-base64.txt")); !bytes.Equal(got, input) {
+		t.Fatal("dest raw differs")
+	}
+}
+
+// relayWork runs `relays` concurrent scanners with independent loss and
+// returns how many frames the scanner that saw the session complete had to
+// post: with equal decode rates, that is proportional to wall-clock time.
+func relayWork(t *testing.T, h *harness, d *replay.Dump, relays int, drop float64) int {
+	t.Helper()
+	c := h.create(t)
+	var wg sync.WaitGroup
+	posted := make([]int, relays)
+	for i := 0; i < relays; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rep, err := replay.Run(context.Background(), h.ts.Client(), h.ts.URL, c.SID, c.Token, d,
+				replay.Options{Drop: drop, Shuffle: true, Passes: 12, Seed: int64(100*i + 7)})
+			if err != nil {
+				t.Errorf("relay %d: %v", i, err)
+				return
+			}
+			posted[i] = rep.Posted
+		}(i)
+	}
+	wg.Wait()
+	if h.snapshot(t, c).State != session.StateReady {
+		t.Fatalf("%d relays at drop %v: not READY", relays, drop)
+	}
+	least := posted[0]
+	for _, p := range posted[1:] {
+		least = min(least, p)
+	}
+	return least
+}
+
+func TestTwoRelaysBeatOne(t *testing.T) {
+	h := start(t, "", func(o *Options) { o.Store = session.NewStore(time.Hour, 32) })
+	for _, name := range []string{"sequential", "fountain"} {
+		d := loadVectors(t)
+		if name == "fountain" {
+			d = loadFountain(t)
+		}
+		one := relayWork(t, h, d, 1, 0.5)
+		two := relayWork(t, h, d, 2, 0.5)
+		t.Logf("%s at 50%% loss: one relay posted %d frames, two relays %d each", name, one, two)
+		if two >= one {
+			t.Fatalf("%s: two relays needed %d frames each, one needed %d", name, two, one)
+		}
+	}
+}
+
+func TestTokensNeverLogged(t *testing.T) {
+	var mu sync.Mutex
+	var logs []string
+	h := start(t, t.TempDir(), func(o *Options) {
+		o.Logf = func(format string, args ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			logs = append(logs, fmt.Sprintf(format, args...))
+		}
+	})
+	c := h.create(t)
+	h.do(t, "GET", "/api/sessions/"+c.SID, "wrong-"+c.Token, nil)
+	h.replay(t, c, loadVectors(t), replay.Options{})
+	h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=zip", c.Token, nil)
+	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, nil)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logs) < 3 {
+		t.Fatalf("expected lifecycle logs, got %v", logs)
+	}
+	for _, line := range logs {
+		if strings.Contains(line, c.Token) {
+			t.Fatalf("token leaked into the log: %q", line)
+		}
+	}
+	if !strings.Contains(strings.Join(h.joins, " "), c.Token) {
+		t.Fatal("the OnCreate hook (terminal QR) is the one place the token may go")
+	}
+}
+
+func TestSessionExpiryClosesStreams(t *testing.T) {
+	h := start(t, "", func(o *Options) { o.Store = session.NewStore(150*time.Millisecond, 32) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.store.Run(ctx, 20*time.Millisecond)
+	c := h.create(t)
+	req, _ := http.NewRequest("GET", h.ts.URL+"/api/sessions/"+c.SID+"/events", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := h.ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	r := bufio.NewReader(resp.Body)
+	if name, _ := readEvent(t, r); name != "state" {
+		t.Fatalf("first event %s", name)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		name, _ := readEvent(t, r)
+		if name == "closed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no closed event after expiry")
+		}
+	}
+	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID, c.Token, nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expired session still served: %s", resp.Status)
+	}
+	if h.store.Len() != 0 {
+		t.Fatalf("%d sessions left after the sweep", h.store.Len())
 	}
 }

@@ -63,3 +63,22 @@ export function explainCameraError(err: unknown): string {
       return err instanceof Error ? `Camera error: ${err.message}` : "Camera error.";
   }
 }
+
+export function hasTorch(stream: MediaStream): boolean {
+  const track = stream.getVideoTracks()[0];
+  if (!track || typeof track.getCapabilities !== "function") return false;
+  const caps = track.getCapabilities() as MediaTrackCapabilities & { torch?: boolean };
+  return caps.torch === true;
+}
+
+export async function setTorch(stream: MediaStream, on: boolean): Promise<boolean> {
+  const track = stream.getVideoTracks()[0];
+  if (!track) return false;
+  const torch: MediaTrackConstraintSet & { torch?: boolean } = { torch: on };
+  try {
+    await track.applyConstraints({ advanced: [torch] });
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -192,6 +193,7 @@ func runServe(ctx context.Context, c config, stdout io.Writer, logger *log.Logge
 		Handler:           srv.Handler(),
 		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: 10 * time.Second,
+		ErrorLog:          log.New(quietTLS{logger.Writer()}, "", log.Ltime),
 	}
 	fmt.Fprintf(stdout, "airlift-tower\n  dashboard  %s/\n", base)
 	if caPEM != nil {
@@ -375,6 +377,17 @@ func towerClient(caDir string) (*http.Client, error) {
 	tr = tr.Clone()
 	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	return &http.Client{Transport: tr, Timeout: 30 * time.Second}, nil
+}
+
+// quietTLS drops net/http's "TLS handshake error" lines: every phone's first
+// visit before it installs the CA produces one, and the README covers that.
+type quietTLS struct{ w io.Writer }
+
+func (q quietTLS) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	return q.w.Write(p)
 }
 
 func printOutcome(w io.Writer, snap session.Snapshot) {

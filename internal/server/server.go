@@ -73,6 +73,25 @@ func (srv *Server) routes() {
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
 	if srv.opts.Web != nil {
 		m.Handle("GET /assets/", http.FileServerFS(srv.opts.Web))
+		m.Handle("GET /icons/", http.FileServerFS(srv.opts.Web))
+		m.HandleFunc("GET /sw.js", srv.file("sw.js", "text/javascript; charset=utf-8"))
+		m.HandleFunc("GET /manifest.webmanifest", srv.file("manifest.webmanifest", "application/manifest+json"))
+	}
+}
+
+// file serves one file from web/dist with a fixed content type, never cached
+// so a new build reaches installed scan pages on their next load.
+func (srv *Server) file(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f, err := srv.opts.Web.Open(name)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "not built")
+			return
+		}
+		f.Close()
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFileFS(w, r, srv.opts.Web, name)
 	}
 }
 

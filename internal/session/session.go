@@ -91,6 +91,8 @@ type Snapshot struct {
 	Downloads     []string       `json:"downloads"`
 	DestPath      *string        `json:"dest_path"`
 	Error         *string        `json:"error"`
+	StartedAt     *time.Time     `json:"started_at"`
+	FinishedAt    *time.Time     `json:"finished_at"`
 	ExpiresAt     time.Time      `json:"expires_at"`
 }
 
@@ -103,6 +105,12 @@ type IngestResult struct {
 	Total     int
 	State     State
 	Completed bool // this ingest filled the last chunk
+}
+
+// heldKey identifies a frame held before the manifest binds the session.
+type heldKey struct {
+	typ proto.Type
+	seq uint16
 }
 
 // Subscriber receives a (coalesced) signal on C whenever the snapshot changes.
@@ -127,10 +135,14 @@ type Session struct {
 	sender     uint32
 	manifest   proto.Manifest
 	total      int
-	chunks     [][]byte
+	decoder    *proto.Decoder  // live while receiving
+	packets    map[uint16]bool // fountain seeds seen for the bound sender
+	chunks     [][]byte        // set on completion, released by Finish
 	have       int
-	held       map[uint32]map[uint16][]byte
+	held       map[uint32]map[heldKey][]byte
 	heldCount  int
+	startedAt  time.Time
+	finishedAt time.Time
 	ticks      []time.Time
 	subs       map[*Subscriber]struct{}
 	outcome    Outcome
@@ -236,11 +248,14 @@ func (s *Session) Ingest(texts []string) IngestResult {
 		switch fr.Type {
 		case proto.TypeManifest:
 			s.ingestManifest(fr, &r)
-		case proto.TypeData:
-			s.ingestData(fr, now, &r)
-		default: // fountain: Phase 4
+		case proto.TypeData, proto.TypeFountain:
+			s.ingestPayload(fr, now, &r)
+		default:
 			r.Bad++
 		}
+	}
+	if r.Accepted > 0 && s.startedAt.IsZero() {
+		s.startedAt = now
 	}
 	r.Have, r.Total, r.State = s.have, s.total, s.state
 	if r.Accepted > 0 || s.state != before {
@@ -273,29 +288,51 @@ func (s *Session) ingestManifest(fr proto.Frame, r *IngestResult) {
 	}
 	s.bound, s.sender, s.manifest = true, fr.Session, m
 	s.total = m.Total()
-	s.chunks = make([][]byte, s.total)
+	s.decoder = proto.NewDecoder(s.total, m.Chunk)
+	s.packets = map[uint16]bool{}
 	s.state = StateReceiving
 	r.Accepted++
-	for seq, payload := range s.held[fr.Session] {
-		s.place(int(seq), payload)
+	for key, payload := range s.held[fr.Session] {
+		s.place(key.typ, key.seq, payload)
 	}
 	s.held, s.heldCount = nil, 0
 	s.checkComplete(r)
 }
 
-func (s *Session) place(seq int, payload []byte) bool {
-	if seq >= s.total || s.chunks[seq] != nil || len(payload) != s.manifest.ChunkLen(seq) {
+// place feeds a DATA chunk or FOUNTAIN packet to the decoder. It returns
+// false for a frame that cannot belong here (wrong length, out of range).
+func (s *Session) place(typ proto.Type, seq uint16, payload []byte) bool {
+	var progress bool
+	var err error
+	switch typ {
+	case proto.TypeData:
+		if int(seq) >= s.total || len(payload) != s.manifest.ChunkLen(int(seq)) {
+			return false
+		}
+		progress, err = s.decoder.AddData(int(seq), payload)
+	case proto.TypeFountain:
+		if len(payload) != s.manifest.Chunk {
+			return false
+		}
+		s.packets[seq] = true
+		progress, err = s.decoder.AddPacket(seq, payload)
+	default:
 		return false
 	}
-	s.chunks[seq] = payload
-	s.have++
+	if err != nil {
+		return false
+	}
+	if progress {
+		s.have = s.decoder.Decoded()
+	}
 	return true
 }
 
-func (s *Session) ingestData(fr proto.Frame, now time.Time, r *IngestResult) {
+func (s *Session) ingestPayload(fr proto.Frame, now time.Time, r *IngestResult) {
+	key := heldKey{fr.Type, fr.Seq}
 	if !s.bound {
 		if s.held == nil {
-			s.held = map[uint32]map[uint16][]byte{}
+			s.held = map[uint32]map[heldKey][]byte{}
 		}
 		bucket, ok := s.held[fr.Session]
 		if !ok {
@@ -303,10 +340,10 @@ func (s *Session) ingestData(fr proto.Frame, now time.Time, r *IngestResult) {
 				r.Bad++
 				return
 			}
-			bucket = map[uint16][]byte{}
+			bucket = map[heldKey][]byte{}
 			s.held[fr.Session] = bucket
 		}
-		if _, dup := bucket[fr.Seq]; dup {
+		if _, dup := bucket[key]; dup {
 			r.Dup++
 			return
 		}
@@ -314,21 +351,29 @@ func (s *Session) ingestData(fr proto.Frame, now time.Time, r *IngestResult) {
 			r.Bad++
 			return
 		}
-		bucket[fr.Seq] = fr.Payload
+		bucket[key] = fr.Payload
 		s.heldCount++
 		r.Accepted++
 		s.tick(now)
 		return
 	}
-	if fr.Session != s.sender || int(fr.Total) != s.total || int(fr.Seq) >= s.total {
+	if fr.Session != s.sender || int(fr.Total) != s.total {
 		r.Bad++
 		return
 	}
-	if s.chunks[fr.Seq] != nil {
-		r.Dup++
-		return
+	switch fr.Type {
+	case proto.TypeData:
+		if int(fr.Seq) < s.total && s.decoder.Have(int(fr.Seq)) {
+			r.Dup++
+			return
+		}
+	case proto.TypeFountain:
+		if s.packets[fr.Seq] {
+			r.Dup++
+			return
+		}
 	}
-	if !s.place(int(fr.Seq), fr.Payload) {
+	if !s.place(fr.Type, fr.Seq, fr.Payload) {
 		r.Bad++
 		return
 	}
@@ -338,7 +383,10 @@ func (s *Session) ingestData(fr proto.Frame, now time.Time, r *IngestResult) {
 }
 
 func (s *Session) checkComplete(r *IngestResult) {
-	if s.state == StateReceiving && s.have == s.total {
+	if s.state == StateReceiving && s.decoder != nil && s.decoder.Complete() {
+		s.chunks = s.decoder.Blocks(s.manifest.GzSize)
+		s.have = s.total
+		s.decoder, s.packets = nil, nil
 		s.state = StateVerifying
 		r.Completed = true
 	}
@@ -379,6 +427,7 @@ func (s *Session) Finish(o Outcome) {
 	}
 	s.outcome = o
 	s.chunks = nil
+	s.finishedAt = s.now()
 	if o.Err != "" {
 		s.state = StateFailed
 	} else {
@@ -442,6 +491,14 @@ func (s *Session) Snapshot() Snapshot {
 	} else if msg := s.outcome.Warning; msg != "" {
 		snap.Error = &msg
 	}
+	if !s.startedAt.IsZero() {
+		t := s.startedAt
+		snap.StartedAt = &t
+	}
+	if !s.finishedAt.IsZero() {
+		t := s.finishedAt
+		snap.FinishedAt = &t
+	}
 	return snap
 }
 
@@ -452,7 +509,10 @@ func (s *Session) bitmapLocked() string {
 	}
 	bits := make([]byte, (s.total+7)/8)
 	for i := 0; i < s.total; i++ {
-		present := s.chunks == nil && s.have == s.total || s.chunks != nil && s.chunks[i] != nil
+		present := s.have == s.total
+		if s.decoder != nil {
+			present = s.decoder.Have(i)
+		}
 		if present {
 			bits[i/8] |= 0x80 >> (i % 8)
 		}

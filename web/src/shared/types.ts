@@ -28,6 +28,8 @@ export interface Snapshot {
   downloads: string[];
   dest_path: string | null;
   error: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
   expires_at: string;
 }
 

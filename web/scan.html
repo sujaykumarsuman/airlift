@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <meta name="theme-color" content="#000000" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon-192.png" />
     <title>airlift scan</title>
   </head>
   <body class="scan">
@@ -20,6 +22,7 @@
         <div id="message" class="message"></div>
         <div class="controls">
           <select id="camera" hidden></select>
+          <button id="torch" class="btn" hidden>Torch</button>
           <button id="start" class="btn primary" hidden>Start camera</button>
         </div>
       </div>

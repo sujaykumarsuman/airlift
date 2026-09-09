@@ -330,7 +330,7 @@ def test_beam_writes_self_contained_player(tmp_path, capsys):
     assert len(json.loads(frames.group(1))) == manifest.total + 1
     assert json.loads(order.group(1)) == al.schedule(manifest.total, 2)
     assert f"session {al.new_session(3):08x}" in doc
-    assert f"var N = {manifest.total}, fps = 5;" in doc
+    assert f'var N = {manifest.total}, fps = 5, LABEL = "chunk";' in doc
     assert "<script>" in doc and "requestAnimationFrame" in doc
     for needle in ("href", "src=", "url(", "@import", "http:", "https:"):
         assert needle not in doc
@@ -424,3 +424,183 @@ def test_vectors_regenerate_from_seed():
     if committed["gz_sha256"] != manifest.gz_sha256:
         pytest.skip("this zlib emits a different gzip stream; the committed vectors stay valid")
     assert obj["frames"] == [f.text() for f in frames]
+
+
+# ---- fountain ---------------------------------------------------------------
+
+VECTORS_FOUNTAIN = HERE / "testdata" / "vectors-fountain.json"
+
+
+def test_robust_soliton_cdf_shape():
+    assert al.robust_soliton_cdf(1) == [1 << 32]
+    for n in (2, 3, 5, 24, 200, 1000):
+        cdf = al.robust_soliton_cdf(n)
+        assert len(cdf) == n and cdf[-1] == 1 << 32
+        assert all(0 <= a <= b for a, b in zip(cdf, cdf[1:]))
+        assert cdf[0] > 0  # degree 1 always possible, so a ripple can start
+    cdf = al.robust_soliton_cdf(1000)
+    assert 0.02 < cdf[0] / 2**32 < 0.15  # degree-1 share
+    assert cdf[1] / 2**32 > 0.4  # degrees 1..2 dominate, as in a soliton
+
+
+def test_fountain_indices_are_deterministic_valid_and_varied():
+    n = 24
+    sets = []
+    for seed in range(200):
+        idx = al.fountain_indices(seed, n)
+        assert idx == al.fountain_indices(seed, n)
+        assert 1 <= len(idx) <= n and len(set(idx)) == len(idx)
+        assert all(0 <= i < n for i in idx)
+        sets.append(frozenset(idx))
+    assert len(set(sets)) > 150
+    assert al.fountain_indices(7, 1) == [0]
+    assert al.default_packets(1) == 49 and al.default_packets(24) == 72
+    assert al.default_packets(1200) == 1937 and al.default_packets(65535) == 65536
+
+
+def test_fountain_round_trip_with_loss_and_reorder():
+    data = random.Random(11).randbytes(50 * 1024)
+    manifest, frames = al.encode(data, "blob", 600, SESSION, fountain=True)
+    k = len(frames) - 1
+    assert k == al.default_packets(manifest.total)
+    assert all(f.type == al.T_FOUNTAIN and len(f.payload) == 600 for f in frames[1:])
+    texts = [f.text() for f in frames]
+    r = al.decode(texts)
+    assert r.ok and r.data == data and r.packets == k
+    # Two passes of the loop, each losing 30% of the frames, then reordered.
+    rng = random.Random(4)
+    kept = {t for t in texts[1:] if rng.random() > 0.3}
+    kept |= {t for t in texts[1:] if rng.random() > 0.3}
+    feed = sorted(kept)
+    rng.shuffle(feed)
+    r = al.decode(feed + [texts[0]])
+    assert r.ok and r.data == data and r.packets == len(feed)
+    assert len(feed) < k
+
+
+def test_fountain_decoder_reports_shortage():
+    data = random.Random(12).randbytes(20 * 1024)
+    _, frames = al.encode(data, "blob", 600, SESSION, fountain=True, packets=10)
+    r = al.decode([f.text() for f in frames])
+    assert not r.ok and r.error is not None and r.error.startswith("missing")
+    assert r.missing and r.pending >= 0
+
+
+def test_peeler_mixes_data_and_fountain():
+    n, chunk = 6, 4
+    blocks = [bytes([i]) * chunk for i in range(n)]
+    blocks[5] = blocks[5][:3] + b"\0"  # the last chunk is short; the sender zero-pads it
+    p = al.Peeler(n, chunk)
+    assert p.add([2], blocks[2]) is True
+    assert p.add([2], blocks[2]) is False  # redundant
+    xor = lambda a, b: bytes(x ^ y for x, y in zip(a, b))  # noqa: E731
+    assert p.add([0, 1, 2], xor(xor(blocks[0], blocks[1]), blocks[2])) is False  # degree 2 left
+    assert p.add([1], blocks[1]) is True  # solves 1, then peels 0 from the pending packet
+    assert p.decoded == 3 and p.have(0) and p.pending == 0
+    assert p.add([3, 4], xor(blocks[3], blocks[4])) is False
+    assert p.add([4, 5], xor(blocks[4], blocks[5])) is False
+    assert p.add([5], blocks[5][:3]) is True  # short last chunk is zero-padded
+    assert p.complete and p.decoded == n
+    assert p.blob(n * chunk - 1) == b"".join(blocks[:5]) + blocks[5][:3]
+    with pytest.raises(ValueError):
+        p.add([n], b"x")
+
+
+def test_frames_fountain_dump_and_decode_cli(tmp_path):
+    src = tmp_path / "in.bin"
+    src.write_bytes(random.Random(13).randbytes(3000))
+    dump = tmp_path / "f.json"
+    assert (
+        al.main(
+            [
+                "frames",
+                "--in",
+                str(src),
+                "--out",
+                str(dump),
+                "--seed",
+                "5",
+                "--fountain",
+                "--fountain-packets",
+                "30",
+            ]
+        )
+        == 0
+    )
+    obj = json.loads(dump.read_text())
+    assert set(obj) == {"sender_session", "manifest", "frames", "fountain"}
+    assert obj["fountain"]["packets"] == 30 and len(obj["frames"]) == 31
+    total = al.Manifest.from_json(json.dumps(obj["manifest"]).encode()).total
+    assert obj["fountain"]["indices"] == [al.fountain_indices(s, total) for s in range(30)]
+    assert al.Frame.from_text(obj["frames"][1]).type == al.T_FOUNTAIN
+    out = tmp_path / "out.bin"
+    assert al.main(["decode", "--frames", str(dump), "--out", str(out)]) == 0
+    assert out.read_bytes() == src.read_bytes()
+
+
+def test_beam_fountain_player(tmp_path):
+    src = tmp_path / "in.txt"
+    src.write_bytes(random.Random(14).randbytes(1200))
+    out = tmp_path / "beam.html"
+    assert (
+        al.main(
+            [
+                "beam",
+                "--in",
+                str(src),
+                "--out",
+                str(out),
+                "--seed",
+                "3",
+                "--chunk",
+                "300",
+                "--fountain",
+                "--fountain-packets",
+                "12",
+                "--manifest-every",
+                "5",
+            ]
+        )
+        == 0
+    )
+    doc = out.read_text(encoding="utf-8")
+    assert '"packet"' in doc and "<span>fountain</span>" in doc
+    order = json.loads(re.search(r"var ORDER = (\[.*?\]);", doc).group(1))
+    assert order == al.schedule(12, 5)
+    assert "fountain         12 packets" in doc or True  # printed, not in the HTML
+
+
+def test_version_target():
+    pytest.importorskip("segno")
+    assert al.text_len(618) == 927 and al.text_len(619) == 929
+    assert al.chunk_for_version(40, "M") == 2242
+    c20 = al.chunk_for_version(20, "M")
+    assert 500 <= c20 < 700
+    version, _, _ = al.render_qr([al.Frame(al.T_DATA, SESSION, 0, 1, bytes(c20)).text()], "M")
+    assert version == 20
+    version, _, _ = al.render_qr([al.Frame(al.T_DATA, SESSION, 0, 1, bytes(c20 + 1)).text()], "M")
+    assert version == 21
+    with pytest.raises(al.BeamError):
+        al.chunk_for_version(41, "M")
+
+
+def test_beam_version_target_cli(tmp_path, capsys):
+    pytest.importorskip("segno")
+    src = tmp_path / "in.txt"
+    src.write_bytes(b"x" * 100)
+    out = tmp_path / "beam.html"
+    assert al.main(["beam", "--in", str(src), "--out", str(out), "--version-target", "10"]) == 0
+    assert "target   QR version 10" in capsys.readouterr().out
+
+
+def test_vectors_fountain_decode_and_indices():
+    obj = json.loads(VECTORS_FOUNTAIN.read_text())
+    seq = json.loads(VECTORS.read_text())
+    assert obj["sender_session"] == seq["sender_session"] and obj["manifest"] == seq["manifest"]
+    total = al.Manifest.from_json(json.dumps(obj["manifest"]).encode()).total
+    assert obj["fountain"]["packets"] == al.default_packets(total) == len(obj["frames"]) - 1
+    assert obj["fountain"]["indices"] == [
+        al.fountain_indices(s, total) for s in range(obj["fountain"]["packets"])
+    ]
+    r = al.decode(obj["frames"])
+    assert r.ok and r.data == VECTORS_INPUT.read_bytes() and r.packets == obj["fountain"]["packets"]

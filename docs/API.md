@@ -79,6 +79,8 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `downloads` | string[] | subset of `raw`, `file`, `zip`; empty unless `READY` |
 | `dest_path` | string or null | what `--dest` received: the unpacked tree for a bundle, else the raw file |
 | `error` | string or null | the failure in `FAILED`; in `READY`, a `--dest` write failure (downloads still work) |
+| `started_at` | RFC 3339 or null | when the first frame was accepted |
+| `finished_at` | RFC 3339 or null | when verification ended, either way |
 | `expires_at` | RFC 3339 | refreshed on every authenticated call |
 
 `expected` and `actual` are hex digests for `gz_sha` and `orig_sha`. For
@@ -94,8 +96,10 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 - `dup`: frames already held, and every frame once the session has left the
   receiving states.
 - `bad`: undecodable, failing CRC, from another sender session once bound,
-  the wrong length for their position, out-of-range `seq`, or FOUNTAIN
-  (Phase 4).
+  the wrong length for their position, or out-of-range `seq`.
+
+FOUNTAIN packets are accepted like DATA chunks; `have` counts recovered
+chunks either way, so it can rise by several per packet.
 
 Multiple scanners may post concurrently. The first MANIFEST binds the sender
 session; until then DATA frames from up to 8 sender sessions (65 536 frames)
@@ -137,7 +141,9 @@ sanitiser. Existing files are overwritten.
 
 `GET /` serves the dashboard entry, `GET /s/{sid}` the scan entry, and
 `/assets/…` the Vite build output, all from the embedded `web/dist`; until
-the UI is built they are placeholders. The dashboard also accepts
+the UI is built they are placeholders. `/sw.js`, `/manifest.webmanifest`
+and `/icons/…` make the scan page installable and offline-first on the
+phone; the service worker never touches `/api/` or `/ca.crt`. The dashboard also accepts
 `/#s={sid}&t={token}` so a second device can watch an existing session; it
 keeps its own session in `sessionStorage` across reloads. `GET /ca.crt` serves the local CA in
 PEM with `Content-Type: application/x-x509-ca-cert` so phones offer to

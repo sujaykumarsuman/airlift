@@ -9,13 +9,15 @@ import {
   activeDeviceId,
   describeCamera,
   explainCameraError,
+  hasTorch,
   listCameras,
   openCamera,
+  setTorch,
   stopStream,
   streamSize,
 } from "./camera";
 import { createDecoder, startDecodeLoop, type Decoder, type LoopStats } from "./decoder";
-import { parseJoin } from "./join";
+import { resolveJoin } from "./join";
 import { Relay, type RelayStats } from "./relay";
 
 const video = $<HTMLVideoElement>("#video");
@@ -27,8 +29,17 @@ const statsEl = $<HTMLElement>("#stats");
 const messageEl = $<HTMLElement>("#message");
 const cameraSelect = $<HTMLSelectElement>("#camera");
 const startButton = $<HTMLButtonElement>("#start");
+const torchButton = $<HTMLButtonElement>("#torch");
 
-const join = parseJoin(location.pathname, location.hash);
+function safeStorage(): Storage | null {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
+const join = resolveJoin(location.pathname, location.hash, safeStorage());
+if (join.redirect) history.replaceState(null, "", join.redirect);
 if (join.error !== undefined) {
   progressEl.textContent = "✗";
   stateEl.textContent = "Not a join link";
@@ -51,6 +62,7 @@ let connection: SSEStatus = "connecting";
 let message = "";
 let cameraLabel = "";
 let wakeLock: WakeLockSentinel | null = null;
+let torchOn = false;
 
 const relay = new Relay({
   post: (frames) => postFrames(sid, token, frames),
@@ -151,6 +163,9 @@ async function startCamera(deviceId?: string): Promise<void> {
     }
     message = "Point the camera at the beam.";
     startButton.hidden = true;
+    torchOn = false;
+    torchButton.hidden = !hasTorch(stream);
+    torchButton.textContent = "Torch";
     void requestWakeLock();
   } catch (err) {
     message = explainCameraError(err);
@@ -166,6 +181,7 @@ function stopCamera(final = true): void {
   stopLoop = null;
   if (stream) stopStream(stream);
   stream = null;
+  torchButton.hidden = true;
   video.srcObject = null;
   loopStats = null;
   if (final) void relay.flush();
@@ -185,6 +201,18 @@ document.addEventListener("visibilitychange", () => {
 });
 cameraSelect.addEventListener("change", () => void startCamera(cameraSelect.value));
 startButton.addEventListener("click", () => void startCamera());
+torchButton.addEventListener("click", () => {
+  if (!stream) return;
+  void setTorch(stream, !torchOn).then((ok) => {
+    if (ok) torchOn = !torchOn;
+    torchButton.textContent = torchOn ? "Torch off" : "Torch";
+  });
+});
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {
+    /* the page works without it; it only loses offline reloads */
+  });
+}
 navigator.mediaDevices?.addEventListener?.("devicechange", () => void fillCameraList());
 
 stopEvents = subscribeProgress("viewer");

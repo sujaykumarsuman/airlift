@@ -19,7 +19,17 @@ type dump struct {
 
 func vectors(t *testing.T) dump {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "sender", "testdata", "vectors.json"))
+	return load(t, "vectors.json")
+}
+
+func fountainVectors(t *testing.T) dump {
+	t.Helper()
+	return load(t, "vectors-fountain.json")
+}
+
+func load(t *testing.T, name string) dump {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "sender", "testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +239,8 @@ func TestIngestRejectsForeignAndMalformed(t *testing.T) {
 		t.Fatalf("hold/bind: %+v", r)
 	}
 	r := s.Ingest([]string{foreignData, foreignManifest, wrongLen, badSeq, badTotal, fountain, d.Frames[0], d.Frames[1], d.Frames[1]})
-	if r.Bad != 6 || r.Dup != 2 || r.Accepted != 1 || r.Have != 1 {
+	// The well-formed fountain packet is accepted (it feeds the decoder); the rest are bad or dup.
+	if r.Bad != 5 || r.Dup != 2 || r.Accepted != 2 || r.Have != 1 {
 		t.Fatalf("after bind: %+v", r)
 	}
 }
@@ -339,4 +350,65 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestIngestFountainShuffledWithLoss(t *testing.T) {
+	st, c := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	d := fountainVectors(t)
+	packets := append([]string(nil), d.Frames[1:]...)
+	rand.New(rand.NewSource(5)).Shuffle(len(packets), func(i, j int) { packets[i], packets[j] = packets[j], packets[i] })
+	kept := packets[:len(packets)*3/4]
+	// Packets before the manifest are held, then adopted when it arrives.
+	r := s.Ingest(kept[:10])
+	if r.Accepted != 10 || r.State != StateWaitingManifest {
+		t.Fatalf("held: %+v", r)
+	}
+	if snap := s.Snapshot(); snap.StartedAt == nil || !snap.StartedAt.Equal(c.t) {
+		t.Fatalf("started_at not set on first accepted frame: %+v", snap.StartedAt)
+	}
+	r = s.Ingest(append([]string{d.Frames[0]}, kept[10:]...))
+	if !r.Completed || r.State != StateVerifying || r.Have != r.Total || r.Bad != 0 {
+		t.Fatalf("fountain: %+v", r)
+	}
+	// The decoder completes part-way through the batch; the rest count as dup.
+	if r.Accepted+r.Dup != len(kept)-10+1 || r.Accepted < 10 {
+		t.Fatalf("accepted %d + dup %d, want %d frames accounted for", r.Accepted, r.Dup, len(kept)-10+1)
+	}
+	m, chunks, ok := s.Chunks()
+	if !ok || len(chunks) != m.Total() || len(chunks[len(chunks)-1]) != m.ChunkLen(m.Total()-1) {
+		t.Fatalf("chunks: ok=%v n=%d", ok, len(chunks))
+	}
+	var total int64
+	for _, ch := range chunks {
+		total += int64(len(ch))
+	}
+	if total != m.GzSize {
+		t.Fatalf("chunks sum to %d, gz_size %d", total, m.GzSize)
+	}
+	// Repeats and late packets are dup; a packet of the wrong length is bad.
+	if r := s.Ingest(kept[:3]); r.Dup != 3 {
+		t.Fatalf("late: %+v", r)
+	}
+	s.Finish(Outcome{})
+	if snap := s.Snapshot(); snap.FinishedAt == nil || snap.State != StateReady {
+		t.Fatalf("finished_at: %+v", snap)
+	}
+}
+
+func TestIngestFountainValidation(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	d := fountainVectors(t)
+	manifest, _ := proto.ParseText(d.Frames[0])
+	pkt, _ := proto.ParseText(d.Frames[1])
+	short := proto.Frame{Type: proto.TypeFountain, Session: pkt.Session, Seq: 9, Total: pkt.Total, Payload: pkt.Payload[:100]}.Text()
+	s.Ingest([]string{d.Frames[0]})
+	r := s.Ingest([]string{d.Frames[1], d.Frames[1], short})
+	if r.Accepted != 1 || r.Dup != 1 || r.Bad != 1 {
+		t.Fatalf("%+v", r)
+	}
+	if snap := s.Snapshot(); snap.Total != int(manifest.Total) || snap.Have > int(manifest.Total) {
+		t.Fatalf("snapshot %+v", snap)
+	}
 }

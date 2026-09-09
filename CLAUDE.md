@@ -93,10 +93,13 @@ directly (out of scope; see non-goals).
 - `airlift-tower --replay FILE --into JOIN_URL` feeds a session on a running
   tower; it is how the dashboard is exercised without a camera.
 - Shared fixtures: `testdata/bundles/` (trees plus the bundles
-  `tools/repobundle.py` packs from them) and `sender/testdata/vectors.json`
-  (`airlift.py frames --seed 1` over the multi base64 bundle). Regenerate
-  only when their inputs change, with the commands in their READMEs, and
-  commit inputs and outputs together.
+  `tools/repobundle.py` packs from them) and `sender/testdata/vectors*.json`
+  (`airlift.py frames --seed 1`, sequential and `--fountain`, over the multi
+  base64 bundle; `make vectors`). Regenerate only when their inputs or the
+  wire format change, and commit inputs and outputs together.
+- The fountain packet construction is a cross-language contract (ADR 0009):
+  change it in `airlift.py` and `internal/proto/fountain.go` together, keep
+  the arithmetic free of fused multiply-add, and regenerate the vectors.
 - `STATUS.md` updated at the end of every phase: done / next / open questions.
 - British English in docs.
 - Tokens are never logged.

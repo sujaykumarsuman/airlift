@@ -9,10 +9,35 @@ the file, verifies it hash by hash, unpacks it if it is a
 [`repobundle`](tools/repobundle.py), and serves the result to a dashboard and
 to disk.
 
-Status: **Phase 3 (web UI)**. Sender, tower, dashboard and phone page are
-built and verified end to end without a camera; the run on real hardware is
-the last step. See [`STATUS.md`](STATUS.md) and
+Status: **Phase 4 (hardening)**. Everything is built and verified end to
+end without a camera, fountain mode included; the runs on real hardware are
+what remains. See [`STATUS.md`](STATUS.md) and
 [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md).
+
+## The whole workflow
+
+On the air-gapped machine, in the repository to move:
+
+```bash
+python3 repobundle.py pack --format base64 --out repo-bundle.txt
+```
+
+```bash
+python3 airlift.py beam --in repo-bundle.txt --out beam.html --fountain
+```
+
+On the laptop:
+
+```bash
+airlift-tower --dest ~/airlift-in
+```
+
+Open the dashboard it prints, create a session, scan the join code with the
+phone, then point the phone at `beam.html` running full-screen on the
+air-gapped monitor. The dashboard reaches `READY` when every hash matches;
+the unpacked tree is under `~/airlift-in/repo-bundle/` and downloadable as
+a zip. Without a phone, a laptop with a webcam can run the scan page
+itself; see the zero-hop variant below.
 
 ## Pieces
 
@@ -48,6 +73,55 @@ Keys in the player: space pause · ←/→ step · +/- fps · f fullscreen.
 `airlift.py frames` dumps the frames as JSON and `airlift.py decode` rebuilds
 the file from such a dump, no camera involved; both need only the standard
 library.
+
+### Sequential or fountain
+
+The default beam shows the chunks in order and repeats; a missed frame costs
+another pass of the loop, so long transfers spend most of their time
+waiting for stragglers. `--fountain` shows LT-coded packets instead: any
+roughly 1.2 N distinct packets rebuild the file, so loss only delays
+completion by the frames lost, and a second phone on the same session
+halves the time. Fountain beams carry about `N + 3·√N·ln N` packets, so the
+HTML is larger and, for small files, a pass is longer than the file
+warrants; use it for anything over a few hundred chunks.
+
+### Tuning
+
+Throughput is chunk bytes × decoded frames per second. Bigger QR versions
+carry more per frame but need more pixels per module on the camera, and a
+phone decodes small symbols more reliably. `--version-target V` picks the
+largest chunk for a version; these are the numbers at ECC M:
+
+| QR version | modules | bytes/frame | KB/s at 8 fps | KB/s at 12 fps | 1 MB gzip at 8 fps |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 57×57 | 189 | 1.5 | 2.2 | 11.6 min |
+| 15 | 77×77 | 382 | 3.0 | 4.5 | 5.7 min |
+| 20 | 97×97 | 628 | 4.9 | 7.4 | 3.5 min |
+| 25 | 117×117 | 949 | 7.4 | 11.1 | 2.3 min |
+| 30 | 137×137 | 1311 | 10.2 | 15.4 | 1.7 min |
+| 40 | 177×177 | 2242 | 17.5 | 26.3 | 1.0 min |
+
+Start with the default (600 bytes, version 20) at 8 fps. If the phone
+decodes every frame (its stats line shows the decode rate), raise `--fps`
+with the `+` key until it starts missing, then back off; if it misses at
+8 fps, try a smaller version or move the phone closer. Larger modules
+matter more than more of them. `--ecc L` gains ~15 % capacity at the cost
+of glare tolerance; `--ecc Q` or `H` the reverse.
+
+### Zero-hop variant
+
+Android 14+ can act as a USB webcam (Settings → Connected devices → USB →
+Webcam). Plug the phone into the laptop, run `airlift-tower`, open the
+dashboard *and* the scan link on the laptop itself, and pick the phone in
+the scan page's camera selector; the same works with any external camera.
+Nothing crosses the LAN.
+
+### On the phone
+
+Add the scan page to the home screen when the browser offers it: it
+installs with an icon, opens full-screen, works offline once loaded, and
+reopens the session it last joined. A torch button appears on cameras that
+have one; it rarely helps with a monitor.
 
 ## Tower (on the laptop)
 

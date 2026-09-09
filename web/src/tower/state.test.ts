@@ -52,3 +52,17 @@ test("deep links", () => {
   expect(parseDeepLink("#s=abc")).toBeNull();
   expect(parseDeepLink("")).toBeNull();
 });
+
+test("server timestamps win over the local clock", () => {
+  const started = "2026-09-09T12:00:00Z";
+  const finished = "2026-09-09T12:03:20Z";
+  const now = Date.parse("2026-09-09T12:10:00Z");
+  let v = reduce(initialView, { ...base, state: "RECEIVING", total: 10, have: 5, started_at: started }, now);
+  expect(v.startedAt).toBe(Date.parse(started));
+  expect(v.elapsedMs).toBe(10 * 60 * 1000);
+  v = reduce(v, { ...base, state: "READY", total: 10, have: 10, started_at: started, finished_at: finished }, now);
+  expect(v.finishedAt).toBe(Date.parse(finished));
+  expect(v.elapsedMs).toBe(200 * 1000);
+  const local = reduce(initialView, { ...base, state: "RECEIVING", total: 10, have: 1, started_at: "garbage" }, 5000);
+  expect(local.startedAt).toBe(5000);
+});

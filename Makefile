@@ -4,7 +4,7 @@ TOWER    := airlift-tower
 MODULE   := github.com/sujaykumarsuman/airlift
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: all web tower tower-all replay sender-test sender-lint go-test go-lint web-test web-lint test lint pre-commit setup clean
+.PHONY: all web tower tower-all replay vectors sender-test sender-lint go-test go-lint web-test web-lint test lint pre-commit setup clean
 
 all: web tower
 
@@ -56,6 +56,11 @@ sender-lint:
 
 sender-test:
 	uv run --directory sender pytest -q
+
+## Regenerate the shared fixtures after a wire-format change (see sender/testdata/README.md).
+vectors:
+	uv run --directory sender python airlift.py frames --in ../testdata/bundles/multi/bundle-base64.txt --seed 1 --out testdata/vectors.json
+	uv run --directory sender python airlift.py frames --in ../testdata/bundles/multi/bundle-base64.txt --seed 1 --fountain --out testdata/vectors-fountain.json
 
 ## ---- aggregate ----
 lint: sender-lint go-lint web-lint

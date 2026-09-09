@@ -152,3 +152,26 @@ func TestReplayIntoRunningTower(t *testing.T) {
 		t.Fatalf("--into without --replay: exit %d", code)
 	}
 }
+
+func TestQuietTLSFiltersHandshakeNoise(t *testing.T) {
+	var out bytes.Buffer
+	w := quietTLS{&out}
+	w.Write([]byte("http: TLS handshake error from 10.0.0.2:1234: remote error: tls: unknown certificate authority\n"))
+	w.Write([]byte("http: Accept error: too many open files\n"))
+	if got := out.String(); strings.Contains(got, "handshake") || !strings.Contains(got, "Accept error") {
+		t.Fatalf("filtered output %q", got)
+	}
+}
+
+func TestReplayFountainVectors(t *testing.T) {
+	dest := t.TempDir()
+	var out, errb bytes.Buffer
+	fountain := filepath.Join("..", "..", "sender", "testdata", "vectors-fountain.json")
+	code := run([]string{"--dest", dest, "--replay", fountain, "--drop", "0.3", "--shuffle", "--rate", "0"}, &out, &errb)
+	if code != 0 || !strings.Contains(out.String(), "state READY") {
+		t.Fatalf("exit %d\n%s\n%s", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "replay pass 1:") || strings.Contains(out.String(), "replay pass 3:") {
+		t.Fatalf("fountain should not need three passes at 30%% loss:\n%s", out.String())
+	}
+}

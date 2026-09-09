@@ -74,12 +74,33 @@ from it.
 
 Bytes `[seq·chunk, min((seq+1)·chunk, gz_size))` of the gzip blob.
 
-### FOUNTAIN payload (Phase 4)
+### FOUNTAIN payload
 
-An LT-coded packet of `chunk` bytes. `seq` is the PRNG seed from which the
-receiver regenerates the degree (robust soliton) and the set of source block
-indices XORed into the payload. The last source chunk is zero-padded to
-`chunk` bytes before coding. See `BUILD-PLAN.md` Phase 4.
+An LT packet of exactly `chunk` bytes: the XOR of the source chunks listed
+by `fountain_indices(seq, N)`, where `seq` is the packet's u16 seed. The
+last source chunk is zero-padded to `chunk` bytes before coding, and the
+receiver trims it back using `gz_size`.
+
+`fountain_indices` is a cross-implementation contract (ADR 0009):
+
+1. Degree distribution: robust soliton over 1..N with `c = 0.1`, `δ = 0.5`.
+   `R = c · ln(N/δ) · √N`; spike position `M = ⌊N/R⌋` clamped to 1..N;
+   `ρ(1) = 1/N`, `ρ(i) = 1/(i(i−1))`; `τ(i) = R/(iN)` for `i < M`,
+   `τ(M) = R · ln(R/δ) / N` only when `R > δ`, else 0. Weights `ρ+τ` are
+   normalised by their sum and accumulated left to right into thresholds
+   `⌊acc · 2³² + ½⌋`, the last forced to 2³². Every step is a plain IEEE
+   double operation in that order, with no fused multiply-add.
+2. PRNG: xorshift32 (`x ^= x<<13; x ^= x>>17; x ^= x<<5`), state
+   `seq · 2654435761 + 2654435769 (mod 2³²)` (1 if that is 0), four warm-up
+   rounds discarded.
+3. One draw picks the degree `d`: the number of thresholds ≤ the draw, plus
+   one, capped at N. Further draws reduced modulo N pick `d` distinct chunk
+   indices, repeats rejected.
+
+The sender emits packets with seeds `0 … K−1`, `K` defaulting to
+`N + max(48, ⌈3·√N·ln N⌉)` (`--fountain-packets` overrides). Any
+`≈ 1.2 N` distinct packets decode a large transfer; small N needs more,
+which the default's surplus term covers.
 
 ## Loop schedule
 
@@ -88,7 +109,9 @@ The player cycles frames at `--fps` (default 8):
 - **Sequential** (default): `[M, D0 … D(N-1)]` repeating, with `M`
   re-inserted after every 20 data frames (`--manifest-every`) so a scanner
   that joins mid-loop learns `N` promptly.
-- **Fountain** (Phase 4): `[M, F(s0), F(s1), …]` endless, same `M` cadence.
+- **Fountain** (`--fountain`): `[M, F0 … F(K−1)]` repeating, same `M`
+  cadence. Missed packets cost nothing beyond themselves: any sufficient
+  set of distinct packets decodes.
 
 One pass is `N + ⌈N / 20⌉` frames, so `(N + ⌈N/20⌉) / fps` seconds; real runs
 need more than one pass because frames are missed.
@@ -110,8 +133,10 @@ On the tower (ADR 0005), and identically in `airlift.py decode`:
    scanner usually joins mid-loop.
 3. The MANIFEST sets `N` and the expected hashes; the state moves
    `WAITING_MANIFEST → RECEIVING`.
-4. DATA frames with `seq < N` fill the bitmap. When all `N` bits are set the
-   state moves to `VERIFYING`.
+4. DATA chunks (as degree-1 packets) and FOUNTAIN packets feed one peeling
+   decoder; `have` and the bitmap report recovered chunks. When every chunk
+   is recovered the state moves to `VERIFYING`. Packets from several
+   scanners merge in any order.
 5. Verify: concatenate chunks in `seq` order → the length must equal
    `gz_size` and the sha256 must equal `gz_sha256` → gunzip → the length must
    equal `orig_size` and the sha256 must equal `orig_sha256`.
@@ -133,11 +158,14 @@ On the tower (ADR 0005), and identically in `airlift.py decode`:
 }
 ```
 
-`frames` holds each frame exactly once, in the order `[M, D0 … D(N-1)]`; the
-loop schedule is the consumer's business. `manifest` is the MANIFEST payload
-parsed, so a consumer can check its own parser against it.
-`sender/testdata/vectors.json` is this dump for
-`testdata/bundles/multi/bundle-base64.txt` with `--seed 1`.
+`frames` holds each frame exactly once, in the order `[M, D0 … D(N-1)]` (or
+`[M, F0 … F(K-1)]` for `--fountain`); the loop schedule is the consumer's
+business. `manifest` is the MANIFEST payload parsed, so a consumer can check
+its own parser against it. A fountain dump adds
+`"fountain": {"packets": K, "indices": [[…], …]}`, the index set of every
+seed, so a decoder can check its `fountain_indices` directly.
+`sender/testdata/vectors.json` and `vectors-fountain.json` are these dumps
+for `testdata/bundles/multi/bundle-base64.txt` with `--seed 1`.
 
 ## Sender session vs tower session
 

@@ -11,3 +11,49 @@ export function parseJoin(pathname: string, hash: string): Join {
   }
   return { sid: m[1], token };
 }
+
+export const LAST_KEY = "airlift.lastJoin";
+
+export interface JoinStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+export type Resolved = Join & { redirect?: string };
+
+interface Saved {
+  sid?: unknown;
+  token?: unknown;
+}
+
+function readSaved(storage: JoinStorage | null): Saved | null {
+  try {
+    return JSON.parse(storage?.getItem(LAST_KEY) ?? "null") as Saved | null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Like parseJoin, but `/s/last` reopens the session this phone joined most
+ * recently (the installed app starts there), and a successful join is
+ * remembered for next time.
+ */
+export function resolveJoin(pathname: string, hash: string, storage: JoinStorage | null): Resolved {
+  if (/^\/s\/last\/?$/.test(pathname)) {
+    const saved = readSaved(storage);
+    if (saved && typeof saved.sid === "string" && typeof saved.token === "string") {
+      return { sid: saved.sid, token: saved.token, redirect: `/s/${saved.sid}#t=${saved.token}` };
+    }
+    return { error: "No previous session on this phone. Scan the tower's QR code to join one." };
+  }
+  const join = parseJoin(pathname, hash);
+  if (join.error === undefined) {
+    try {
+      storage?.setItem(LAST_KEY, JSON.stringify({ sid: join.sid, token: join.token }));
+    } catch {
+      /* storage unavailable: nothing to remember */
+    }
+  }
+  return join;
+}
