@@ -1,133 +1,23 @@
 // Package replay feeds a frames dump into a tower session over its HTTP API,
 // as if a scanner were relaying: loop schedule, batched POSTs, configurable
-// loss and reordering. It is the primary dev loop and the end-to-end test.
+// loss and reordering. It is the primary dev loop and the end-to-end test. The
+// dump type and the encoder that produces one live in internal/beam.
 package replay
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/sujaykumarsuman/airlift/internal/proto"
+	"github.com/sujaykumarsuman/airlift/internal/beam"
 	"github.com/sujaykumarsuman/airlift/internal/session"
-	"github.com/sujaykumarsuman/airlift/internal/verify"
 )
-
-// DefaultChunk is the sender's default payload size, used when encoding a
-// raw file on the fly.
-const DefaultChunk = 600
-
-// Dump is the JSON written by `airlift.py frames` (docs/PROTOCOL.md).
-type Dump struct {
-	SenderSession uint32         `json:"sender_session"`
-	Manifest      proto.Manifest `json:"manifest"`
-	Frames        []string       `json:"frames"`
-}
-
-// Load reads a frames dump. A file that is not a dump is treated as raw
-// input and encoded on the fly; encoded reports which happened.
-func Load(path string) (dump *Dump, encoded bool, err error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false, err
-	}
-	var d Dump
-	if json.Unmarshal(raw, &d) == nil && len(d.Frames) > 0 {
-		if err := d.validate(); err != nil {
-			return nil, false, fmt.Errorf("%s: %w", path, err)
-		}
-		return &d, false, nil
-	}
-	sum := sha256.Sum256(raw)
-	d2, err := Encode(raw, filepath.Base(path), DefaultChunk, binary.BigEndian.Uint32(sum[:4]))
-	return d2, true, err
-}
-
-func (d *Dump) validate() error {
-	fr, err := proto.ParseText(d.Frames[0])
-	if err != nil {
-		return fmt.Errorf("frame 0: %w", err)
-	}
-	if fr.Type != proto.TypeManifest {
-		return errors.New("frame 0 is not a MANIFEST")
-	}
-	if fr.Session != d.SenderSession {
-		return fmt.Errorf("frame 0 is for sender session %08x, dump says %08x", fr.Session, d.SenderSession)
-	}
-	return nil
-}
-
-// Encode is the Go twin of the sender's pipeline: gzip → chunk → frames.
-// The gzip stream differs from Python's, so the dump is self-consistent but
-// not byte-identical to one the sender would write.
-func Encode(data []byte, name string, chunk int, sender uint32) (*Dump, error) {
-	if chunk < 1 || chunk > 0xFFFF {
-		return nil, fmt.Errorf("chunk must be 1..65535, got %d", chunk)
-	}
-	var buf bytes.Buffer
-	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := zw.Write(data); err != nil {
-		return nil, err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
-	blob := buf.Bytes()
-	m := proto.Manifest{
-		Name:       name,
-		GzSize:     int64(len(blob)),
-		GzSHA256:   verify.SHA256Hex(blob),
-		OrigSize:   int64(len(data)),
-		OrigSHA256: verify.SHA256Hex(data),
-		Chunk:      chunk,
-	}
-	total := m.Total()
-	if total > proto.MaxChunks {
-		return nil, fmt.Errorf("%d chunks exceeds %d; raise the chunk size", total, proto.MaxChunks)
-	}
-	payload, err := m.JSON()
-	if err != nil {
-		return nil, err
-	}
-	frames := []string{proto.Frame{Type: proto.TypeManifest, Session: sender, Total: uint16(total), Payload: payload}.Text()}
-	for i := 0; i < total; i++ {
-		lo := i * chunk
-		hi := min(lo+chunk, len(blob))
-		frames = append(frames, proto.Frame{Type: proto.TypeData, Session: sender, Seq: uint16(i), Total: uint16(total), Payload: blob[lo:hi]}.Text())
-	}
-	return &Dump{SenderSession: sender, Manifest: m, Frames: frames}, nil
-}
-
-// Loop is one pass of the sender's loop schedule: [M, D0 … D(N-1)] with the
-// manifest re-inserted after every `every` data frames.
-func (d *Dump) Loop(every int) []string {
-	if every < 1 {
-		every = 20
-	}
-	n := len(d.Frames) - 1
-	out := make([]string, 0, n+n/every+1)
-	for i := 0; i < n; i++ {
-		if i%every == 0 {
-			out = append(out, d.Frames[0])
-		}
-		out = append(out, d.Frames[i+1])
-	}
-	return out
-}
 
 // Options shape the simulated scanner.
 type Options struct {
@@ -165,7 +55,7 @@ type ingestResponse struct {
 
 // Run relays dump into session sid at base until the session leaves the
 // receiving states or the passes run out, then waits for verification.
-func Run(ctx context.Context, client *http.Client, base, sid, token string, dump *Dump, opts Options) (*Report, error) {
+func Run(ctx context.Context, client *http.Client, base, sid, token string, dump *beam.Dump, opts Options) (*Report, error) {
 	if opts.Passes <= 0 {
 		opts.Passes = 10
 	}

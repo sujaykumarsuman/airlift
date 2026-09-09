@@ -1,8 +1,9 @@
 # Bundle fixtures
 
-Two source trees and the bundles `tools/repobundle.py pack` produces from
-them. Go tests (Phase 2) unpack each bundle and compare the result with the
-committed tree byte for byte and mode for mode.
+Two source trees and the bundles `airlift pack` produces from them. Go tests
+unpack each bundle and compare the result with the committed tree byte for
+byte and mode for mode, and `internal/bundle` reproduces each bundle byte for
+byte — the contract that let `tools/repobundle.py` be retired (ADR 0010).
 
 | Fixture | Tree | `bundle-text.txt` | `bundle-base64.txt` |
 | --- | --- | --- | --- |
@@ -14,7 +15,7 @@ tree and bundles together:
 
 ```bash
 for t in single multi; do for f in text base64; do
-  python3 tools/repobundle.py pack --root testdata/bundles/$t/tree --format $f --out testdata/bundles/$t/bundle-$f.txt
+  airlift pack --root testdata/bundles/$t/tree --format $f --out testdata/bundles/$t/bundle-$f.txt
 done; done
 ```
 

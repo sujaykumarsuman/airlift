@@ -1,17 +1,13 @@
 # Go
 /bin/
 /dist/
+# stray `go build ./cmd/airlift` output (the real build goes to bin/)
+/airlift
 
 # Web
 web/node_modules/
 web/dist/*
 !web/dist/.gitkeep
-
-# Python
-sender/.venv/
-__pycache__/
-.ruff_cache/
-.pytest_cache/
 
 # Local artefacts
 *.local

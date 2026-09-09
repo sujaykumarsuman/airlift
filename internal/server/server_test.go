@@ -21,14 +21,15 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/sujaykumarsuman/airlift/internal/beam"
 	"github.com/sujaykumarsuman/airlift/internal/proto"
 	"github.com/sujaykumarsuman/airlift/internal/replay"
 	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
 var (
-	vectorsPath  = filepath.Join("..", "..", "sender", "testdata", "vectors.json")
-	fountainPath = filepath.Join("..", "..", "sender", "testdata", "vectors-fountain.json")
+	vectorsPath  = filepath.Join("..", "..", "testdata", "vectors", "vectors.json")
+	fountainPath = filepath.Join("..", "..", "testdata", "vectors", "vectors-fountain.json")
 	fixtures     = filepath.Join("..", "..", "testdata", "bundles")
 )
 
@@ -114,7 +115,7 @@ func (h *harness) snapshot(t *testing.T, c created) session.Snapshot {
 	return snap
 }
 
-func (h *harness) replay(t *testing.T, c created, d *replay.Dump, opts replay.Options) *replay.Report {
+func (h *harness) replay(t *testing.T, c created, d *beam.Dump, opts replay.Options) *replay.Report {
 	t.Helper()
 	rep, err := replay.Run(context.Background(), h.ts.Client(), h.ts.URL, c.SID, c.Token, d, opts)
 	if err != nil {
@@ -123,9 +124,9 @@ func (h *harness) replay(t *testing.T, c created, d *replay.Dump, opts replay.Op
 	return rep
 }
 
-func loadVectors(t *testing.T) *replay.Dump {
+func loadVectors(t *testing.T) *beam.Dump {
 	t.Helper()
-	d, _, err := replay.Load(vectorsPath)
+	d, _, err := beam.Load(vectorsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +266,7 @@ func TestSingleFileBundle(t *testing.T) {
 	dest := t.TempDir()
 	h := start(t, dest, nil)
 	input, _ := os.ReadFile(filepath.Join(fixtures, "single", "bundle-text.txt"))
-	d, err := replay.Encode(input, "single.txt", 200, 7)
+	d, err := beam.Encode(input, "single.txt", 200, 7, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +296,7 @@ func TestRawFileIsNotABundle(t *testing.T) {
 	h := start(t, dest, nil)
 	data := make([]byte, 3000)
 	rand.New(rand.NewSource(1)).Read(data)
-	d, _ := replay.Encode(data, "noise", 600, 9)
+	d, _ := beam.Encode(data, "noise", 600, 9, false, 0)
 	c := h.create(t)
 	if rep := h.replay(t, c, d, replay.Options{Shuffle: true, Seed: 2}); rep.State != session.StateReady {
 		t.Fatalf("%+v", rep)
@@ -320,7 +321,7 @@ func TestCorruptedChunkFails(t *testing.T) {
 	frames := append([]string(nil), d.Frames...)
 	frames[3] = victim.Text()
 	c := h.create(t)
-	rep := h.replay(t, c, &replay.Dump{SenderSession: d.SenderSession, Manifest: d.Manifest, Frames: frames}, replay.Options{})
+	rep := h.replay(t, c, &beam.Dump{SenderSession: d.SenderSession, Manifest: d.Manifest, Frames: frames}, replay.Options{})
 	if rep.State != session.StateFailed {
 		t.Fatalf("%+v", rep)
 	}
@@ -343,7 +344,7 @@ func TestBundleWithBadFileFails(t *testing.T) {
 	h := start(t, t.TempDir(), nil)
 	text, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-text.txt"))
 	tampered := bytes.Replace(text, []byte("Notes on the multi fixture"), []byte("notes on the multi fixture"), 1)
-	d, _ := replay.Encode(tampered, "tampered.txt", 600, 3)
+	d, _ := beam.Encode(tampered, "tampered.txt", 600, 3, false, 0)
 	c := h.create(t)
 	if rep := h.replay(t, c, d, replay.Options{}); rep.State != session.StateFailed {
 		t.Fatalf("%+v", rep)
@@ -579,9 +580,9 @@ func TestNames(t *testing.T) {
 	}
 }
 
-func loadFountain(t *testing.T) *replay.Dump {
+func loadFountain(t *testing.T) *beam.Dump {
 	t.Helper()
-	d, _, err := replay.Load(fountainPath)
+	d, _, err := beam.Load(fountainPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +617,7 @@ func TestFountainReplayWithLossAndReorder(t *testing.T) {
 // relayWork runs `relays` concurrent scanners with independent loss and
 // returns how many frames the scanner that saw the session complete had to
 // post: with equal decode rates, that is proportional to wall-clock time.
-func relayWork(t *testing.T, h *harness, d *replay.Dump, relays int, drop float64) int {
+func relayWork(t *testing.T, h *harness, d *beam.Dump, relays int, drop float64) int {
 	t.Helper()
 	c := h.create(t)
 	var wg sync.WaitGroup

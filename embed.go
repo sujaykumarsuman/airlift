@@ -1,5 +1,5 @@
 // Package airlift is the module root. It exists only to embed the built web
-// UI (web/dist) so that cmd/tower can serve it from a single static binary.
+// UI (web/dist) so that cmd/airlift can serve it from a single static binary.
 // go:embed cannot reach a parent directory, which is why this file lives here
 // rather than under internal/server.
 package airlift

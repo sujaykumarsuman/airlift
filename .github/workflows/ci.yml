@@ -6,19 +6,6 @@ on:
   pull_request:
 
 jobs:
-  sender:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python: ["3.9", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv python install ${{ matrix.python }}
-      - run: uv run --directory sender --python ${{ matrix.python }} ruff check .
-      - run: uv run --directory sender --python ${{ matrix.python }} ruff format --check .
-      - run: uv run --directory sender --python ${{ matrix.python }} pytest -q
-
   web:
     runs-on: ubuntu-latest
     steps:
@@ -34,7 +21,7 @@ jobs:
       - run: npm --prefix web run test
       - run: npm --prefix web run build
 
-  tower:
+  go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +38,7 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - name: end to end, sequential with 20% loss
-        run: go run ./cmd/tower --dest /tmp/seq --replay sender/testdata/vectors.json --drop 0.2 --rate 0
+        run: go run ./cmd/airlift replay testdata/vectors/vectors.json --dest /tmp/seq --drop 0.2 --rate 0
       - name: end to end, fountain with 30% loss and reordering
-        run: go run ./cmd/tower --dest /tmp/fountain --replay sender/testdata/vectors-fountain.json --drop 0.3 --shuffle --rate 0
+        run: go run ./cmd/airlift replay testdata/vectors/vectors-fountain.json --dest /tmp/fountain --drop 0.3 --shuffle --rate 0
       - run: diff -r /tmp/fountain/bundle-base64 testdata/bundles/multi/tree

@@ -151,6 +151,7 @@ install it; with `--cert/--key` it is `404`.
 
 ## Replay mode
 
-`airlift-tower --replay FILE` serves the same API over a private loopback
-listener without TLS, feeds `FILE` into a fresh session as a scanner would,
-prints the verdicts, and exits 0 on `READY`.
+`airlift replay FILE` serves the same API over a private loopback listener
+without TLS, feeds `FILE` into a fresh session as a scanner would, prints the
+verdicts, and exits 0 on `READY`. `airlift replay FILE --into JOIN_URL` feeds a
+session on a running tower instead.

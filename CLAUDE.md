@@ -4,20 +4,22 @@ Optical file transfer out of an air-gapped machine. A sender renders a file as
 an animated QR loop on a monitor; a phone browser scans the loop and relays
 decoded frames to a server on the operator's laptop, which reassembles,
 verifies, unpacks and serves the result. Primary payload is a `repobundle`
-text file (`tools/repobundle.py`). Personal tooling; device agnostic; no
+text file (`docs/BUNDLE.md`, produced by `airlift pack`). One Go binary,
+`airlift`, does all of it (ADR 0010). Personal tooling; device agnostic; no
 ecosystem features (AirDrop, Quick Share, Continuity) anywhere in the main
 path.
 
 Canonical documents: `docs/BUILD-PLAN.md` (phases), `docs/PROTOCOL.md` (wire
-format), `docs/API.md` (HTTP API), `docs/adr/` (locked decisions),
-`STATUS.md` (where we are). The originating prompt is `prompts/001-init.md`.
+format), `docs/BUNDLE.md` (repobundle format), `docs/API.md` (HTTP API),
+`docs/adr/` (locked decisions), `STATUS.md` (where we are). The originating
+prompts are `prompts/001-init.md` and `prompts/002-go-cli-and-hosting.md`.
 
 ## Roles (canonical — do not let these blur)
 
-- **Beam** — the HTML file produced by `airlift.py beam`, opened in a browser
+- **Beam** — the HTML file produced by `airlift beam`, opened in a browser
   on the **air-gapped machine**. It displays the animated QR loop. It is fully
   offline: no network, no hosting, no dependency on tower or the `web/` build.
-  Its player JS stays inline in the Python-emitted HTML. The beam is *not* a
+  Its player JS stays inline in the Go-emitted HTML. The beam is *not* a
   session participant and never talks to tower — that is what preserves the
   air gap.
 - **Tower** — the Go binary on the operator's laptop (the Mac). It hosts the
@@ -36,14 +38,21 @@ directly (out of scope; see non-goals).
 
 ## Components
 
-- `sender/airlift.py` — Python 3.9+, single file, only dependency `segno`.
-  Runs inside the air gap. Emits a self-contained HTML player.
-- `cmd/tower/` — Go, single static binary `airlift-tower`. Module at repo
-  root. Owns sessions, protocol decode, reassembly, verification, bundle
-  unpack, downloads, TLS. Serves the embedded web UI.
+- `cmd/airlift/` — Go, single static binary `airlift`. Module at repo root.
+  Subcommands `pack`, `unpack`, `beam`, `frames`, `decode`, `tower`, `replay`
+  (`sessions`, `fetch` land with the admin phase). The beam side runs inside
+  the air gap; `tower` runs on the operator's laptop. Owns sessions, protocol
+  decode, reassembly, verification, bundle unpack, downloads, TLS. Serves the
+  embedded web UI.
+- `internal/beam` — the shared encoder (gzip → chunk → frame, sequential and
+  fountain), QR rendering (`rsc.io/qr/coding`, ADR 0011) and the embedded HTML
+  player; `beam`, `frames` and `internal/replay` share it. `Decode` is the
+  offline reassembly for `airlift decode`.
+- `internal/bundle` — repobundle `Pack`/`Parse`, tree/zip writers, the one
+  path sanitiser. `Pack` is a byte-for-byte port of the retired
+  `tools/repobundle.py` (`docs/BUNDLE.md`).
 - `web/` — vanilla TypeScript + Vite, entries `scan` (phone) and `tower`
   (dashboard). No framework. Embedded into the Go binary via `embed.go`.
-- `tools/repobundle.py` — provided; read it, do not modify it.
 
 ## Locked decisions (summary — each has an ADR in `docs/adr/`; do not revisit)
 
@@ -77,29 +86,30 @@ directly (out of scope; see non-goals).
 
 - Trunk-based. One short-lived branch per phase (`phase/N-name`), squash to
   `main`. Conventional Commits.
-- Pre-commit gate (`pre-commit run --all-files`): `ruff` + `pytest` for
-  sender; `gofmt` + `go vet` + `go test ./...` for tower; `tsc --noEmit` +
-  `eslint` + `vitest` for web. Keep it fast.
-- `make web` builds `web/dist`; `make tower` builds the binary; `make
-  tower-all` cross-compiles. `web/dist/.gitkeep` must survive so `embed.go`
-  compiles on a fresh clone.
-- Python tooling runs through `uv` (`uv run --directory sender ...`).
-- Go dependencies: the standard library plus `rsc.io/qr` for the terminal
-  join QR. Web runtime dependencies: `zxing-wasm` (decoder fallback, wasm
-  served from `/assets/`, never a CDN) and `qrcode` (join QR). Nothing else
-  without an ADR.
+- Pre-commit gate (`pre-commit run --all-files`): `gofmt` + `go vet` +
+  `go test ./...` for Go; `tsc --noEmit` + `eslint` + `vitest` for web. Keep
+  it fast.
+- `make web` builds `web/dist`; `make airlift` builds the binary; `make
+  airlift-all` cross-compiles. `make` never runs the application.
+  `web/dist/.gitkeep` must survive so `embed.go` compiles on a fresh clone.
+- Go dependencies: the standard library plus `rsc.io/qr` — `rsc.io/qr` for the
+  terminal join QR and `rsc.io/qr/coding` for the beam QR (ADR 0011). Web
+  runtime dependencies: `zxing-wasm` (decoder fallback, wasm served from
+  `/assets/`, never a CDN) and `qrcode` (join QR). Nothing else without an ADR.
 - Browsers talk to the API with `fetch` only: SSE through a streaming fetch
   and downloads through blobs, because the token travels in a header.
-- `airlift-tower --replay FILE --into JOIN_URL` feeds a session on a running
-  tower; it is how the dashboard is exercised without a camera.
-- Shared fixtures: `testdata/bundles/` (trees plus the bundles
-  `tools/repobundle.py` packs from them) and `sender/testdata/vectors*.json`
-  (`airlift.py frames --seed 1`, sequential and `--fountain`, over the multi
-  base64 bundle; `make vectors`). Regenerate only when their inputs or the
-  wire format change, and commit inputs and outputs together.
+- `airlift replay FILE --into JOIN_URL` feeds a session on a running tower; it
+  is how the dashboard is exercised without a camera. `airlift replay FILE`
+  alone runs a private loopback tower, which CI relies on.
+- Shared fixtures: `testdata/bundles/` (trees plus the bundles `airlift pack`
+  reproduces from them, the byte-for-byte contract of ADR 0010) and
+  `testdata/vectors/vectors*.json` (frames dumps for the multi base64 bundle,
+  sequential and `--fountain`). The vectors are frozen from the original Python
+  sender and are never regenerated from Go; the bundles are regenerated only
+  when a tree changes (see `testdata/bundles/README.md`).
 - The fountain packet construction is a cross-language contract (ADR 0009):
-  change it in `airlift.py` and `internal/proto/fountain.go` together, keep
-  the arithmetic free of fused multiply-add, and regenerate the vectors.
+  it lives in `internal/proto/fountain.go`, keeps its arithmetic free of fused
+  multiply-add, and is checked seed-by-seed against the frozen vectors.
 - `STATUS.md` updated at the end of every phase: done / next / open questions.
 - British English in docs.
 - Tokens are never logged.

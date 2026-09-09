@@ -46,7 +46,7 @@ func IsBundle(data []byte) bool {
 	return bytes.HasPrefix(data, []byte(Magic))
 }
 
-// Parse decodes a bundle and verifies every entry. It mirrors
+// Parse decodes a bundle and verifies every entry. It mirrors the retired
 // repobundle.py's unpack loop: lines that are neither a boundary nor the end
 // marker are skipped, and an entry's content runs to the next boundary at a
 // line start.

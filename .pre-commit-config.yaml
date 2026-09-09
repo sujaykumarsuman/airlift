@@ -1,42 +1,22 @@
 # Pre-commit gate. Every hook is `language: system` so it runs the same
 # toolchain as `make`; nothing is installed into pre-commit's own envs.
-#   sender: ruff + pytest     tower: gofmt + go vet + go test     web: tsc + eslint + vitest
+#   airlift (Go): gofmt + go vet + go test     web: tsc + eslint + vitest
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: end-of-file-fixer
-        exclude: ^(testdata/|sender/testdata/)
+        exclude: ^testdata/
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
-        exclude: ^(testdata/|sender/testdata/)
+        exclude: ^testdata/
       - id: check-yaml
       - id: check-added-large-files
         args: [--maxkb=512]
 
   - repo: local
     hooks:
-      # ---- sender (Python) ----
-      - id: ruff
-        name: ruff check (sender)
-        entry: uv run --directory sender ruff check .
-        language: system
-        files: ^sender/.*\.py$
-        pass_filenames: false
-      - id: ruff-format
-        name: ruff format (sender)
-        entry: uv run --directory sender ruff format --check .
-        language: system
-        files: ^sender/.*\.py$
-        pass_filenames: false
-      - id: pytest
-        name: pytest (sender)
-        entry: uv run --directory sender pytest -q
-        language: system
-        files: ^sender/
-        pass_filenames: false
-
-      # ---- tower (Go) ----
+      # ---- airlift (Go) ----
       - id: gofmt
         name: gofmt
         entry: sh -c 'out=$(gofmt -l .); if [ -n "$out" ]; then echo "$out"; exit 1; fi'

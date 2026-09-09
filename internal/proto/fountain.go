@@ -9,8 +9,9 @@ import (
 )
 
 // Fountain code parameters, fixed by ADR 0009. RobustSolitonCDF and
-// FountainIndices reproduce sender/airlift.py exactly: same operations in the
-// same order, no fused multiply-add, thresholds quantised to 2^32.
+// FountainIndices are the reference construction, checked seed by seed against
+// the frozen testdata/vectors/vectors-fountain.json: plain left-to-right IEEE
+// operations, no fused multiply-add, thresholds quantised to 2^32.
 const (
 	FountainC     = 0.1
 	FountainDelta = 0.5
@@ -113,6 +114,46 @@ func FountainIndices(seed uint16, n int) []int {
 		}
 	}
 	return chosen
+}
+
+// DefaultPackets is the number of fountain packets a beam carries by default:
+// N + max(48, ceil(3·√N·ln N)), capped by the u16 seed space. Measured with
+// this distribution, decoding needs up to ~2.7 N packets at N = 24 but only
+// ~1.2 N at N = 1200; the surplus term tracks that curve (ADR 0009).
+func DefaultPackets(total int) int {
+	extra := int(math.Ceil(3.0 * math.Sqrt(float64(total)) * math.Log(float64(total))))
+	if extra < 48 {
+		extra = 48
+	}
+	k := total + extra
+	if k > MaxPackets {
+		k = MaxPackets
+	}
+	return k
+}
+
+// PadChunks splits blob into n chunks of chunk bytes each, zero-padding the
+// last so every element is exactly chunk bytes, ready for fountain coding.
+func PadChunks(blob []byte, chunk, n int) [][]byte {
+	out := make([][]byte, n)
+	for i := range out {
+		block := make([]byte, chunk)
+		copy(block, blob[min(i*chunk, len(blob)):min((i+1)*chunk, len(blob))])
+		out[i] = block
+	}
+	return out
+}
+
+// FountainPayload builds fountain packet seed: the XOR of the padded source
+// chunks listed by FountainIndices(seed, len(padded)). Every element of padded
+// must be exactly chunk bytes (PadChunks guarantees that). This is the encode
+// side of the cross-language contract; the decoder above reverses it.
+func FountainPayload(padded [][]byte, seed uint16) []byte {
+	acc := make([]byte, len(padded[0]))
+	for _, i := range FountainIndices(seed, len(padded)) {
+		xorInto(acc, padded[i])
+	}
+	return acc
 }
 
 // Decoder is the belief-propagation (peeling) decoder. DATA chunks enter as

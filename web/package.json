@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "airlift web UI: scan (phone relay) and tower (dashboard) entries, embedded into airlift-tower",
+  "description": "airlift web UI: scan (phone relay) and tower (dashboard) entries, embedded into the airlift binary",
   "scripts": {
     "dev": "vite",
     "dev:lan": "vite --host",

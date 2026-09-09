@@ -29,7 +29,7 @@ func fountainVectors(t *testing.T) dump {
 
 func load(t *testing.T, name string) dump {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "sender", "testdata", name))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "vectors", name))
 	if err != nil {
 		t.Fatal(err)
 	}

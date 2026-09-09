@@ -15,7 +15,7 @@ const session = 0x01020304
 
 func vectorsPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join("..", "..", "sender", "testdata", "vectors.json")
+	return filepath.Join("..", "..", "testdata", "vectors", "vectors.json")
 }
 
 type dump struct {

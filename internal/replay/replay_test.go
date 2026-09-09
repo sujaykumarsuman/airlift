@@ -13,37 +13,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sujaykumarsuman/airlift/internal/beam"
 	"github.com/sujaykumarsuman/airlift/internal/proto"
 	"github.com/sujaykumarsuman/airlift/internal/session"
 	"github.com/sujaykumarsuman/airlift/internal/verify"
 )
 
 var (
-	vectorsPath    = filepath.Join("..", "..", "sender", "testdata", "vectors.json")
-	repobundlePath = filepath.Join("..", "..", "tools", "repobundle.py")
+	vectorsPath = filepath.Join("..", "..", "testdata", "vectors", "vectors.json")
+	rawFilePath = filepath.Join("..", "..", "go.mod")
 )
 
 func TestLoadDumpAndRaw(t *testing.T) {
-	d, encoded, err := Load(vectorsPath)
+	d, encoded, err := beam.Load(vectorsPath)
 	if err != nil || encoded {
 		t.Fatalf("vectors: %v encoded=%v", err, encoded)
 	}
 	if d.Manifest.Name != "bundle-base64.txt" || len(d.Frames) != d.Manifest.Total()+1 {
 		t.Fatalf("dump %+v", d.Manifest)
 	}
-	r, encoded, err := Load(repobundlePath)
+	r, encoded, err := beam.Load(rawFilePath)
 	if err != nil || !encoded {
 		t.Fatalf("raw: %v encoded=%v", err, encoded)
 	}
-	if r.Manifest.Name != "repobundle.py" || r.Manifest.Chunk != DefaultChunk {
+	if r.Manifest.Name != "go.mod" || r.Manifest.Chunk != beam.DefaultChunk {
 		t.Fatalf("encoded manifest %+v", r.Manifest)
 	}
-	if _, _, err := Load(filepath.Join(t.TempDir(), "missing")); err == nil {
+	if _, _, err := beam.Load(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("missing file accepted")
 	}
 	bad := filepath.Join(t.TempDir(), "bad.json")
 	os.WriteFile(bad, []byte(`{"sender_session":1,"frames":["GARBAGE"]}`), 0o644)
-	if _, _, err := Load(bad); err == nil || !strings.Contains(err.Error(), "frame 0") {
+	if _, _, err := beam.Load(bad); err == nil || !strings.Contains(err.Error(), "frame 0") {
 		t.Fatalf("bad dump: %v", err)
 	}
 }
@@ -51,7 +52,7 @@ func TestLoadDumpAndRaw(t *testing.T) {
 func TestEncodeRoundTripsThroughSession(t *testing.T) {
 	data := make([]byte, 5000)
 	rand.New(rand.NewSource(5)).Read(data)
-	d, err := Encode(data, "noise.bin", 300, 0xCAFEBABE)
+	d, err := beam.Encode(data, "noise.bin", 300, 0xCAFEBABE, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,22 +72,22 @@ func TestEncodeRoundTripsThroughSession(t *testing.T) {
 	if res.Err != nil || !bytes.Equal(res.Data, data) {
 		t.Fatalf("chain: %v", res.Err)
 	}
-	if _, err := Encode(data, "x", 0, 1); err == nil {
+	if _, err := beam.Encode(data, "x", 0, 1, false, 0); err == nil {
 		t.Fatal("chunk 0 accepted")
 	}
 	noise := make([]byte, 70000)
 	rand.New(rand.NewSource(1)).Read(noise)
-	if _, err := Encode(noise, "x", 1, 1); err == nil {
+	if _, err := beam.Encode(noise, "x", 1, 1, false, 0); err == nil {
 		t.Fatal("too many chunks accepted")
 	}
-	empty, err := Encode(nil, "empty", 600, 1)
+	empty, err := beam.Encode(nil, "empty", 600, 1, false, 0)
 	if err != nil || len(empty.Frames) != 2 {
 		t.Fatalf("empty: %v %d", err, len(empty.Frames))
 	}
 }
 
 func TestLoopSchedule(t *testing.T) {
-	d := &Dump{Frames: make([]string, 46)}
+	d := &beam.Dump{Frames: make([]string, 46)}
 	for i := range d.Frames {
 		d.Frames[i] = string(rune('A' + i%26))
 	}
@@ -103,7 +104,7 @@ func TestLoopSchedule(t *testing.T) {
 	if loop[1] != d.Frames[1] || loop[20] != d.Frames[20] || loop[22] != d.Frames[21] || loop[47] != d.Frames[45] {
 		t.Fatalf("data order wrong: %v", loop)
 	}
-	if got := (&Dump{Frames: []string{"M", "a"}}).Loop(20); len(got) != 2 {
+	if got := (&beam.Dump{Frames: []string{"M", "a"}}).Loop(20); len(got) != 2 {
 		t.Fatalf("one chunk: %v", got)
 	}
 }
@@ -162,7 +163,7 @@ func fakeTower(t *testing.T, s *session.Session, finish func(*session.Session)) 
 }
 
 func TestRunReachesReadyThroughLoss(t *testing.T) {
-	d, _, err := Load(vectorsPath)
+	d, _, err := beam.Load(vectorsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +190,7 @@ func TestRunReachesReadyThroughLoss(t *testing.T) {
 }
 
 func TestRunStopsWhenPassesRunOut(t *testing.T) {
-	d, _, _ := Load(vectorsPath)
+	d, _, _ := beam.Load(vectorsPath)
 	st := session.NewStore(time.Hour, 4)
 	s, _ := st.Create()
 	ts := fakeTower(t, s, func(*session.Session) {})
@@ -208,7 +209,7 @@ func TestRunStopsWhenPassesRunOut(t *testing.T) {
 	s2, _ := st.Create()
 	ts2 := fakeTower(t, s2, func(*session.Session) {})
 	start := time.Now()
-	Run(context.Background(), ts2.Client(), ts2.URL, s2.ID, s2.Token, &Dump{Frames: d.Frames[:9], SenderSession: d.SenderSession}, Options{Rate: 100, Passes: 1})
+	Run(context.Background(), ts2.Client(), ts2.URL, s2.ID, s2.Token, &beam.Dump{Frames: d.Frames[:9], SenderSession: d.SenderSession}, Options{Rate: 100, Passes: 1})
 	if time.Since(start) < 60*time.Millisecond {
 		t.Fatal("rate not honoured")
 	}

@@ -1,10 +1,11 @@
 # Protocol
 
-The optical layer carries an opaque byte blob (ADR 0001). The sender never
+The optical layer carries an opaque byte blob (ADR 0001). The beam never
 parses the payload; the tower rebuilds the byte-identical input and only then
-looks at what it is. `sender/airlift.py` is the reference implementation of
-everything below, and `sender/testdata/vectors.json` is the fixture every
-implementation must agree on.
+looks at what it is. `internal/beam` (encode) and `internal/proto` (codec) are
+the reference implementation of everything below, and
+`testdata/vectors/vectors.json` is the frozen fixture every implementation must
+agree on.
 
 ## Pipeline
 
@@ -25,8 +26,9 @@ input file ──gzip──▶ blob ──chunk──▶ N chunks ──frame─
   bytes is `3·⌊b/2⌋ + 2·(b mod 2)` characters. Decoders reject a length that
   is 1 modulo 3, any character outside the alphabet, a triplet above `0xFFFF`
   and a pair above `0xFF`.
-- **QR**: `segno`, alphanumeric mode, ECC level M by default (`--ecc`), never
-  Micro QR. Every frame of a beam is rendered at one version, the one the
+- **QR**: `rsc.io/qr/coding` (ADR 0011), alphanumeric mode, ECC level M by
+  default (`--ecc`), never Micro QR. Every frame of a beam is rendered at one
+  version, the one the
   longest frame needs, so the symbol geometry on screen never changes;
   shorter frames (the manifest, the last chunk) get a free ECC upgrade within
   that version. A 4-module quiet zone is part of the SVG viewBox. At ECC M the
@@ -122,7 +124,7 @@ and keys for pause, step, fps and fullscreen.
 
 ## Reassembly and verification chain
 
-On the tower (ADR 0005), and identically in `airlift.py decode`:
+On the tower (ADR 0005), and identically in `airlift decode`:
 
 1. Frames arrive as base45 strings; decode → parse → CRC check → dedup by
    `(session, type, seq)`.
@@ -147,8 +149,8 @@ On the tower (ADR 0005), and identically in `airlift.py decode`:
 
 ## Frames dump
 
-`airlift.py frames` writes the JSON that cross-implementation tests and
-`airlift-tower --replay` consume:
+`airlift frames` (and `airlift beam --dump`) writes the JSON that
+cross-implementation tests and `airlift replay` consume:
 
 ```json
 {
@@ -163,14 +165,15 @@ On the tower (ADR 0005), and identically in `airlift.py decode`:
 business. `manifest` is the MANIFEST payload parsed, so a consumer can check
 its own parser against it. A fountain dump adds
 `"fountain": {"packets": K, "indices": [[…], …]}`, the index set of every
-seed, so a decoder can check its `fountain_indices` directly.
-`sender/testdata/vectors.json` and `vectors-fountain.json` are these dumps
-for `testdata/bundles/multi/bundle-base64.txt` with `--seed 1`.
+seed, so a decoder can check its `FountainIndices` directly.
+`testdata/vectors/vectors.json` and `vectors-fountain.json` are these dumps
+for `testdata/bundles/multi/bundle-base64.txt`, frozen from the original Python
+sender and never regenerated from Go (ADR 0010).
 
 ## Sender session vs tower session
 
-`session` in the frame header is a u32 minted by `airlift.py` per run, from
-the OS CSPRNG or, with `--seed N`, from `random.Random(N)` so that dumps are
+`session` in the frame header is a u32 minted by `airlift` per run, from the
+OS CSPRNG or, with `--seed N`, deterministically so that dumps are
 reproducible. The tower session (`sid` + token) is minted by the tower when
 the dashboard creates one. A tower session accepts frames from exactly one
 sender session, bound by the first MANIFEST it sees.

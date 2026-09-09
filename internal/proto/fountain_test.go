@@ -25,7 +25,7 @@ type fountainDump struct {
 
 func loadFountain(t *testing.T) fountainDump {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "sender", "testdata", "vectors-fountain.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "vectors", "vectors-fountain.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestRobustSolitonCDFShape(t *testing.T) {
 }
 
 // TestFountainIndicesMatchSender is the cross-implementation contract: every
-// packet's index set equals what airlift.py wrote into the vectors.
+// packet's index set equals what the frozen vectors carry.
 func TestFountainIndicesMatchSender(t *testing.T) {
 	d := loadFountain(t)
 	n := d.Manifest.Total()

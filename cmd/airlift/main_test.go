@@ -18,12 +18,12 @@ import (
 	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
-var vectors = filepath.Join("..", "..", "sender", "testdata", "vectors.json")
+var vectors = filepath.Join("..", "..", "testdata", "vectors", "vectors.json")
 
 func TestReplayExitCriterion(t *testing.T) {
 	dest := t.TempDir()
 	var out, errb bytes.Buffer
-	code := run([]string{"--dest", dest, "--replay", vectors, "--drop", "0.2", "--rate", "0"}, &out, &errb)
+	code := run([]string{"replay", vectors, "--dest", dest, "--drop", "0.2", "--rate", "0"}, &out, &errb)
 	if code != 0 {
 		t.Fatalf("exit %d\n%s\n%s", code, out.String(), errb.String())
 	}
@@ -56,7 +56,7 @@ func TestReplayFailsOnCorruption(t *testing.T) {
 	out, _ := json.Marshal(d)
 	os.WriteFile(tampered, out, 0o644)
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--replay", tampered, "--rate", "0", "--drop", "0"}, &stdout, &stderr); code != 1 {
+	if code := run([]string{"replay", tampered, "--rate", "0", "--drop", "0"}, &stdout, &stderr); code != 1 {
 		t.Fatalf("exit %d\n%s", code, stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "state FAILED") || !strings.Contains(stdout.String(), "BAD gz_sha") {
@@ -66,7 +66,9 @@ func TestReplayFailsOnCorruption(t *testing.T) {
 
 func TestReplayEncodesRawFiles(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--replay", filepath.Join("..", "..", "tools", "repobundle.py"), "--rate", "0", "--shuffle"}, &stdout, &stderr)
+	// go.mod is not a frames dump and not a repobundle, so replay encodes it on
+	// the fly and the tower offers only the raw download.
+	code := run([]string{"replay", filepath.Join("..", "..", "go.mod"), "--rate", "0", "--shuffle"}, &stdout, &stderr)
 	if code != 0 || !strings.Contains(stdout.String(), "encoded on the fly") || !strings.Contains(stdout.String(), "downloads raw\n") {
 		t.Fatalf("exit %d\n%s\n%s", code, stdout.String(), stderr.String())
 	}
@@ -74,11 +76,16 @@ func TestReplayEncodesRawFiles(t *testing.T) {
 
 func TestBadInvocations(t *testing.T) {
 	cases := [][]string{
+		{},
 		{"--nope"},
-		{"positional"},
-		{"--replay", filepath.Join(t.TempDir(), "missing")},
-		{"--cert", "only.pem"},
-		{"--bind", "not-an-ip"},
+		{"nope-command"},
+		{"replay", filepath.Join(t.TempDir(), "missing")},
+		{"replay"}, // no FILE
+		{"tower", "--cert", "only.pem"},
+		{"tower", "--bind", "not-an-ip"},
+		{"beam"},                    // neither --in nor --root
+		{"frames"},                  // no --in
+		{"decode", "--frames", "x"}, // no --out
 	}
 	for _, args := range cases {
 		var stdout, stderr bytes.Buffer
@@ -128,7 +135,7 @@ func TestReplayIntoRunningTower(t *testing.T) {
 	resp.Body.Close()
 	join := ts.URL + "/s/" + c.SID + "#t=" + c.Token
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--replay", vectors, "--into", join, "--rate", "0", "--drop", "0.3", "--ca-dir", t.TempDir()}, &stdout, &stderr)
+	code := run([]string{"replay", vectors, "--into", join, "--rate", "0", "--drop", "0.3", "--ca-dir", t.TempDir()}, &stdout, &stderr)
 	if code != 0 || !strings.Contains(stdout.String(), "state READY") {
 		t.Fatalf("exit %d\n%s\n%s", code, stdout.String(), stderr.String())
 	}
@@ -148,8 +155,8 @@ func TestReplayIntoRunningTower(t *testing.T) {
 	if base, sid, tok, err := parseJoinURL("https://10.0.0.5:8443/s/abc123#t=T0k_en-"); err != nil || base != "https://10.0.0.5:8443" || sid != "abc123" || tok != "T0k_en-" {
 		t.Fatalf("parse: %s %s %s %v", base, sid, tok, err)
 	}
-	if code := run([]string{"--into", join}, &stdout, &stderr); code != 2 {
-		t.Fatalf("--into without --replay: exit %d", code)
+	if code := run([]string{"replay", "--into", join}, &stdout, &stderr); code != 2 {
+		t.Fatalf("replay --into without a FILE: exit %d", code)
 	}
 }
 
@@ -166,12 +173,64 @@ func TestQuietTLSFiltersHandshakeNoise(t *testing.T) {
 func TestReplayFountainVectors(t *testing.T) {
 	dest := t.TempDir()
 	var out, errb bytes.Buffer
-	fountain := filepath.Join("..", "..", "sender", "testdata", "vectors-fountain.json")
-	code := run([]string{"--dest", dest, "--replay", fountain, "--drop", "0.3", "--shuffle", "--rate", "0"}, &out, &errb)
+	fountain := filepath.Join("..", "..", "testdata", "vectors", "vectors-fountain.json")
+	code := run([]string{"replay", fountain, "--dest", dest, "--drop", "0.3", "--shuffle", "--rate", "0"}, &out, &errb)
 	if code != 0 || !strings.Contains(out.String(), "state READY") {
 		t.Fatalf("exit %d\n%s\n%s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(out.String(), "replay pass 1:") || strings.Contains(out.String(), "replay pass 3:") {
 		t.Fatalf("fountain should not need three passes at 30%% loss:\n%s", out.String())
 	}
+}
+
+// TestPackFramesReplayEndToEnd drives the whole binary: pack a tree, dump its
+// frames, replay them into a loopback tower with loss, and confirm the restored
+// tree on disk equals the source.
+func TestPackFramesReplayEndToEnd(t *testing.T) {
+	src := filepath.Join("..", "..", "testdata", "bundles", "multi", "tree")
+	work := t.TempDir()
+	bundlePath := filepath.Join(work, "bundle.txt")
+	framesPath := filepath.Join(work, "frames.json")
+	dest := t.TempDir()
+
+	if code := run([]string{"pack", "--root", src, "--format", "base64", "--out", bundlePath}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("pack failed")
+	}
+	if code := run([]string{"frames", "--in", bundlePath, "--out", framesPath, "--seed", "3"}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("frames failed")
+	}
+	var out bytes.Buffer
+	code := run([]string{"replay", framesPath, "--dest", dest, "--rate", "0", "--drop", "0.25", "--shuffle"}, &out, io.Discard)
+	if code != 0 || !strings.Contains(out.String(), "state READY") {
+		t.Fatalf("replay exit %d\n%s", code, out.String())
+	}
+	// bundle.txt unpacks to the stem directory "bundle/"; it must equal the source.
+	want := readWorkTree(t, src)
+	got := readWorkTree(t, filepath.Join(dest, "bundle"))
+	if len(got) != len(want) {
+		t.Fatalf("restored %d files, want %d", len(got), len(want))
+	}
+	for p, w := range want {
+		if !bytes.Equal(got[p], w) {
+			t.Fatalf("%s differs or missing", p)
+		}
+	}
+}
+
+func readWorkTree(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	out := map[string][]byte{}
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		rel, _ := filepath.Rel(root, p)
+		out[filepath.ToSlash(rel)] = data
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
