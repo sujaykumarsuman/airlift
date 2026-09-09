@@ -84,6 +84,8 @@ directly (out of scope; see non-goals).
   tower-all` cross-compiles. `web/dist/.gitkeep` must survive so `embed.go`
   compiles on a fresh clone.
 - Python tooling runs through `uv` (`uv run --directory sender ...`).
+- Go dependencies: the standard library plus `rsc.io/qr` for the terminal
+  join QR. Nothing else without an ADR.
 - Shared fixtures: `testdata/bundles/` (trees plus the bundles
   `tools/repobundle.py` packs from them) and `sender/testdata/vectors.json`
   (`airlift.py frames --seed 1` over the multi base64 bundle). Regenerate

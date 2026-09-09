@@ -40,7 +40,7 @@ their `text` and `base64` bundles produced by `tools/repobundle.py pack`.
 Exit: `beam` output opens in a browser and cycles; `decode` reproduces the
 input bit for bit; tests green. Commit.
 
-## Phase 2 — Tower core (no camera, no UI)
+## Phase 2 — Tower core (no camera, no UI) ✔
 
 Everything server-side, driven by tests and `--replay`.
 
@@ -68,7 +68,9 @@ Everything server-side, driven by tests and `--replay`.
   QR.
 - `--replay FILE [--rate 8] [--drop 0.2] [--shuffle]`: feeds a frames dump
   into a fresh session as if a phone were relaying, with configurable loss
-  and reordering. Primary dev loop and CI end-to-end test.
+  and reordering. Primary dev loop and CI end-to-end test. The HTTP replay
+  client lives in `internal/replay`, shared by the CLI and the end-to-end
+  test; a file that is not a dump is encoded on the fly.
 - Tests: the units above; an `httptest` end-to-end that creates a session,
   replays vectors with 20 % drop across three passes, asserts `READY`,
   correct verdicts, `--dest` contents, and that `download?as=zip` unpacks to

@@ -4,7 +4,7 @@ TOWER    := airlift-tower
 MODULE   := github.com/sujaykumarsuman/airlift
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: all web tower tower-all sender-test sender-lint go-test go-lint web-test web-lint test lint pre-commit setup clean
+.PHONY: all web tower tower-all replay sender-test sender-lint go-test go-lint web-test web-lint test lint pre-commit setup clean
 
 all: web tower
 
@@ -38,6 +38,9 @@ tower-all: web
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="-s -w" \
 	    -o $(BIN)/$(TOWER)-$$os-$$arch$$ext ./cmd/tower || exit 1; \
 	done
+
+replay: tower
+	$(BIN)/$(TOWER) --dest /tmp/airlift-out --replay sender/testdata/vectors.json --drop 0.2
 
 go-lint:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt:"; echo "$$out"; exit 1; fi

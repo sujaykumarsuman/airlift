@@ -9,9 +9,9 @@ the file, verifies it hash by hash, unpacks it if it is a
 [`repobundle`](tools/repobundle.py), and serves the result to a dashboard and
 to disk.
 
-Status: **Phase 1 (sender)**. The sender works end to end on its own; the
-tower and the phone page are next. See [`STATUS.md`](STATUS.md) and
-[`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md).
+Status: **Phase 2 (tower core)**. Sender and tower work end to end through
+`--replay`; the phone page and dashboard are next. See
+[`STATUS.md`](STATUS.md) and [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md).
 
 ## Pieces
 
@@ -47,6 +47,34 @@ Keys in the player: space pause · ←/→ step · +/- fps · f fullscreen.
 `airlift.py frames` dumps the frames as JSON and `airlift.py decode` rebuilds
 the file from such a dump, no camera involved; both need only the standard
 library.
+
+## Tower (on the laptop)
+
+```bash
+make tower
+```
+
+```bash
+./bin/airlift-tower --dest ~/airlift-in
+```
+
+It binds the LAN address on port 8443, prints the dashboard URL and, for
+every session, the join link with a terminal QR code for the phone. First
+run on a phone: proceed through the certificate warning once, open
+`/ca.crt`, install it as a CA certificate; after that there are no warnings
+(the phone walkthrough arrives with the web UI in Phase 3). Flags: `--bind`,
+`--port`, `--cert`/`--key` for mkcert users, `--ttl`, `--ca-dir`, and
+`--session` to open a session at start for headless use.
+
+Dev loop without a camera:
+
+```bash
+./bin/airlift-tower --dest /tmp/airlift-out --replay sender/testdata/vectors.json --drop 0.2
+```
+
+`--replay` accepts a frames dump from `airlift.py frames`, or any file, which
+it encodes on the fly. `--rate`, `--drop`, `--shuffle`, `--passes` and
+`--seed` shape the simulated scanner. `make replay` runs the line above.
 
 ## Developing
 

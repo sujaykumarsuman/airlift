@@ -1,0 +1,128 @@
+package session
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"sync"
+	"time"
+)
+
+// ErrTooManySessions is returned by Create at the concurrency limit.
+var ErrTooManySessions = errors.New("too many sessions")
+
+// Store holds every live session.
+type Store struct {
+	mu         sync.Mutex
+	sessions   map[string]*Session
+	ttl        time.Duration
+	max        int
+	now        func() time.Time
+	onComplete func(*Session)
+}
+
+// NewStore creates a store with the given TTL and concurrency limit.
+func NewStore(ttl time.Duration, max int) *Store {
+	return &Store{sessions: map[string]*Session{}, ttl: ttl, max: max, now: time.Now}
+}
+
+// SetCompleteHook installs the function run (in its own goroutine) when a
+// session fills its last chunk. Set it before creating sessions.
+func (st *Store) SetCompleteHook(fn func(*Session)) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.onComplete = fn
+}
+
+// Create mints a session with a random id and 128-bit token.
+func (st *Store) Create() (*Session, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.sessions) >= st.max {
+		return nil, ErrTooManySessions
+	}
+	idBytes := make([]byte, 8)
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return nil, err
+	}
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, err
+	}
+	now := st.now()
+	s := &Session{
+		ID:         hex.EncodeToString(idBytes),
+		Token:      base64.RawURLEncoding.EncodeToString(tokenBytes),
+		CreatedAt:  now,
+		now:        st.now,
+		ttl:        st.ttl,
+		expiresAt:  now.Add(st.ttl),
+		state:      StateWaitingManifest,
+		subs:       map[*Subscriber]struct{}{},
+		onComplete: st.onComplete,
+	}
+	st.sessions[s.ID] = s
+	return s, nil
+}
+
+// Get looks a session up by id.
+func (st *Store) Get(id string) (*Session, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s, ok := st.sessions[id]
+	return s, ok
+}
+
+// Delete removes a session and wakes its subscribers.
+func (st *Store) Delete(id string) bool {
+	st.mu.Lock()
+	s, ok := st.sessions[id]
+	delete(st.sessions, id)
+	st.mu.Unlock()
+	if ok {
+		s.close()
+	}
+	return ok
+}
+
+// Len is the number of live sessions.
+func (st *Store) Len() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return len(st.sessions)
+}
+
+// Sweep deletes sessions expired at now and returns their ids.
+func (st *Store) Sweep(now time.Time) []string {
+	st.mu.Lock()
+	var expired []*Session
+	for id, s := range st.sessions {
+		if s.Expired(now) {
+			expired = append(expired, s)
+			delete(st.sessions, id)
+		}
+	}
+	st.mu.Unlock()
+	ids := make([]string, 0, len(expired))
+	for _, s := range expired {
+		s.close()
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+// Run sweeps every interval until ctx is done.
+func (st *Store) Run(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			st.Sweep(now)
+		}
+	}
+}

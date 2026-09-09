@@ -1,18 +1,22 @@
 # STATUS
 
-## Phase 1 — Protocol + sender: done
+## Phase 2 — Tower core: done
 
-- `sender/airlift.py`: `beam`, `frames`, `decode`; base45, frame codec,
-  manifest, gzip/chunk pipeline, reference decoder, SVG renderer, HTML player.
-- `sender/testdata/vectors.json` (`--seed 1` over the multi base64 bundle) and
-  `testdata/bundles/` (single + multi trees, text + base64 bundles).
-- Sender suite runs green on Python 3.9 and 3.14.
+- `internal/{proto,session,verify,bundle,tlsca,server,replay}` and
+  `cmd/tower` (serve mode with the built-in CA, `--session`, terminal join
+  QR; replay mode over loopback).
+- `airlift-tower --dest DIR --replay sender/testdata/vectors.json --drop 0.2`
+  reaches `READY` in three passes and writes the bundle and its tree.
+- Serve mode verified live on the Mac: CA persisted with a 0600 key, leaf
+  chain verifies, CA-less clients refused, LAN address auto-detected.
 
-## Next — Phase 2: Tower core
+## Next — Phase 3: Web + end-to-end on hardware
 
-- `internal/proto` against `vectors.json`; `internal/bundle` against
-  `testdata/bundles/`; session, verify, tlsca, server; `--replay`.
+- `web/` scan and tower entries; SSE and downloads via `fetch` (header-only
+  auth, see `docs/API.md`); phone CA bootstrap walkthrough in the README.
 
 ## Open questions
 
-- None.
+- `net/http` logs a "TLS handshake error … unknown certificate authority"
+  line for every CA-less client (each phone's first visit). Quiet it or keep
+  it as a hint? Decide during Phase 4's review.
