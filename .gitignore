@@ -1,0 +1,18 @@
+# Go
+/bin/
+/dist/
+
+# Web
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+
+# Python
+sender/.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+
+# Local artefacts
+*.local
+.DS_Store

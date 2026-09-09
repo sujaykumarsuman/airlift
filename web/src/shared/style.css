@@ -1,0 +1,8 @@
+/* Shared minimal styles for both entries. Phase 3 fills this in. */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+body {
+  margin: 0;
+}

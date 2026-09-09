@@ -1,0 +1,25 @@
+# Dev tooling for the sender. The shipped artefact is the single file
+# airlift.py, whose only runtime dependency is segno (pure Python).
+[project]
+name = "airlift-sender"
+version = "0.0.0"
+description = "Optical file transfer out of an air gap: renders a file as an animated QR loop"
+requires-python = ">=3.9"
+dependencies = ["segno>=1.6"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+addopts = "-q"
