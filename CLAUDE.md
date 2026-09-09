@@ -85,7 +85,13 @@ directly (out of scope; see non-goals).
   compiles on a fresh clone.
 - Python tooling runs through `uv` (`uv run --directory sender ...`).
 - Go dependencies: the standard library plus `rsc.io/qr` for the terminal
-  join QR. Nothing else without an ADR.
+  join QR. Web runtime dependencies: `zxing-wasm` (decoder fallback, wasm
+  served from `/assets/`, never a CDN) and `qrcode` (join QR). Nothing else
+  without an ADR.
+- Browsers talk to the API with `fetch` only: SSE through a streaming fetch
+  and downloads through blobs, because the token travels in a header.
+- `airlift-tower --replay FILE --into JOIN_URL` feeds a session on a running
+  tower; it is how the dashboard is exercised without a camera.
 - Shared fixtures: `testdata/bundles/` (trees plus the bundles
   `tools/repobundle.py` packs from them) and `sender/testdata/vectors.json`
   (`airlift.py frames --seed 1` over the multi base64 bundle). Regenerate

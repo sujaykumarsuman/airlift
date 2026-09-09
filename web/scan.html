@@ -2,12 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#000000" />
     <title>airlift scan</title>
-    <link rel="stylesheet" href="/src/shared/style.css" />
   </head>
-  <body>
-    <main id="app"></main>
+  <body class="scan">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="frame" hidden></canvas>
+    <div id="hud">
+      <div class="top">
+        <div id="progress" class="big">…</div>
+        <div id="state" class="state"></div>
+        <canvas id="bitmap" hidden></canvas>
+      </div>
+      <div class="bottom">
+        <div id="stats" class="stats"></div>
+        <div id="message" class="message"></div>
+        <div class="controls">
+          <select id="camera" hidden></select>
+          <button id="start" class="btn primary" hidden>Start camera</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/scan/main.ts"></script>
   </body>
 </html>

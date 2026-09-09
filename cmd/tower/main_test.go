@@ -3,13 +3,19 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sujaykumarsuman/airlift/internal/proto"
+	"github.com/sujaykumarsuman/airlift/internal/server"
+	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
 var vectors = filepath.Join("..", "..", "sender", "testdata", "vectors.json")
@@ -102,5 +108,47 @@ func TestTerminalQR(t *testing.T) {
 	}
 	if _, err := terminalQR(strings.Repeat("x", 5000)); err == nil {
 		t.Fatal("oversized text accepted")
+	}
+}
+
+func TestReplayIntoRunningTower(t *testing.T) {
+	store := session.NewStore(time.Hour, 4)
+	srv := server.New(server.Options{Store: store, Dest: t.TempDir(), Logf: t.Logf})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Post(ts.URL+"/api/sessions", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		SID   string `json:"sid"`
+		Token string `json:"token"`
+	}
+	json.NewDecoder(resp.Body).Decode(&c)
+	resp.Body.Close()
+	join := ts.URL + "/s/" + c.SID + "#t=" + c.Token
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--replay", vectors, "--into", join, "--rate", "0", "--drop", "0.3", "--ca-dir", t.TempDir()}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "state READY") {
+		t.Fatalf("exit %d\n%s\n%s", code, stdout.String(), stderr.String())
+	}
+	req, _ := http.NewRequest("GET", ts.URL+"/api/sessions/"+c.SID, nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, _ = http.DefaultClient.Do(req)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"state":"READY"`) || !strings.Contains(string(body), `"downloads":["raw","zip"]`) {
+		t.Fatalf("tower session: %s", body)
+	}
+	for _, bad := range []string{"nope", "https://h:1/x/y#t=z", "https://h:1/s/#t=z", "https://h:1/s/abc", "ftp://h/s/abc#t=z"} {
+		if _, _, _, err := parseJoinURL(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if base, sid, tok, err := parseJoinURL("https://10.0.0.5:8443/s/abc123#t=T0k_en-"); err != nil || base != "https://10.0.0.5:8443" || sid != "abc123" || tok != "T0k_en-" {
+		t.Fatalf("parse: %s %s %s %v", base, sid, tok, err)
+	}
+	if code := run([]string{"--into", join}, &stdout, &stderr); code != 2 {
+		t.Fatalf("--into without --replay: exit %d", code)
 	}
 }

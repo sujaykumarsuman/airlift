@@ -80,7 +80,7 @@ Exit: `airlift-tower --dest /tmp/out --replay sender/testdata/vectors.json
 --drop 0.2` reaches `READY`, writes the verified bundle and its unpacked tree
 to `--dest`, and exits 0. Tests green. Commit.
 
-## Phase 3 — Web + end-to-end on hardware
+## Phase 3 — Web + end-to-end on hardware ✔ (hardware run pending)
 
 Vite project in `web/`, two entries, shared minimal styles, no framework.
 
@@ -124,6 +124,13 @@ off the monitor; the dashboard fills in live, reaches `READY`, the zip
 download unpacks to a tree matching the source, and `--dest` has the same. A
 second run on the same phone shows no certificate warning. Tests green.
 Commit.
+
+Done without hardware: unit tests for the relay, SSE client, join and deep
+links, reducer and bitmap; the built UI served by the tower over TLS; the
+dashboard driven in a browser through `vite dev`, fed by `--replay --into`
+and by frames injected into the scan page, through to `READY`, verdicts and
+downloads. Still to run by hand: the Android camera path (decoder choice,
+resolution, focus) and the certificate bootstrap.
 
 ## Phase 4 — Hardening
 

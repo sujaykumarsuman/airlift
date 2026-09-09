@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,6 +21,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -48,7 +50,7 @@ type config struct {
 	ttl               time.Duration
 	caDir             string
 	session           bool
-	replayFile        string
+	replayFile, into  string
 	rate, drop        float64
 	shuffle           bool
 	passes            int
@@ -72,6 +74,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.StringVar(&c.caDir, "ca-dir", "", "where the built-in CA lives (default: <user config dir>/airlift)")
 	flags.BoolVar(&c.session, "session", false, "create a session at start and print its join QR (headless use)")
 	flags.StringVar(&c.replayFile, "replay", "", "feed this frames dump (or any file) into a fresh session over loopback, then exit")
+	flags.StringVar(&c.into, "into", "", "replay: feed a session on a running tower instead; its join URL, https://host:port/s/SID#t=TOKEN (dev use: the token is visible to ps)")
 	flags.Float64Var(&c.rate, "rate", 8, "replay: decoded frames per second (0 = unpaced)")
 	flags.Float64Var(&c.drop, "drop", 0.2, "replay: probability that each frame is missed")
 	flags.BoolVar(&c.shuffle, "shuffle", false, "replay: reorder frames within each pass")
@@ -98,8 +101,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if c.replayFile != "" && c.into != "" {
+		return runReplayInto(ctx, c, stdout, logger)
+	}
 	if c.replayFile != "" {
 		return runReplay(ctx, c, stdout, logger)
+	}
+	if c.into != "" {
+		logger.Printf("error: --into needs --replay FILE")
+		return 2
 	}
 	return runServe(ctx, c, stdout, logger)
 }
@@ -267,6 +277,104 @@ func runReplay(ctx context.Context, c config, stdout io.Writer, logger *log.Logg
 		return 0
 	}
 	return 1
+}
+
+// runReplayInto relays a dump into a session on a running tower, which is
+// how the dashboard is exercised without a camera.
+func runReplayInto(ctx context.Context, c config, stdout io.Writer, logger *log.Logger) int {
+	fail := func(err error) int {
+		logger.Printf("error: %v", err)
+		return 1
+	}
+	dump, encoded, err := replay.Load(c.replayFile)
+	if err != nil {
+		return fail(err)
+	}
+	base, sid, token, err := parseJoinURL(c.into)
+	if err != nil {
+		return fail(err)
+	}
+	client, err := towerClient(c.caDir)
+	if err != nil {
+		return fail(err)
+	}
+	m := dump.Manifest
+	note := ""
+	if encoded {
+		note = " (not a frames dump: encoded on the fly)"
+	}
+	fmt.Fprintf(stdout, "replay %s%s → %s session %s\n", c.replayFile, note, base, sid)
+	fmt.Fprintf(stdout, "  %d chunks × %d bytes, %d → %d bytes gzip, sender session 0x%08x\n",
+		m.Total(), m.Chunk, m.OrigSize, m.GzSize, dump.SenderSession)
+	fmt.Fprintf(stdout, "  rate %g fps, drop %.0f%%, shuffle %v, passes ≤ %d, seed %d\n",
+		c.rate, c.drop*100, c.shuffle, c.passes, c.seed)
+	rep, err := replay.Run(ctx, client, base, sid, token, dump, replay.Options{
+		Rate:    c.rate,
+		Drop:    c.drop,
+		Shuffle: c.shuffle,
+		Passes:  c.passes,
+		Seed:    c.seed,
+		Logf:    func(format string, args ...any) { fmt.Fprintf(stdout, "  "+format+"\n", args...) },
+	})
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Fprintf(stdout, "  posted %d frames in %d pass(es): accepted %d, dup %d, bad %d\n",
+		rep.Posted, rep.Passes, rep.Accepted, rep.Dup, rep.Bad)
+	var snap session.Snapshot
+	if err := json.Unmarshal(rep.Snapshot, &snap); err != nil {
+		return fail(err)
+	}
+	printOutcome(stdout, snap)
+	if snap.State == session.StateReady {
+		return 0
+	}
+	return 1
+}
+
+// parseJoinURL splits https://host:port/s/SID#t=TOKEN into its parts.
+func parseJoinURL(s string) (base, sid, token string, err error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", "", "", fmt.Errorf("--into: %w", err)
+	}
+	rest, ok := strings.CutPrefix(u.Path, "/s/")
+	sid = strings.Trim(rest, "/")
+	token = u.Query().Get("t")
+	if frag, err := url.ParseQuery(u.Fragment); err == nil && frag.Get("t") != "" {
+		token = frag.Get("t")
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || !ok || sid == "" || strings.Contains(sid, "/") || token == "" {
+		return "", "", "", errors.New("--into: expected a join URL like https://host:8443/s/SID#t=TOKEN")
+	}
+	return u.Scheme + "://" + u.Host, sid, token, nil
+}
+
+// towerClient trusts the system roots plus the local CA in caDir (or the
+// default config dir), so --into works against the built-in TLS.
+func towerClient(caDir string) (*http.Client, error) {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	dir := caDir
+	if dir == "" {
+		if base, err := os.UserConfigDir(); err == nil {
+			dir = filepath.Join(base, "airlift")
+		}
+	}
+	if dir != "" {
+		if pemBytes, err := os.ReadFile(filepath.Join(dir, tlsca.CertFile)); err == nil {
+			pool.AppendCertsFromPEM(pemBytes)
+		}
+	}
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("unexpected default transport")
+	}
+	tr = tr.Clone()
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	return &http.Client{Transport: tr, Timeout: 30 * time.Second}, nil
 }
 
 func printOutcome(w io.Writer, snap session.Snapshot) {

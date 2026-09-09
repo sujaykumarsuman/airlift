@@ -4,10 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>airlift tower</title>
-    <link rel="stylesheet" href="/src/shared/style.css" />
   </head>
-  <body>
-    <main id="app"></main>
+  <body class="tower">
+    <header class="bar">
+      <h1>airlift <span class="muted">tower</span></h1>
+      <button id="new-session" class="btn small" hidden>New session</button>
+    </header>
+    <main id="app">
+      <section id="session"></section>
+      <section id="status"></section>
+    </main>
     <script type="module" src="/src/tower/main.ts"></script>
   </body>
 </html>

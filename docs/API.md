@@ -137,7 +137,9 @@ sanitiser. Existing files are overwritten.
 
 `GET /` serves the dashboard entry, `GET /s/{sid}` the scan entry, and
 `/assets/…` the Vite build output, all from the embedded `web/dist`; until
-the UI is built they are placeholders. `GET /ca.crt` serves the local CA in
+the UI is built they are placeholders. The dashboard also accepts
+`/#s={sid}&t={token}` so a second device can watch an existing session; it
+keeps its own session in `sessionStorage` across reloads. `GET /ca.crt` serves the local CA in
 PEM with `Content-Type: application/x-x509-ca-cert` so phones offer to
 install it; with `--cert/--key` it is `404`.
 
