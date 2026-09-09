@@ -38,8 +38,9 @@ function safeStorage(): Storage | null {
     return null;
   }
 }
-const join = resolveJoin(location.pathname, location.hash, safeStorage());
-if (join.redirect) history.replaceState(null, "", join.redirect);
+const basePath = new URL(document.baseURI).pathname.replace(/\/$/, "");
+const join = resolveJoin(location.pathname, location.hash, safeStorage(), basePath);
+if (join.redirect) history.replaceState(null, "", new URL(join.redirect, document.baseURI).toString());
 if (join.error !== undefined) {
   progressEl.textContent = "✗";
   stateEl.textContent = "Not a join link";
@@ -209,7 +210,8 @@ torchButton.addEventListener("click", () => {
   });
 });
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/sw.js").catch(() => {
+  const scope = new URL("./", document.baseURI).pathname; // "/" or "/airlift/"
+  navigator.serviceWorker.register(new URL("sw.js", document.baseURI), { scope }).catch(() => {
     /* the page works without it; it only loses offline reloads */
   });
 }

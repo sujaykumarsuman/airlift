@@ -33,6 +33,20 @@ export interface Snapshot {
   expires_at: string;
 }
 
+export interface Info {
+  version: string;
+  public_url: string;
+  base_path: string;
+  admin_enabled: boolean;
+  caps: {
+    max_gz_bytes: number;
+    idle_ttl: number;
+    inactive_ttl: number;
+    max_age: number;
+    sessions: number;
+  };
+}
+
 export interface Created {
   sid: string;
   token: string;

@@ -10,7 +10,7 @@ import (
 var ErrPath = errors.New("unsafe path")
 
 // SafePath normalises a bundle path for use as a zip entry name or a path
-// under --dest. Both "/" and "\" count as separators, "." and empty
+// under the destination directory. Both "/" and "\" count as separators, "." and empty
 // components are dropped, and the result is relative, non-empty and free of
 // ".." components. Absolute paths and drive letters are rejected.
 func SafePath(rel string) (string, error) {

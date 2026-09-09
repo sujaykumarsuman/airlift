@@ -1,9 +1,11 @@
-// airlift scan page service worker: an offline-first app shell for /s/*.
-// Navigations to /s/{sid} are network-first with the last good scan.html as
-// the fallback; hashed /assets/ and the icons are cache-first. The API and
-// /ca.crt are never touched.
+// airlift scan page service worker: an offline-first app shell for <base>s/*.
+// Navigations to <base>s/{sid} are network-first with the last good scan.html as
+// the fallback; hashed assets and the icons are cache-first. The API is never
+// touched. BASE is the path prefix the worker was registered under ("/" or
+// "/airlift/"), so it works both rooted and behind a reverse proxy (ADR 0012).
 const CACHE = "airlift-shell-v1";
-const SHELL_KEY = "/s/";
+const BASE = new URL("./", self.location).pathname;
+const SHELL_KEY = BASE + "s/";
 
 self.addEventListener("install", () => {
   self.skipWaiting();
@@ -24,12 +26,13 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/api/") || url.pathname === "/ca.crt") return;
-  if (req.mode === "navigate" && url.pathname.startsWith("/s/")) {
+  const p = url.pathname;
+  if (p.startsWith(BASE + "api/")) return;
+  if (req.mode === "navigate" && p.startsWith(BASE + "s/")) {
     event.respondWith(networkFirst(req, SHELL_KEY));
     return;
   }
-  if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/icons/") || url.pathname === "/manifest.webmanifest") {
+  if (p.startsWith(BASE + "assets/") || p.startsWith(BASE + "icons/") || p === BASE + "manifest.webmanifest") {
     event.respondWith(cacheFirst(req));
   }
 });

@@ -49,8 +49,8 @@ func TestDefaults(t *testing.T) {
 	if c.DataDir != filepath.Join(home, "data") {
 		t.Fatalf("data_dir %q", c.DataDir)
 	}
-	if c.AdminEnabled() || c.BasePath() != "" {
-		t.Fatalf("admin=%v base=%q", c.AdminEnabled(), c.BasePath())
+	if c.AdminEnabled() {
+		t.Fatalf("admin should be disabled by default")
 	}
 	if _, src, _ := c.Get("sessions"); src != LayerDefault {
 		t.Fatalf("source %v", src)
@@ -133,12 +133,12 @@ func TestParseKinds(t *testing.T) {
 			t.Errorf("%q: accepted, want error", line)
 		}
 	}
-	// max_age accepts 0 (off) and durations; base_path derives from the URL.
+	// A public_url with a path prefix parses (the base path is derived from it
+	// by internal/server.ParsePublicURL, not here).
 	home := t.TempDir()
 	write(t, filepath.Join(home, "config"), "public_url = https://h.example/airlift/\n", 0o644)
-	c, _ := load(t, home, nil, nil)
-	if c.BasePath() != "/airlift" {
-		t.Fatalf("base path %q", c.BasePath())
+	if c, err := load(t, home, nil, nil); err != nil || c.PublicURL != "https://h.example/airlift/" {
+		t.Fatalf("public_url %q err %v", c.PublicURL, err)
 	}
 }
 

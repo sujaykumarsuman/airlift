@@ -1,8 +1,9 @@
 # HTTP API
 
-Canonical. The tower serves this over TLS on the LAN (ADR 0007, ADR 0008).
-`internal/server` implements it; `internal/replay` and the server tests are
-its reference clients.
+Canonical. The tower serves plain HTTP under a path prefix behind a
+TLS-terminating reverse proxy (ADR 0007, ADR 0012); the proxy strips the prefix
+and the router stays rooted. `internal/server` implements it; `internal/replay`
+and the server tests are its reference clients.
 
 ## Routes
 
@@ -14,10 +15,22 @@ POST   /api/sessions/{sid}/frames         token → body {frames:[base45,...]}
                                           → {accepted, dup, bad, have, total, state}
 GET    /api/sessions/{sid}/download?as=raw|file|zip   token → bytes
 DELETE /api/sessions/{sid}                token
-GET    /ca.crt                            local CA certificate (PEM)
+GET    /api/info                          → {version, public_url, base_path, admin_enabled, caps}
 GET    /                                  tower dashboard
 GET    /s/{sid}                           scan page (token arrives in #t=)
 ```
+
+`GET /api/info` is unauthenticated (the pages call it before any session
+exists) and never logged; `caps` carries `{max_gz_bytes, idle_ttl,
+inactive_ttl, max_age, sessions}` (the `*_ttl`/`max_age` in seconds).
+
+## Client address and X-Forwarded-For
+
+A client is identified by its address. It is the direct peer, unless the peer
+is in `trusted_proxies` (default loopback), in which case `X-Forwarded-For` is
+read right to left, skipping further trusted hops, and the first untrusted
+address — the client the trusted proxy appended — is used. The leftmost entry
+is client-spoofable and is never trusted on its own.
 
 ## Auth
 
@@ -77,8 +90,8 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `verdicts` | object | `{gz_sha, orig_sha, bundle}`; each `null` until its stage ran, then `{ok, expected, actual}` |
 | `bundle` | object or null | `{files, total_bytes, paths}` for a verified repobundle; `paths` holds the first 50 |
 | `downloads` | string[] | subset of `raw`, `file`, `zip`; empty unless `READY` |
-| `dest_path` | string or null | what `--dest` received: the unpacked tree for a bundle, else the raw file |
-| `error` | string or null | the failure in `FAILED`; in `READY`, a `--dest` write failure (downloads still work) |
+| `dest_path` | string or null | on-disk path once written under `data_dir` (per beam, ADR 0013); null until then |
+| `error` | string or null | the failure reason in `FAILED` |
 | `started_at` | RFC 3339 or null | when the first frame was accepted |
 | `finished_at` | RFC 3339 or null | when verification ended, either way |
 | `expires_at` | RFC 3339 | refreshed on every authenticated call |
@@ -131,23 +144,22 @@ is an `as` not listed in `downloads`. Per ADR 0006:
 
 Responses carry `Content-Disposition: attachment` and `Cache-Control: no-store`.
 
-## `--dest`
+## On disk
 
-The raw file lands at `<dest>/<name>`; a bundle's tree at `<dest>/<stem>/`
-(`<name>.tree/` when the name has no extension). Every entry passes the path
-sanitiser. Existing files are overwritten.
+Verified output is written under `data_dir` (per beam; layout in ADR 0013).
+`data_dir` is emptied on start behind a guard, and every entry passes the path
+sanitiser. (Downloads are served from memory until the per-beam write lands.)
 
 ## Static
 
 `GET /` serves the dashboard entry, `GET /s/{sid}` the scan entry, and
 `/assets/…` the Vite build output, all from the embedded `web/dist`; until
-the UI is built they are placeholders. `/sw.js`, `/manifest.webmanifest`
-and `/icons/…` make the scan page installable and offline-first on the
-phone; the service worker never touches `/api/` or `/ca.crt`. The dashboard also accepts
-`/#s={sid}&t={token}` so a second device can watch an existing session; it
-keeps its own session in `sessionStorage` across reloads. `GET /ca.crt` serves the local CA in
-PEM with `Content-Type: application/x-x509-ca-cert` so phones offer to
-install it; with `--cert/--key` it is `404`.
+the UI is built they are placeholders. The two HTML pages are served with a
+`<base href>` carrying the configured path prefix injected into their head.
+`/sw.js`, `/manifest.webmanifest` and `/icons/…` make the scan page installable
+and offline-first on the phone; the service worker never touches `/api/`. The
+dashboard also accepts `/#s={sid}&t={token}` so a second device can watch an
+existing session; it keeps its own session in `sessionStorage` across reloads.
 
 ## Replay (internal)
 

@@ -63,8 +63,9 @@ type Download struct {
 }
 
 // Outcome is what the verification stage hands back via Finish. A non-empty
-// Err means FAILED; Warning is surfaced as `error` on a READY session (for
-// example a --dest write that failed after the transfer verified).
+// Err means FAILED; Warning is surfaced as `error` on a READY session. (DestPath
+// and Warning are unwritten in the HTTP-only phase; the per-beam on-disk write
+// that sets them lands in ADR 0013.)
 type Outcome struct {
 	Verdicts  Verdicts
 	Bundle    *BundleSummary

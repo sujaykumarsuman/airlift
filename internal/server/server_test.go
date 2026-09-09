@@ -14,7 +14,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -41,12 +40,11 @@ type harness struct {
 	joins []string
 }
 
-func start(t *testing.T, dest string, tweak func(*Options)) *harness {
+func start(t *testing.T, tweak func(*Options)) *harness {
 	t.Helper()
 	h := &harness{store: session.NewStore(time.Hour, 32)}
 	opts := Options{
 		Store:    h.store,
-		Dest:     dest,
 		OnCreate: func(_ *session.Session, join string) { h.joins = append(h.joins, join) },
 		Logf:     t.Logf,
 	}
@@ -169,8 +167,7 @@ func sameTree(t *testing.T, got, want map[string][]byte, what string) {
 // relay it into a real tower through loss, and confirm the unpacked tree on
 // disk equals the source.
 func TestEndToEndGoPackBeam(t *testing.T) {
-	dest := t.TempDir()
-	h := start(t, dest, nil)
+	h := start(t, nil)
 	var buf bytes.Buffer
 	if _, err := bundle.Pack(&buf, filepath.Join(fixtures, "multi", "tree"), "base64", nil, ""); err != nil {
 		t.Fatal(err)
@@ -191,13 +188,31 @@ func TestEndToEndGoPackBeam(t *testing.T) {
 	if snap.Name != "multi" || strings.Join(snap.Downloads, ",") != "raw,zip" {
 		t.Fatalf("snapshot %+v", snap)
 	}
-	// name "multi" has no extension, so the tree lands at <dest>/multi.tree.
-	sameTree(t, readTree(t, filepath.Join(dest, "multi.tree")), readTree(t, filepath.Join(fixtures, "multi", "tree")), "go-beam")
+	// The zip download unpacks to the source tree. (Downloads are served from
+	// memory this phase; per-beam on-disk persistence returns in a later step.)
+	_, body := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=zip", c.Token, nil)
+	got := unzip(t, body)
+	sameTree(t, got, readTree(t, filepath.Join(fixtures, "multi", "tree")), "go-beam zip")
+}
+
+// unzip reads a zip archive into a slash-path → bytes map.
+func unzip(t *testing.T, data []byte) map[string][]byte {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string][]byte{}
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		out[f.Name], _ = io.ReadAll(rc)
+		rc.Close()
+	}
+	return out
 }
 
 func TestEndToEndReplayWithDrop(t *testing.T) {
-	dest := t.TempDir()
-	h := start(t, dest, nil)
+	h := start(t, nil)
 	d := loadVectors(t)
 	c := h.create(t)
 	if !strings.HasPrefix(c.JoinURL, h.ts.URL+"/s/"+c.SID+"#t="+c.Token) || len(h.joins) != 1 || h.joins[0] != c.JoinURL {
@@ -236,9 +251,6 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 		t.Fatalf("downloads %v", snap.Downloads)
 	}
 	wantTree := readTree(t, filepath.Join(fixtures, "multi", "tree"))
-	if snap.DestPath == nil || *snap.DestPath != filepath.Join(dest, "bundle-base64") {
-		t.Fatalf("dest_path %v", snap.DestPath)
-	}
 
 	// raw download is the byte-identical input
 	input, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
@@ -275,18 +287,6 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=file", c.Token, nil); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("file download: %s", resp.Status)
 	}
-	// --dest has the raw bundle and the unpacked tree
-	rawOnDisk, err := os.ReadFile(filepath.Join(dest, "bundle-base64.txt"))
-	if err != nil || !bytes.Equal(rawOnDisk, input) {
-		t.Fatalf("dest raw: %v", err)
-	}
-	sameTree(t, readTree(t, filepath.Join(dest, "bundle-base64")), wantTree, "dest tree")
-	if runtime.GOOS != "windows" {
-		info, _ := os.Stat(filepath.Join(dest, "bundle-base64", "bin", "run.sh"))
-		if info.Mode()&0o111 == 0 {
-			t.Fatal("dest tree lost the executable bit")
-		}
-	}
 	// late frames after READY are harmless
 	resp, body = h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(`{"frames":["`+d.Frames[1]+`"]}`))
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"dup":1`) {
@@ -295,8 +295,7 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 }
 
 func TestSingleFileBundle(t *testing.T) {
-	dest := t.TempDir()
-	h := start(t, dest, nil)
+	h := start(t, nil)
 	input, _ := os.ReadFile(filepath.Join(fixtures, "single", "bundle-text.txt"))
 	d, err := beam.Encode(input, "single.txt", 200, 7, beam.ModeSequential, 0)
 	if err != nil {
@@ -315,17 +314,10 @@ func TestSingleFileBundle(t *testing.T) {
 	if string(body) != "hello, airlift\n" {
 		t.Fatalf("file download %q", body)
 	}
-	if *snap.DestPath != filepath.Join(dest, "single") {
-		t.Fatalf("dest_path %s", *snap.DestPath)
-	}
-	if got, _ := os.ReadFile(filepath.Join(dest, "single", "hello.txt")); string(got) != "hello, airlift\n" {
-		t.Fatalf("dest tree %q", got)
-	}
 }
 
 func TestRawFileIsNotABundle(t *testing.T) {
-	dest := t.TempDir()
-	h := start(t, dest, nil)
+	h := start(t, nil)
 	data := make([]byte, 3000)
 	rand.New(rand.NewSource(1)).Read(data)
 	d, _ := beam.Encode(data, "noise", 600, 9, beam.ModeSequential, 0)
@@ -337,16 +329,15 @@ func TestRawFileIsNotABundle(t *testing.T) {
 	if strings.Join(snap.Downloads, ",") != "raw" || snap.Bundle != nil || snap.Verdicts.Bundle != nil {
 		t.Fatalf("%+v", snap)
 	}
-	if *snap.DestPath != filepath.Join(dest, "noise") {
-		t.Fatalf("dest_path %s", *snap.DestPath)
-	}
-	if got, _ := os.ReadFile(*snap.DestPath); !bytes.Equal(got, data) {
-		t.Fatal("dest raw differs")
+	// The raw download is the byte-identical input.
+	_, got := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=raw", c.Token, nil)
+	if !bytes.Equal(got, data) {
+		t.Fatal("raw download differs")
 	}
 }
 
 func TestCorruptedChunkFails(t *testing.T) {
-	h := start(t, "", nil)
+	h := start(t, nil)
 	d := loadVectors(t)
 	victim, _ := proto.ParseText(d.Frames[3])
 	victim.Payload[0] ^= 1
@@ -364,7 +355,7 @@ func TestCorruptedChunkFails(t *testing.T) {
 	if v := snap.Verdicts.GzSHA; v == nil || v.OK || v.Expected != d.Manifest.GzSHA256 || v.Actual == v.Expected {
 		t.Fatalf("gz verdict %+v", v)
 	}
-	if snap.Verdicts.OrigSHA != nil || snap.DestPath != nil {
+	if snap.Verdicts.OrigSHA != nil {
 		t.Fatalf("%+v", snap)
 	}
 	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=raw", c.Token, nil); resp.StatusCode != http.StatusConflict {
@@ -373,7 +364,7 @@ func TestCorruptedChunkFails(t *testing.T) {
 }
 
 func TestBundleWithBadFileFails(t *testing.T) {
-	h := start(t, t.TempDir(), nil)
+	h := start(t, nil)
 	text, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-text.txt"))
 	tampered := bytes.Replace(text, []byte("Notes on the multi fixture"), []byte("notes on the multi fixture"), 1)
 	d, _ := beam.Encode(tampered, "tampered.txt", 600, 3, beam.ModeSequential, 0)
@@ -388,31 +379,13 @@ func TestBundleWithBadFileFails(t *testing.T) {
 	if v := snap.Verdicts.Bundle; v == nil || v.OK || !strings.Contains(v.Actual, "notes/NOTES.txt") {
 		t.Fatalf("bundle verdict %+v", v)
 	}
-	if !snap.Verdicts.GzSHA.OK || !snap.Verdicts.OrigSHA.OK || len(snap.Downloads) != 0 || snap.DestPath != nil {
-		t.Fatalf("%+v", snap)
-	}
-	if _, err := os.Stat(filepath.Join(h.srv.opts.Dest, "tampered")); !os.IsNotExist(err) {
-		t.Fatal("dest written for a failed bundle")
-	}
-}
-
-func TestDestFailureIsAWarning(t *testing.T) {
-	dest := filepath.Join(t.TempDir(), "file-not-dir")
-	os.WriteFile(dest, []byte("x"), 0o644)
-	h := start(t, dest, nil)
-	d := loadVectors(t)
-	c := h.create(t)
-	if rep := h.replay(t, c, d, replay.Options{}); rep.State != session.StateReady {
-		t.Fatalf("%+v", rep)
-	}
-	snap := h.snapshot(t, c)
-	if snap.Error == nil || !strings.HasPrefix(*snap.Error, "dest:") || snap.DestPath != nil || len(snap.Downloads) != 2 {
+	if !snap.Verdicts.GzSHA.OK || !snap.Verdicts.OrigSHA.OK || len(snap.Downloads) != 0 {
 		t.Fatalf("%+v", snap)
 	}
 }
 
 func TestAuth(t *testing.T) {
-	h := start(t, "", nil)
+	h := start(t, nil)
 	c := h.create(t)
 	paths := []struct{ method, path string }{
 		{"GET", "/api/sessions/" + c.SID},
@@ -438,7 +411,7 @@ func TestAuth(t *testing.T) {
 }
 
 func TestLimits(t *testing.T) {
-	h := start(t, "", func(o *Options) {
+	h := start(t, func(o *Options) {
 		o.MaxFrames = 3
 		o.MaxBody = 200
 		o.Store = session.NewStore(time.Hour, 1)
@@ -492,7 +465,7 @@ func readEvent(t *testing.T, r *bufio.Reader) (string, session.Snapshot) {
 }
 
 func TestSSE(t *testing.T) {
-	h := start(t, "", nil)
+	h := start(t, nil)
 	c := h.create(t)
 	d := loadVectors(t)
 	open := func(role string) (*http.Response, *bufio.Reader) {
@@ -546,8 +519,8 @@ func TestSSE(t *testing.T) {
 	}
 }
 
-func TestStaticAndCA(t *testing.T) {
-	h := start(t, "", nil)
+func TestStaticAndInfo(t *testing.T) {
+	h := start(t, func(o *Options) { o.Version = "test-1"; o.Caps = Caps{Sessions: 4, MaxGzBytes: 64 << 20} })
 	for _, p := range []string{"/", "/s/abc"} {
 		resp, body := h.do(t, "GET", p, "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(string(body), "airlift") {
@@ -557,29 +530,41 @@ func TestStaticAndCA(t *testing.T) {
 	if resp, _ := h.do(t, "GET", "/nope", "", nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown path: %s", resp.Status)
 	}
-	if resp, _ := h.do(t, "GET", "/ca.crt", "", nil); resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("ca.crt without CA: %s", resp.Status)
+	// /api/info is unauthenticated and advertises version, base path and caps.
+	resp, body := h.do(t, "GET", "/api/info", "", nil)
+	var info struct {
+		Version      string         `json:"version"`
+		BasePath     string         `json:"base_path"`
+		AdminEnabled bool           `json:"admin_enabled"`
+		Caps         map[string]any `json:"caps"`
+	}
+	if resp.StatusCode != 200 || json.Unmarshal(body, &info) != nil {
+		t.Fatalf("/api/info: %s %s", resp.Status, body)
+	}
+	if info.Version != "test-1" || info.BasePath != "" || info.AdminEnabled || info.Caps["sessions"].(float64) != 4 {
+		t.Fatalf("info %+v", info)
 	}
 
 	web := fstest.MapFS{
-		"index.html":           {Data: []byte("<title>dash</title>")},
-		"scan.html":            {Data: []byte("<title>scan</title>")},
+		"index.html":           {Data: []byte("<!--airlift-base--><title>dash</title>")},
+		"scan.html":            {Data: []byte("<!--airlift-base--><title>scan</title>")},
 		"assets/app.js":        {Data: []byte("console.log(1)")},
 		"assets/app.css":       {Data: []byte("body{}")},
 		"sw.js":                {Data: []byte("self.x=1")},
 		"manifest.webmanifest": {Data: []byte(`{"name":"airlift"}`)},
 		"icons/icon-192.png":   {Data: []byte("PNG")},
 	}
-	h2 := start(t, "", func(o *Options) {
-		o.Web = web
-		o.CACertPEM = []byte("-----BEGIN CERTIFICATE-----\nMA==\n-----END CERTIFICATE-----\n")
-	})
+	h2 := start(t, func(o *Options) { o.Web = web })
 	for p, want := range map[string]string{"/": "dash", "/s/xyz": "scan", "/assets/app.js": "console.log(1)",
 		"/sw.js": "self.x=1", "/manifest.webmanifest": "airlift", "/icons/icon-192.png": "PNG"} {
 		resp, body := h2.do(t, "GET", p, "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(string(body), want) {
 			t.Fatalf("%s: %s %q", p, resp.Status, body)
 		}
+	}
+	// The served pages carry a <base href> (base_path is "" here → "/").
+	if _, body := h2.do(t, "GET", "/", "", nil); !strings.Contains(string(body), `<base href="/">`) {
+		t.Fatalf("no <base> in dashboard: %s", body)
 	}
 	if resp, _ := h2.do(t, "GET", "/manifest.webmanifest", "", nil); resp.Header.Get("Content-Type") != "application/manifest+json" || resp.Header.Get("Cache-Control") != "no-cache" {
 		t.Fatalf("manifest headers: %v", resp.Header)
@@ -590,23 +575,19 @@ func TestStaticAndCA(t *testing.T) {
 	if resp, _ := h.do(t, "GET", "/sw.js", "", nil); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("sw.js without a build: %s", resp.Status)
 	}
-	resp, body := h2.do(t, "GET", "/ca.crt", "", nil)
-	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/x-x509-ca-cert" || !strings.HasPrefix(string(body), "-----BEGIN CERTIFICATE-----") {
-		t.Fatalf("ca.crt: %s %s", resp.Status, resp.Header.Get("Content-Type"))
-	}
 }
 
 func TestNames(t *testing.T) {
-	cases := map[string][3]string{ // name → safeName, stem, treeDir
-		"repo-bundle.txt":  {"repo-bundle.txt", "repo-bundle", "repo-bundle"},
-		"bundle":           {"bundle", "bundle", "bundle.tree"},
-		".hidden":          {".hidden", ".hidden", ".hidden.tree"},
-		"../../etc/passwd": {"airlift-download", "airlift-download", "airlift-download.tree"},
-		"dir/inner.tar.gz": {"inner.tar.gz", "inner.tar", "inner.tar"},
+	cases := map[string][2]string{ // name → safeName, stem
+		"repo-bundle.txt":  {"repo-bundle.txt", "repo-bundle"},
+		"bundle":           {"bundle", "bundle"},
+		".hidden":          {".hidden", ".hidden"},
+		"../../etc/passwd": {"airlift-download", "airlift-download"},
+		"dir/inner.tar.gz": {"inner.tar.gz", "inner.tar"},
 	}
 	for name, want := range cases {
 		s := safeName(name)
-		if got := [3]string{s, stem(s), treeDir(s)}; got != want {
+		if got := [2]string{s, stem(s)}; got != want {
 			t.Errorf("%q: got %v, want %v", name, got, want)
 		}
 	}
@@ -622,8 +603,7 @@ func loadFountain(t *testing.T) *beam.Dump {
 }
 
 func TestFountainReplayWithLossAndReorder(t *testing.T) {
-	dest := t.TempDir()
-	h := start(t, dest, nil)
+	h := start(t, nil)
 	d := loadFountain(t)
 	c := h.create(t)
 	rep := h.replay(t, c, d, replay.Options{Drop: 0.3, Shuffle: true, Passes: 4, Seed: 2})
@@ -641,8 +621,8 @@ func TestFountainReplayWithLossAndReorder(t *testing.T) {
 		t.Fatalf("timestamps %v %v", snap.StartedAt, snap.FinishedAt)
 	}
 	input, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
-	if got, _ := os.ReadFile(filepath.Join(dest, "bundle-base64.txt")); !bytes.Equal(got, input) {
-		t.Fatal("dest raw differs")
+	if _, got := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=raw", c.Token, nil); !bytes.Equal(got, input) {
+		t.Fatal("raw download differs")
 	}
 }
 
@@ -679,7 +659,7 @@ func relayWork(t *testing.T, h *harness, d *beam.Dump, relays int, drop float64)
 }
 
 func TestTwoRelaysBeatOne(t *testing.T) {
-	h := start(t, "", func(o *Options) { o.Store = session.NewStore(time.Hour, 32) })
+	h := start(t, func(o *Options) { o.Store = session.NewStore(time.Hour, 32) })
 	for _, name := range []string{"sequential", "fountain"} {
 		d := loadVectors(t)
 		if name == "fountain" {
@@ -697,7 +677,7 @@ func TestTwoRelaysBeatOne(t *testing.T) {
 func TestTokensNeverLogged(t *testing.T) {
 	var mu sync.Mutex
 	var logs []string
-	h := start(t, t.TempDir(), func(o *Options) {
+	h := start(t, func(o *Options) {
 		o.Logf = func(format string, args ...any) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -725,7 +705,7 @@ func TestTokensNeverLogged(t *testing.T) {
 }
 
 func TestSessionExpiryClosesStreams(t *testing.T) {
-	h := start(t, "", func(o *Options) { o.Store = session.NewStore(150*time.Millisecond, 32) })
+	h := start(t, func(o *Options) { o.Store = session.NewStore(150*time.Millisecond, 32) })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go h.store.Run(ctx, 20*time.Millisecond)
@@ -756,5 +736,86 @@ func TestSessionExpiryClosesStreams(t *testing.T) {
 	}
 	if h.store.Len() != 0 {
 		t.Fatalf("%d sessions left after the sweep", h.store.Len())
+	}
+}
+
+func TestServesUnderPathPrefix(t *testing.T) {
+	const prefix = "/airlift"
+	web := fstest.MapFS{
+		"index.html": {Data: []byte("<!--airlift-base--><title>dash</title>")},
+		"scan.html":  {Data: []byte("<!--airlift-base--><title>scan</title>")},
+	}
+	root := New(Options{
+		Store:      session.NewStore(time.Minute, 4),
+		PublicBase: "http://proxy.example" + prefix,
+		BasePath:   prefix,
+		Web:        web,
+		Version:    "test",
+		Caps:       Caps{Sessions: 4, MaxGzBytes: 64 << 20},
+	})
+	// The reverse proxy strips the prefix before the rooted tower sees it.
+	front := httptest.NewServer(http.StripPrefix(prefix, root.Handler()))
+	defer front.Close()
+
+	resp, err := http.Get(front.URL + prefix + "/api/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var info struct {
+		BasePath  string `json:"base_path"`
+		PublicURL string `json:"public_url"`
+	}
+	json.NewDecoder(resp.Body).Decode(&info)
+	resp.Body.Close()
+	if info.BasePath != prefix || info.PublicURL != "http://proxy.example"+prefix {
+		t.Fatalf("info base_path=%q public_url=%q", info.BasePath, info.PublicURL)
+	}
+
+	page, _ := http.Get(front.URL + prefix + "/s/deadbeef")
+	body, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	if !strings.Contains(string(body), `<base href="/airlift/">`) {
+		t.Fatalf("no prefixed <base> in served page:\n%s", body)
+	}
+
+	s, join, _ := root.CreateSession()
+	if !strings.HasPrefix(join, "http://proxy.example/airlift/s/"+s.ID+"#t=") {
+		t.Fatalf("join_url = %q", join)
+	}
+	req, _ := http.NewRequest("POST", front.URL+prefix+"/api/sessions/"+s.ID+"/frames", strings.NewReader(`{"frames":[]}`))
+	req.Header.Set("Authorization", "Bearer "+s.Token)
+	r2, err := http.DefaultClient.Do(req)
+	if err != nil || r2.StatusCode != 200 {
+		t.Fatalf("frames through the stripping proxy: %v status %v", err, r2)
+	}
+	r2.Body.Close()
+}
+
+func TestClientAddrTrustedProxy(t *testing.T) {
+	srv := New(Options{
+		Store:          session.NewStore(time.Minute, 4),
+		TrustedProxies: ParseTrustedProxies([]string{"127.0.0.1", "::1"}),
+	})
+	mk := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+	cases := []struct{ name, remote, xff, want string }{
+		{"trusted peer, appended client", "127.0.0.1:5000", "9.9.9.9", "9.9.9.9"},
+		{"trusted peer, spoofed leading entry ignored", "127.0.0.1:5000", "1.2.3.4, 9.9.9.9", "9.9.9.9"},
+		{"trusted peer, chain of trusted hops", "127.0.0.1:5000", "9.9.9.9, 127.0.0.1", "9.9.9.9"},
+		{"untrusted peer ignores xff", "8.8.8.8:5000", "9.9.9.9", "8.8.8.8"},
+		{"trusted peer, malformed xff → peer", "127.0.0.1:5000", "not-an-ip", "127.0.0.1"},
+		{"trusted peer, no xff → peer", "127.0.0.1:5000", "", "127.0.0.1"},
+		{"IPv4-mapped trusted peer over dual-stack", "[::ffff:127.0.0.1]:5000", "9.9.9.9", "9.9.9.9"},
+	}
+	for _, tc := range cases {
+		if got := srv.clientAddr(mk(tc.remote, tc.xff)); got != tc.want {
+			t.Errorf("%s: clientAddr = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

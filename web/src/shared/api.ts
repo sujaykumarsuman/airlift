@@ -1,6 +1,15 @@
-import type { Created, IngestResult, Snapshot } from "./types";
+import type { Created, IngestResult, Info, Snapshot } from "./types";
 
 export type FetchFn = typeof fetch;
+
+/**
+ * Resolves an app-relative path (no leading slash, e.g. "api/sessions/abc")
+ * against the document's base, so every request honours the <base href> the
+ * tower injects and works under any path prefix (ADR 0012).
+ */
+export function apiURL(path: string): string {
+  return new URL(path, document.baseURI).toString();
+}
 
 /** A non-2xx answer; `message` is the server's `error` field when present. */
 export class ApiError extends Error {
@@ -32,12 +41,16 @@ async function errorMessage(resp: Response): Promise<string> {
   return `HTTP ${resp.status}`;
 }
 
+export function getInfo(fetchFn: FetchFn = fetch): Promise<Info> {
+  return fetchFn(apiURL("api/info"), { headers: { accept: "application/json" } }).then((r) => expectJSON<Info>(r));
+}
+
 export function createSession(fetchFn: FetchFn = fetch): Promise<Created> {
-  return fetchFn("/api/sessions", { method: "POST" }).then((r) => expectJSON<Created>(r));
+  return fetchFn(apiURL("api/sessions"), { method: "POST" }).then((r) => expectJSON<Created>(r));
 }
 
 export function getSnapshot(sid: string, token: string, fetchFn: FetchFn = fetch): Promise<Snapshot> {
-  return fetchFn(`/api/sessions/${sid}`, { headers: authHeaders(token), cache: "no-store" }).then((r) =>
+  return fetchFn(apiURL(`api/sessions/${sid}`), { headers: authHeaders(token), cache: "no-store" }).then((r) =>
     expectJSON<Snapshot>(r),
   );
 }
@@ -48,7 +61,7 @@ export function postFrames(
   frames: string[],
   fetchFn: FetchFn = fetch,
 ): Promise<IngestResult> {
-  return fetchFn(`/api/sessions/${sid}/frames`, {
+  return fetchFn(apiURL(`api/sessions/${sid}/frames`), {
     method: "POST",
     headers: { ...authHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify({ frames }),
@@ -56,12 +69,12 @@ export function postFrames(
 }
 
 export async function deleteSession(sid: string, token: string, fetchFn: FetchFn = fetch): Promise<void> {
-  const resp = await fetchFn(`/api/sessions/${sid}`, { method: "DELETE", headers: authHeaders(token) });
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}`), { method: "DELETE", headers: authHeaders(token) });
   if (!resp.ok && resp.status !== 404) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
 export function eventsURL(sid: string, role: "relay" | "viewer"): string {
-  return `/api/sessions/${sid}/events${role === "relay" ? "?role=relay" : ""}`;
+  return apiURL(`api/sessions/${sid}/events${role === "relay" ? "?role=relay" : ""}`);
 }
 
 /** Downloads go through fetch so the token can travel in the header. */
@@ -71,7 +84,7 @@ export async function fetchDownload(
   as: string,
   fetchFn: FetchFn = fetch,
 ): Promise<{ blob: Blob; filename: string }> {
-  const resp = await fetchFn(`/api/sessions/${sid}/download?as=${encodeURIComponent(as)}`, {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/download?as=${encodeURIComponent(as)}`), {
     headers: authHeaders(token),
   });
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));

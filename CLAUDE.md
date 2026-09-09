@@ -71,20 +71,30 @@ directly (out of scope; see non-goals).
 7. The server is the source of truth; in-memory sessions with TTL. (ADR 0005)
 8. Verification chain: concat → sha256 → gunzip → sha256 → per-file sha256.
 9. Bundle stage in Go after verification; zip / bare file / raw bundle
-   downloads; one path sanitiser for zip entries and `--dest`. (ADR 0006)
+   downloads; one path sanitiser for zip entries and the `data_dir` tree. (ADR 0006)
 10. Browser ↔ server is HTTP only: batched POST up, SSE down. (ADR 0007)
 11. Auth is the session token: 128-bit random, base64url, URL fragment on the
     join link, header on every API call.
-12. TLS via a built-in local CA persisted under `os.UserConfigDir()/airlift/`;
-    short-lived leaf per run; `GET /ca.crt`; `--cert/--key` overrides. (ADR 0008)
-13. Bind to the detected LAN interface, not `0.0.0.0`; `--bind IP` overrides.
-    `--dest DIR` always writes verified output to disk.
+12. Plain HTTP behind a TLS-terminating reverse proxy (ADR 0012, supersedes
+    0008): `public_url` carries the path prefix, `<base href>` is injected at
+    serve time, `GET /api/info` is public. The built-in CA and `/ca.crt` are
+    gone.
+13. Plain HTTP on `listen` (default `127.0.0.1:8443`); the proxy strips the
+    prefix and the router stays rooted; verified output is always written under
+    `data_dir` (no `--dest`, no `--bind`); `X-Forwarded-For` is trusted only
+    from `trusted_proxies`, read right-to-left. (ADR 0012)
 
 ## Non-goals
 
-- Hosted / VPS deployment. Do not add flags, modes or docs for it.
-- Persistence across tower restarts. Sessions are memory-only.
-- Multi-user. One operator, one laptop, one or more phones.
+- Persistence across tower restarts. Sessions are memory-only; `data_dir` is
+  emptied on start.
+- Ecosystem features (AirDrop, Quick Share, Continuity) anywhere in the main
+  path.
+
+(The prompt-001 non-goals "Hosted / VPS deployment" and "Multi-user" are
+overturned by prompt 002: the tower is a hosted, multi-user service. Hosting
+transport landed in ADR 0012; the open multi-user session model lands in
+ADR 0013.)
 
 ## Conventions
 

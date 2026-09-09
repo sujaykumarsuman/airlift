@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,50 +13,33 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	airlift "github.com/sujaykumarsuman/airlift"
+	"github.com/sujaykumarsuman/airlift/internal/config"
 	"github.com/sujaykumarsuman/airlift/internal/server"
 	"github.com/sujaykumarsuman/airlift/internal/session"
-	"github.com/sujaykumarsuman/airlift/internal/tlsca"
 )
 
-const (
-	maxSessions  = 32
-	leafValidity = 7 * 24 * time.Hour
-	sweepEvery   = 30 * time.Second
-)
-
-// config holds the tower flags. (TLS, --dest and LAN binding stay until Phase 6
-// replaces them with the ~/.airlift config and a hosted, HTTP-behind-a-proxy
-// tower.)
-type config struct {
-	dest, bind        string
-	port              int
-	certFile, keyFile string
-	ttl               time.Duration
-	caDir             string
-	session           bool
-}
+const sweepEvery = 30 * time.Second
 
 func cmdTower(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tower", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprint(stderr, "usage: airlift tower [--dest DIR] [--bind IP] [--port N] [--cert FILE --key FILE] [--ttl D] [--session]\n\n")
+		fmt.Fprint(stderr, "usage: airlift tower [--config FILE] [--session] [--<key> VALUE ...]\n\n"+
+			"  settings come from ~/.airlift/config; every config key is also a flag.\n\n")
 		fs.PrintDefaults()
 	}
-	var c config
-	fs.StringVar(&c.dest, "dest", "", "directory that receives every verified result (raw file and unpacked tree)")
-	fs.StringVar(&c.bind, "bind", "", "LAN IPv4 to bind (default: the first detected LAN address)")
-	fs.IntVar(&c.port, "port", 8443, "HTTPS port")
-	fs.StringVar(&c.certFile, "cert", "", "TLS certificate PEM; with --key, replaces the built-in CA (mkcert users)")
-	fs.StringVar(&c.keyFile, "key", "", "TLS private key PEM")
-	fs.DurationVar(&c.ttl, "ttl", time.Hour, "session time-to-live, refreshed on activity")
-	fs.StringVar(&c.caDir, "ca-dir", "", "where the built-in CA lives (default: <user config dir>/airlift)")
-	fs.BoolVar(&c.session, "session", false, "create a session at start and print its join QR (headless use)")
+	configFile := fs.String("config", "", "config file (default $AIRLIFT_HOME/config or ~/.airlift/config)")
+	headless := fs.Bool("session", false, "create a session at start and print its join QR (headless use)")
+	// Every config key is also a flag of the same name; an unset flag defaults
+	// to "" and is ignored (only fs.Visit-set flags feed the flag layer).
+	for _, name := range config.Keys() {
+		fs.String(name, "", "config: "+name)
+	}
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -67,109 +48,82 @@ func cmdTower(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	logger := log.New(stderr, "", log.Ltime)
-	if c.dest != "" {
-		abs, err := filepath.Abs(c.dest)
-		if err != nil {
-			logger.Printf("error: --dest: %v", err)
-			return 1
+
+	known := map[string]bool{}
+	for _, name := range config.Keys() {
+		known[name] = true
+	}
+	flags := map[string]string{}
+	fs.Visit(func(f *flag.Flag) {
+		if known[f.Name] {
+			flags[f.Name] = f.Value.String()
 		}
-		c.dest = abs
+	})
+	cfg, err := config.Load(config.Params{Flags: flags, ConfigFile: *configFile, CreateFile: true})
+	if err != nil {
+		logger.Printf("error: %v", err)
+		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServe(ctx, c, stdout, logger)
+	return runServe(ctx, cfg, *headless, stdout, logger)
 }
 
-func runServe(ctx context.Context, c config, stdout io.Writer, logger *log.Logger) int {
+func runServe(ctx context.Context, cfg *config.Config, headless bool, stdout io.Writer, logger *log.Logger) int {
 	fail := func(err error) int {
 		logger.Printf("error: %v", err)
 		return 1
 	}
-	if (c.certFile == "") != (c.keyFile == "") {
-		return fail(errors.New("--cert and --key must be given together"))
+	base, basePath, err := server.ParsePublicURL(cfg.PublicURL)
+	if err != nil {
+		return fail(err)
 	}
-	lan, lanErr := tlsca.LANIPv4s()
-	var bindIP net.IP
-	if c.bind != "" {
-		if bindIP = net.ParseIP(c.bind); bindIP == nil {
-			return fail(fmt.Errorf("--bind %q is not an IP address", c.bind))
-		}
-	} else {
-		if lanErr != nil {
-			return fail(lanErr)
-		}
-		bindIP = lan[0]
+	if err := prepareDataDir(cfg.DataDir, cfg.Home); err != nil {
+		return fail(err)
 	}
-
-	var cert tls.Certificate
-	var caPEM []byte
-	if c.certFile != "" {
-		var err error
-		if cert, err = tlsca.LoadPair(c.certFile, c.keyFile); err != nil {
-			return fail(err)
-		}
-		logger.Printf("tls: using %s", c.certFile)
-	} else {
-		dir := c.caDir
-		if dir == "" {
-			base, err := os.UserConfigDir()
-			if err != nil {
-				return fail(fmt.Errorf("user config dir: %w (set --ca-dir)", err))
-			}
-			dir = filepath.Join(base, "airlift")
-		}
-		ca, created, err := tlsca.LoadOrCreate(dir)
-		if err != nil {
-			return fail(err)
-		}
-		if created {
-			logger.Printf("tls: created local CA in %s", dir)
-		} else {
-			logger.Printf("tls: using local CA from %s", dir)
-		}
-		sans := append([]net.IP{bindIP}, lan...)
-		if cert, err = ca.Leaf(sans, nil, leafValidity); err != nil {
-			return fail(err)
-		}
-		caPEM = ca.CertPEM
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return fail(fmt.Errorf("listen %s: %w", cfg.Listen, err))
 	}
-
-	store := session.NewStore(c.ttl, maxSessions)
-	go store.Run(ctx, sweepEvery)
-	base := fmt.Sprintf("https://%s:%d", bindIP, c.port)
 	web, err := fs.Sub(airlift.Dist, "web/dist")
 	if err != nil {
+		ln.Close()
 		return fail(err)
 	}
+
+	store := session.NewStore(cfg.InactiveTTL, cfg.Sessions)
+	go store.Run(ctx, sweepEvery)
 	srv := server.New(server.Options{
-		Store:      store,
-		PublicBase: base,
-		CACertPEM:  caPEM,
-		Web:        web,
-		Dest:       c.dest,
-		OnCreate:   func(s *session.Session, join string) { printJoin(stdout, s.ID, join) },
-		Logf:       logger.Printf,
+		Store:          store,
+		PublicBase:     base,
+		BasePath:       basePath,
+		Web:            web,
+		DataDir:        cfg.DataDir,
+		TrustedProxies: server.ParseTrustedProxies(cfg.TrustedProxies),
+		AdminEnabled:   cfg.AdminEnabled(),
+		Version:        airlift.Version,
+		Caps: server.Caps{
+			MaxGzBytes:  cfg.MaxGzBytes,
+			IdleTTL:     cfg.IdleTTL,
+			InactiveTTL: cfg.InactiveTTL,
+			MaxAge:      cfg.MaxAge,
+			Sessions:    cfg.Sessions,
+		},
+		MaxBody:  cfg.MaxBody,
+		OnCreate: func(s *session.Session, join string) { printJoin(stdout, s.ID, join) },
+		Logf:     logger.Printf,
 	})
-	ln, err := net.Listen("tcp", net.JoinHostPort(bindIP.String(), strconv.Itoa(c.port)))
-	if err != nil {
-		return fail(err)
+
+	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	admin := "disabled"
+	if cfg.AdminEnabled() {
+		admin = "enabled"
 	}
-	hs := &http.Server{
-		Handler:           srv.Handler(),
-		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
-		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          log.New(quietTLS{logger.Writer()}, "", log.Ltime),
-	}
-	fmt.Fprintf(stdout, "airlift tower\n  dashboard  %s/\n", base)
-	if caPEM != nil {
-		fmt.Fprintf(stdout, "  ca cert    %s/ca.crt   (install once per phone)\n", base)
-	}
-	if c.dest != "" {
-		fmt.Fprintf(stdout, "  dest       %s\n", c.dest)
-	}
-	fmt.Fprintf(stdout, "  ttl        %s\n", c.ttl)
-	if c.session {
+	fmt.Fprintf(stdout, "airlift tower\n  public   %s/\n  listen   %s\n  data     %s\n  admin    %s\n",
+		base, cfg.Listen, cfg.DataDir, admin)
+	if headless {
 		if _, _, err := srv.CreateSession(); err != nil {
+			ln.Close()
 			return fail(err)
 		}
 	}
@@ -181,11 +135,87 @@ func runServe(ctx context.Context, c config, stdout io.Writer, logger *log.Logge
 			hs.Close()
 		}
 	}()
-	if err := hs.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
+	if err := hs.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return fail(err)
 	}
 	logger.Printf("stopped")
 	return 0
+}
+
+// prepareDataDir creates data_dir and empties it on start (decision 9), but
+// only after refusing dangerous targets and any pre-existing directory airlift
+// did not create — a misconfigured data_dir must never wipe the host.
+func prepareDataDir(dir, home string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if err := checkDataDirSafe(abs, home); err != nil {
+		return err
+	}
+	sentinel := filepath.Join(abs, ".airlift-data")
+	entries, err := os.ReadDir(abs)
+	switch {
+	case err == nil:
+		if len(entries) > 0 {
+			if _, serr := os.Stat(sentinel); serr != nil {
+				return fmt.Errorf("data_dir %s is not empty and not an airlift data directory; refusing to erase it", abs)
+			}
+		}
+		if err := os.RemoveAll(abs); err != nil {
+			return err
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(sentinel, []byte("airlift\n"), 0o644)
+}
+
+// checkDataDirSafe refuses the filesystem root, the user's home or any ancestor
+// of it, and the airlift home (which holds the config) as a data_dir.
+func checkDataDirSafe(abs, home string) error {
+	real := abs
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		real = r
+	}
+	if real == string(filepath.Separator) {
+		return errors.New("data_dir must not be the filesystem root")
+	}
+	if uh, err := os.UserHomeDir(); err == nil {
+		uh := resolvePath(uh)
+		if real == uh || isAncestor(real, uh) {
+			return fmt.Errorf("data_dir %s is your home directory or an ancestor of it; refusing to erase it", real)
+		}
+	}
+	if home != "" && real == resolvePath(home) {
+		return fmt.Errorf("data_dir must not be the airlift home %s (it holds the config); use a subdirectory", real)
+	}
+	return nil
+}
+
+// resolvePath returns the absolute, symlink-resolved form of p (best effort),
+// so guards compare like with like regardless of symlinked home layouts.
+func resolvePath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		return r
+	}
+	return abs
+}
+
+// isAncestor reports whether dir is a strict ancestor of target.
+func isAncestor(dir, target string) bool {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil || rel == "." {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..")
 }
 
 // printJoin shows the join link and its QR. The token is part of the link by
@@ -198,15 +228,4 @@ func printJoin(w io.Writer, sid, join string) {
 		return
 	}
 	io.WriteString(w, code)
-}
-
-// quietTLS drops net/http's "TLS handshake error" lines: every phone's first
-// visit before it installs the CA produces one, and the README covers that.
-type quietTLS struct{ w io.Writer }
-
-func (q quietTLS) Write(p []byte) (int, error) {
-	if bytes.Contains(p, []byte("TLS handshake error")) {
-		return len(p), nil
-	}
-	return q.w.Write(p)
 }

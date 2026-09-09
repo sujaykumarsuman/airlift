@@ -1,13 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -17,21 +18,39 @@ import (
 
 // Limits, as fixed in docs/API.md.
 const (
-	DefaultMaxBody   = 256 << 20
+	DefaultMaxBody   = 8 << 20 // config max_body default; the server cap on a POST body
 	DefaultMaxFrames = 500
 )
 
+// baseSentinel is the placeholder in the served HTML heads that page() rewrites
+// into a runtime <base href> carrying the configured path prefix.
+const baseSentinel = "<!--airlift-base-->"
+
+// Caps is the subset of server limits GET /api/info advertises so the pages can
+// shape their forms and guidance.
+type Caps struct {
+	MaxGzBytes  int64
+	IdleTTL     time.Duration
+	InactiveTTL time.Duration
+	MaxAge      time.Duration
+	Sessions    int
+}
+
 // Options configure a Server.
 type Options struct {
-	Store      *session.Store
-	PublicBase string                                   // scheme://host:port the phone can reach; used for join URLs
-	CACertPEM  []byte                                   // served at /ca.crt; nil means 404
-	Web        fs.FS                                    // built web/dist; nil or incomplete means placeholders
-	Dest       string                                   // directory that receives every verified result; "" disables
-	MaxBody    int64                                    // request body limit (default 256 MiB)
-	MaxFrames  int                                      // frames per POST (default 500)
-	OnCreate   func(s *session.Session, joinURL string) // called for every new session
-	Logf       func(format string, args ...any)
+	Store          *session.Store
+	PublicBase     string         // full public_url incl. any path prefix, no trailing slash; used for join URLs
+	BasePath       string         // path prefix ("" or "/airlift") for <base href> and /api/info
+	Web            fs.FS          // built web/dist; nil or incomplete means placeholders
+	DataDir        string         // directory verified results are written under (per beam; wired in a later step)
+	TrustedProxies []netip.Prefix // peers whose X-Forwarded-For is believed (decision 8)
+	AdminEnabled   bool           // whether an admin_token is configured
+	Version        string         // build version for /api/info
+	Caps           Caps           // limits advertised by /api/info
+	MaxBody        int64          // request body limit (default 8 MiB)
+	MaxFrames      int            // frames per POST (default 500)
+	OnCreate       func(s *session.Session, joinURL string)
+	Logf           func(format string, args ...any)
 }
 
 // Server is the tower's HTTP surface.
@@ -68,7 +87,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("POST /api/sessions/{sid}/frames", srv.auth(srv.frames))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.auth(srv.download))
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.auth(srv.deleteSession))
-	m.HandleFunc("GET /ca.crt", srv.caCert)
+	m.HandleFunc("GET /api/info", srv.info)
 	m.HandleFunc("GET /s/{sid}", srv.page("scan.html", scanPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
 	if srv.opts.Web != nil {
@@ -268,39 +287,52 @@ func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.S
 	w.Write(d.Data)
 }
 
-func (srv *Server) caCert(w http.ResponseWriter, _ *http.Request) {
-	if len(srv.opts.CACertPEM) == 0 {
-		writeError(w, http.StatusNotFound, "no built-in CA (running with --cert/--key)")
-		return
-	}
-	h := w.Header()
-	h.Set("Content-Type", "application/x-x509-ca-cert")
-	h.Set("Content-Disposition", `attachment; filename="airlift-ca.crt"`)
-	h.Set("Cache-Control", "no-store")
-	w.Write(srv.opts.CACertPEM)
+// info advertises the version, public URL, base path, admin state and caps. It
+// is unauthenticated (the pages call it before any session exists) and never
+// logged.
+func (srv *Server) info(w http.ResponseWriter, _ *http.Request) {
+	c := srv.opts.Caps
+	secs := func(d time.Duration) int64 { return int64(d / time.Second) }
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":       srv.opts.Version,
+		"public_url":    srv.opts.PublicBase,
+		"base_path":     srv.opts.BasePath,
+		"admin_enabled": srv.opts.AdminEnabled,
+		"caps": map[string]any{
+			"max_gz_bytes": c.MaxGzBytes,
+			"idle_ttl":     secs(c.IdleTTL),
+			"inactive_ttl": secs(c.InactiveTTL),
+			"max_age":      secs(c.MaxAge),
+			"sessions":     c.Sessions,
+		},
+	})
 }
 
-// page serves a built entry from web/dist when present, else a placeholder.
+// page serves a built entry from web/dist (or a placeholder), rewriting the
+// base sentinel in its head into a real <base href> so relative URLs resolve
+// against the app root even when the tower is served under a path prefix.
 func (srv *Server) page(file, placeholder string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	baseTag := `<base href="` + srv.opts.BasePath + `/">`
+	return func(w http.ResponseWriter, _ *http.Request) {
+		body := []byte(placeholder)
 		if srv.opts.Web != nil {
-			if f, err := srv.opts.Web.Open(file); err == nil {
-				f.Close()
-				http.ServeFileFS(w, r, srv.opts.Web, file)
-				return
+			if b, err := fs.ReadFile(srv.opts.Web, file); err == nil {
+				body = b
 			}
 		}
+		body = bytes.Replace(body, []byte(baseSentinel), []byte(baseTag), 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, placeholder)
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write(body)
 	}
 }
 
-const dashboardPlaceholder = `<!doctype html><meta charset="utf-8"><title>airlift tower</title>
-<p>airlift tower is running. The dashboard arrives in Phase 3; the API is live under <code>/api/</code>.</p>
+const dashboardPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift tower</title>
+<p>airlift tower is running. The dashboard arrives with the web build; the API is live under <code>/api/</code>.</p>
 `
 
-const scanPlaceholder = `<!doctype html><meta charset="utf-8"><title>airlift scan</title>
-<p>airlift scan page: the camera relay arrives in Phase 3.</p>
+const scanPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift scan</title>
+<p>airlift scan page: the camera relay lives in the web build.</p>
 `
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -8,7 +8,6 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,16 +81,6 @@ type Config struct {
 
 // AdminEnabled reports whether an admin_token is configured.
 func (c *Config) AdminEnabled() bool { return c.AdminToken != "" }
-
-// BasePath is the path prefix from public_url ("" or e.g. "/airlift"), used for
-// <base href>, service-worker scope and every generated link (decision 12).
-func (c *Config) BasePath() string {
-	u, err := url.Parse(c.PublicURL)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimRight(u.Path, "/")
-}
 
 // KeyView is one row of the admin config dump.
 type KeyView struct {

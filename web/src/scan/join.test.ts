@@ -34,7 +34,7 @@ test("a join is remembered and /s/last reopens it", () => {
   expect(resolveJoin("/s/last", "", store)).toEqual({
     sid: "abc",
     token: "IArmTtXFjcbAMpWOwO6NAg",
-    redirect: "/s/abc#t=IArmTtXFjcbAMpWOwO6NAg",
+    redirect: "s/abc#t=IArmTtXFjcbAMpWOwO6NAg", // app-relative; resolved against <base>
   });
   expect(resolveJoin("/s/last/", "#t=ignored", store).sid).toBe("abc");
   expect(resolveJoin("/s/last", "", memory()).error).toMatch(/No previous session/);
@@ -44,4 +44,14 @@ test("a join is remembered and /s/last reopens it", () => {
   expect(resolveJoin("/s/last", "", broken).error).toBeDefined();
   expect(resolveJoin("/s/nope", "", store).error).toMatch(/token/);
   expect(JSON.parse(store.get(LAST_KEY) ?? "").sid).toBe("abc"); // a failed join does not overwrite
+});
+
+test("a path prefix is stripped before matching /s/…", () => {
+  expect(parseJoin("/airlift/s/abc", "#t=IArmTtXFjcbAMpWOwO6NAg", "/airlift")).toEqual({
+    sid: "abc",
+    token: "IArmTtXFjcbAMpWOwO6NAg",
+  });
+  const store = memory();
+  expect(resolveJoin("/airlift/s/abc", "#t=IArmTtXFjcbAMpWOwO6NAg", store, "/airlift").sid).toBe("abc");
+  expect(resolveJoin("/airlift/s/last", "", store, "/airlift").redirect).toBe("s/abc#t=IArmTtXFjcbAMpWOwO6NAg");
 });

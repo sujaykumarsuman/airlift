@@ -1,8 +1,14 @@
 export type Join = { sid: string; token: string; error?: undefined } | { error: string; sid?: undefined; token?: undefined };
 
-/** Reads /s/{sid} from the path and t= from the fragment. */
-export function parseJoin(pathname: string, hash: string): Join {
-  const m = /^\/s\/([A-Za-z0-9_-]+)\/?$/.exec(pathname);
+/** Strips a path prefix ("/airlift") off a pathname, leaving a rooted "/s/…". */
+function underBase(pathname: string, basePath: string): string {
+  const rel = basePath && pathname.startsWith(basePath) ? pathname.slice(basePath.length) : pathname;
+  return rel.startsWith("/") ? rel : "/" + rel;
+}
+
+/** Reads /s/{sid} from the path (below basePath) and t= from the fragment. */
+export function parseJoin(pathname: string, hash: string, basePath = ""): Join {
+  const m = /^\/s\/([A-Za-z0-9_-]+)\/?$/.exec(underBase(pathname, basePath));
   if (!m?.[1]) return { error: "This is not a join link: the address should look like /s/<session>#t=<token>." };
   const params = new URLSearchParams(hash.replace(/^#/, ""));
   const token = params.get("t")?.trim() ?? "";
@@ -39,15 +45,16 @@ function readSaved(storage: JoinStorage | null): Saved | null {
  * recently (the installed app starts there), and a successful join is
  * remembered for next time.
  */
-export function resolveJoin(pathname: string, hash: string, storage: JoinStorage | null): Resolved {
-  if (/^\/s\/last\/?$/.test(pathname)) {
+export function resolveJoin(pathname: string, hash: string, storage: JoinStorage | null, basePath = ""): Resolved {
+  if (/^\/s\/last\/?$/.test(underBase(pathname, basePath))) {
     const saved = readSaved(storage);
     if (saved && typeof saved.sid === "string" && typeof saved.token === "string") {
-      return { sid: saved.sid, token: saved.token, redirect: `/s/${saved.sid}#t=${saved.token}` };
+      // App-relative; the caller resolves it against <base href>.
+      return { sid: saved.sid, token: saved.token, redirect: `s/${saved.sid}#t=${saved.token}` };
     }
     return { error: "No previous session on this phone. Scan the tower's QR code to join one." };
   }
-  const join = parseJoin(pathname, hash);
+  const join = parseJoin(pathname, hash, basePath);
   if (join.error === undefined) {
     try {
       storage?.setItem(LAST_KEY, JSON.stringify({ sid: join.sid, token: join.token }));

@@ -11,3 +11,7 @@ import "embed"
 //
 //go:embed all:web/dist
 var Dist embed.FS
+
+// Version is the build version reported by GET /api/info. Override at build
+// time with -ldflags "-X github.com/sujaykumarsuman/airlift.Version=v1.2.3".
+var Version = "dev"

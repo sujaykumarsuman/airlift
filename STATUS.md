@@ -1,5 +1,24 @@
 # STATUS
 
+## Phase 6 — hosted multi-beam tower (in progress)
+
+- **6.1 config** (done): `internal/config` — `~/.airlift` layer, precedence
+  flag > env > overrides > file > default, 21 keys (incl. `max_beams=10`,
+  `max_age=24h`), 0600 admin_token, read-or-create template, atomic overrides,
+  masked admin dump. Adversarially reviewed.
+- **6.2 HTTP-only + base path + `/api/info`** (done, ADR 0012): `internal/tlsca`
+  deleted; `tower` rewritten to plain HTTP driven by the config with a hardened
+  data_dir preflight; `public_url` → `<base href>` injection; right-to-left
+  X-Forwarded-For trust; `--dest`/`--bind`/`--cert`/`/ca.crt` gone; the web
+  build is base-path-relative (Vite `base:'./'`, `document.baseURI`, SW/manifest
+  runtime prefix). ADR 0008 superseded, 0007 amended; API.md/CLAUDE.md/README
+  updated. Verified live: `/api/info`, `<base href>`, session create over plain
+  HTTP, config + data-dir sentinel; a prefix-strip httptest proves rooted
+  routing behind `/airlift`.
+- **Next**: 6.3 multi-beam session core (the operator override), then on-disk
+  (6.4), clients/password/limits (6.5), lifecycle (6.6), web lifecycle UI (6.7).
+  Still single-transfer until 6.3.
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender
@@ -24,22 +43,21 @@
   fountain over the multi bundle yields the frozen index sets and decodes back;
   `beam .` and multi-file naming exercised through the CLI.
 
-## Pending — the hosted tower and the hardware runs
+## Pending — the rest of Phase 6, then admin and the VPS
 
-- Phase 6–8 (prompt 002): the hosted, multi-user, HTTP-behind-a-proxy tower
-  with sessions, clients, lifecycle and admin; the VPS. `tower`/`replay` still
-  carry the local-CA TLS and `--dest` of Phase 1–4 until Phase 6 removes them.
-- Hardware, still outstanding from Phase 3/4: Mac + Android, install `/ca.crt`
-  once, scan the join QR, scan `beam.html` off the monitor, compare zip and
-  `--dest` with the source; then a 1 MB bundle in fountain mode at ≥ 8 fps, and
-  two phones on one session.
+- Phase 6 remaining: 6.3–6.7 (below). Phase 7 admin surface; Phase 8 the VPS.
+- Hardware, still outstanding from Phase 3/4 (now over the hosted, HTTP tower):
+  Mac + Android, scan the join QR, scan `beam.html` off the monitor, compare the
+  zip download with the source; then a 1 MB bundle in fountain mode at ≥ 8 fps,
+  and two phones on one session.
 
 ## Next
 
-- Phase 6: `~/.airlift` config (read/create) + preflight for `tower`, overrides,
-  env and flags; remove TLS/LAN/`--dest`; open multi-user sessions, clients per
-  address, the lifecycle and on-disk data; `public_url` with `<base href>`; the
-  web changes. ADRs 0012, 0013.
+- 6.3 multi-beam session core (the operator override: a session is a place
+  holding a list of beams keyed by sender-session id), then 6.4 per-beam
+  on-disk + downloads-from-disk, 6.5 open creation + clients + password + rate
+  limits, 6.6 lifecycle (status + three clocks + terminate/extend/review), 6.7
+  web lifecycle UI. ADR 0013.
 - **Multiple beams per session** (operator request): a live session should
   accept and list several named beams. The tower today binds one sender session
   per tower session (the first MANIFEST), so this needs the Phase 6 session

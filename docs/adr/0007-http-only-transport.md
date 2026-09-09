@@ -1,6 +1,8 @@
 # ADR 0007 — Browser ↔ server transport is HTTP only
 
-Status: accepted (Phase 0)
+Status: accepted (Phase 0). Amended by ADR 0012 (Phase 6): the transport is
+unchanged (batched POST up, SSE down), but TLS now terminates at a reverse
+proxy and the tower itself serves plain HTTP under a path prefix.
 
 ## Context
 

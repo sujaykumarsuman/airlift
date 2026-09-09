@@ -11,8 +11,9 @@ two commands: `beam` inside the air gap, `tower` on the laptop.
 
 Status: **active development** toward a hosted, multi-user tower (see
 [`prompts/002-go-cli-and-hosting.md`](prompts/002-go-cli-and-hosting.md) and
-[`STATUS.md`](STATUS.md)). Today the tower is single-session with a local TLS
-CA; sessions, lifecycle and the hosted shape are the next phases.
+[`STATUS.md`](STATUS.md)). The tower is now plain HTTP behind a TLS-terminating
+proxy, config-driven from `~/.airlift` (ADR 0012); multi-beam sessions,
+clients, lifecycle and the admin surface are the next steps.
 
 ## The two commands
 
@@ -97,40 +98,29 @@ make airlift
 ./bin/airlift tower
 ```
 
-It binds the LAN address on port 8443, prints the dashboard URL and, for every
-session, the join link with a terminal QR code for the phone. Flags: `--bind`,
-`--port`, `--cert`/`--key` for mkcert users, `--ttl`, `--ca-dir`, and
-`--session` to open a session at start for headless use. (Config from
-`~/.airlift`, preflight checks and the hosted, HTTP-behind-a-proxy shape arrive
-in the next phase.)
+It reads (and, on first run, creates) `~/.airlift/config`, serves **plain HTTP**
+on `listen` (default `127.0.0.1:8443`), and prints the dashboard URL plus, for
+every session, the join link with a terminal QR code. Every config key is also
+a flag; the common ones are `--public_url`, `--listen` and `--admin_token`, and
+`--session` opens a session at start for headless use. See
+[`docs/API.md`](docs/API.md) and ADR 0012.
 
-Open the dashboard on the laptop, press **Create session**, and point the
-phone's camera app at the QR code it shows. The phone opens the scan page,
-asks for the camera, and relays what it decodes; the dashboard fills in live
-and, once every hash matches, offers the downloads (raw file, or the unpacked
-tree as a zip) named after the beam.
+Open the dashboard, press **Create session**, and point the phone's camera app
+at the QR code it shows. The phone opens the scan page, asks for the camera,
+and relays what it decodes; the dashboard fills in live and, once every hash
+matches, offers the downloads (raw file, or the unpacked tree as a zip) named
+after the beam.
 
-### First run on a phone
+### Secure context and TLS
 
-The tower serves HTTPS from a certificate authority it created on first start,
-so the phone trusts nothing yet:
-
-1. Open the join link; the browser shows a certificate warning. Proceed
-   through it once (Chrome: Advanced → Proceed).
-2. On the scan page, or at `https://<tower>:8443/ca.crt`, open `/ca.crt` and
-   install it as a **CA certificate** (Android: Settings → Security →
-   Encryption & credentials → Install a certificate → CA certificate; iOS:
-   install the profile, then enable full trust under Settings → General →
-   About → Certificate Trust Settings).
-3. That is it for this phone: no warnings on any later run, and the tower's IP
-   changing with DHCP does not matter because every run's certificate is
-   signed by the same CA.
-
-Android shows a persistent "network may be monitored" notice while a user CA
-is installed; that is all it means, and removing the certificate ends it. If
-you already use [mkcert](https://github.com/FiloSottile/mkcert), run the tower
-with `--cert`/`--key` instead and skip the above. (The hosted tower of the next
-phase terminates real TLS at a reverse proxy and drops the local CA entirely.)
+`getUserMedia` needs a secure context. On `localhost` (development) that is
+satisfied without TLS. In production the tower runs **behind a reverse proxy
+that terminates real TLS** and forwards to `listen` over plain HTTP;
+`public_url` carries the public scheme, host and any path prefix (e.g.
+`https://host/airlift`), which the tower injects as `<base href>` and uses for
+every join link. The proxy setup lands under `deploy/` in a later phase. There
+is no built-in certificate authority any more — the phone simply trusts the
+proxy's certificate.
 
 ### Zero-hop variant
 
@@ -146,13 +136,12 @@ crosses the LAN.
 npm --prefix web run dev
 ```
 
-`vite dev` serves the two entries with hot reload and proxies `/api` and
-`/ca.crt` to a running tower (`AIRLIFT_TOWER`, default
-`https://127.0.0.1:8443`). It uses a self-signed certificate so a phone on the
-LAN gets a secure context for the camera: run `npm --prefix web run dev:lan`
-to expose it and open `https://<laptop>:5173/`. On `localhost`,
-`AIRLIFT_HTTP=1` turns TLS off; localhost is a secure context regardless.
-Camera and decoder only exist on hardware; everything else is unit-tested, and
+`vite dev` serves the two entries with hot reload and proxies `/api` to a
+running tower (`AIRLIFT_TOWER`, default `https://127.0.0.1:8443`). A self-signed
+plugin is kept only to give a real phone on the LAN a secure context: run `npm
+--prefix web run dev:lan` and open `https://<laptop>:5173/`; `AIRLIFT_HTTP=1`
+turns it off for plain-HTTP `localhost` work. Camera and decoder only exist on
+hardware; everything else is unit-tested, and
 the scan page exposes `window.airliftScan.inject([...frames])` to push decoded
 strings by hand.
 

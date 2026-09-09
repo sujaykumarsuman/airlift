@@ -36,19 +36,22 @@ let stopEvents: (() => void) | null = null;
 let ticker: ReturnType<typeof setInterval> | null = null;
 let notice = "";
 
+// The app root, incl. any path prefix from the injected <base href>.
+const appBase = new URL("./", document.baseURI).toString();
+
 function joinLink(s: Stored): string {
   // In `vite dev` the phone must reach the dev server, not the tower.
-  return import.meta.env.DEV ? `${location.origin}/s/${s.sid}#t=${s.token}` : s.join_url;
+  return import.meta.env.DEV ? new URL(`s/${s.sid}#t=${s.token}`, appBase).toString() : s.join_url;
 }
 
 function viewerLink(s: Stored): string {
-  return `${location.origin}/#s=${s.sid}&t=${s.token}`;
+  return new URL(`#s=${s.sid}&t=${s.token}`, appBase).toString();
 }
 
 async function boot(): Promise<void> {
   const deep = parseDeepLink(location.hash);
   if (deep) {
-    current = { ...deep, join_url: `${location.origin}/s/${deep.sid}#t=${deep.token}` };
+    current = { ...deep, join_url: new URL(`s/${deep.sid}#t=${deep.token}`, appBase).toString() };
     history.replaceState(null, "", location.pathname);
   } else {
     const saved = sessionStorage.getItem(STORAGE_KEY);
@@ -160,7 +163,6 @@ async function renderSession(): Promise<void> {
       <h2>Join with the phone</h2>
       <p>Scan this code with the phone's camera app, or open the link:</p>
       <p><code class="url">${link}</code> <button class="btn small" id="copy">Copy</button></p>
-      <p class="hint">First time on this phone? Install the CA certificate: <a href="/ca.crt">/ca.crt</a></p>
       <p class="hint">Watch from another device: <code class="url">${viewerLink(current)}</code></p>
       <p class="muted">session ${current.sid}</p>
     </div>

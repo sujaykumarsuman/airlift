@@ -112,14 +112,17 @@ func TestBeamVersionTarget(t *testing.T) {
 }
 
 func TestBadInvocations(t *testing.T) {
+	// Sandbox the airlift home so a `tower` case never touches the real ~/.airlift.
+	t.Setenv("AIRLIFT_HOME", t.TempDir())
 	cases := [][]string{
 		{},
 		{"nope-command"},
 		{"beam"}, // no input
 		{"beam", filepath.Join(t.TempDir(), "missing"), "--no-open"},
 		{"beam", ".", "--ecc", "Z", "--no-open"},
-		{"tower", "--cert", "only.pem"}, // cert without key
-		{"tower", "--bind", "not-an-ip"},
+		{"tower", "--unknown-flag"},              // unknown flag
+		{"tower", "--public_url", "ftp://nope"},  // config validation fails
+		{"tower", "--listen", "not-a-host-port"}, // config validation fails
 	}
 	for _, args := range cases {
 		var stdout, stderr bytes.Buffer
@@ -149,16 +152,6 @@ func TestTerminalQR(t *testing.T) {
 	}
 	if _, err := terminalQR(strings.Repeat("x", 5000)); err == nil {
 		t.Fatal("oversized text accepted")
-	}
-}
-
-func TestQuietTLSFiltersHandshakeNoise(t *testing.T) {
-	var out bytes.Buffer
-	w := quietTLS{&out}
-	w.Write([]byte("http: TLS handshake error from 10.0.0.2:1234: remote error: tls: unknown certificate authority\n"))
-	w.Write([]byte("http: Accept error: too many open files\n"))
-	if got := out.String(); strings.Contains(got, "handshake") || !strings.Contains(got, "Accept error") {
-		t.Fatalf("filtered output %q", got)
 	}
 }
 

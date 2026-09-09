@@ -2,9 +2,7 @@ package server
 
 import (
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/sujaykumarsuman/airlift/internal/bundle"
@@ -15,7 +13,8 @@ import (
 const maxSummaryPaths = 50
 
 // finalize runs once a session has every chunk: the hash chain, the bundle
-// stage, the downloads, and the --dest write. It ends in READY or FAILED.
+// stage and the in-memory downloads. It ends in READY or FAILED. (Per-beam
+// on-disk persistence under data_dir lands in a later step.)
 func (srv *Server) finalize(s *session.Session) {
 	m, chunks, ok := s.Chunks()
 	if !ok {
@@ -80,15 +79,6 @@ func (srv *Server) finalize(s *session.Session) {
 		}
 	}
 
-	if srv.opts.Dest != "" {
-		p, err := srv.writeDest(name, data, files)
-		if err != nil {
-			out.Warning = "dest: " + err.Error()
-			srv.opts.Logf("session %s: --dest write failed: %v", s.ID, err)
-		} else {
-			out.DestPath = p
-		}
-	}
 	s.Finish(out)
 	srv.opts.Logf("session %s READY: %s, %d bytes, gz %s, orig %s%s", s.ID, name, len(data),
 		res.GzSHA.Actual[:12], res.OrigSHA.Actual[:12], describeBundle(out.Bundle))
@@ -112,26 +102,6 @@ func describeBundle(s *session.BundleSummary) string {
 	return fmt.Sprintf(", bundle of %d files", s.Files)
 }
 
-// writeDest lands the raw file and, for a bundle, its unpacked tree under
-// --dest. It returns the path the dashboard shows.
-func (srv *Server) writeDest(name string, raw []byte, files []bundle.File) (string, error) {
-	if err := os.MkdirAll(srv.opts.Dest, 0o755); err != nil {
-		return "", err
-	}
-	rawPath := filepath.Join(srv.opts.Dest, name)
-	if err := os.WriteFile(rawPath, raw, 0o644); err != nil {
-		return "", err
-	}
-	if files == nil {
-		return rawPath, nil
-	}
-	tree := filepath.Join(srv.opts.Dest, treeDir(name))
-	if err := bundle.WriteTree(tree, files); err != nil {
-		return "", err
-	}
-	return tree, nil
-}
-
 // safeName reduces the manifest's name to a single safe path component.
 func safeName(name string) string {
 	safe, err := bundle.SafePath(name)
@@ -146,16 +116,6 @@ func stem(name string) string {
 	s := strings.TrimSuffix(name, path.Ext(name))
 	if s == "" {
 		return name
-	}
-	return s
-}
-
-// treeDir names the unpacked tree next to the raw file without colliding
-// with it: "repo-bundle.txt" → "repo-bundle", "bundle" → "bundle.tree".
-func treeDir(name string) string {
-	s := stem(name)
-	if s == name {
-		return name + ".tree"
 	}
 	return s
 }

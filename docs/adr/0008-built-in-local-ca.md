@@ -1,6 +1,7 @@
 # ADR 0008 — TLS via a built-in local certificate authority
 
-Status: accepted (Phase 0)
+Status: Superseded by ADR 0012 (Phase 6). The tower is now plain HTTP behind a
+TLS-terminating reverse proxy; the built-in CA and `/ca.crt` are removed.
 
 ## Context
 
