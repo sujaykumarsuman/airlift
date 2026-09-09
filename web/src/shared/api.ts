@@ -77,14 +77,17 @@ export function eventsURL(sid: string, role: "relay" | "viewer"): string {
   return apiURL(`api/sessions/${sid}/events${role === "relay" ? "?role=relay" : ""}`);
 }
 
-/** Downloads go through fetch so the token can travel in the header. */
+/** Downloads go through fetch so the token can travel in the header. Each
+ *  download names its beam by bid (a place may hold several). */
 export async function fetchDownload(
   sid: string,
   token: string,
+  bid: string,
   as: string,
   fetchFn: FetchFn = fetch,
 ): Promise<{ blob: Blob; filename: string }> {
-  const resp = await fetchFn(apiURL(`api/sessions/${sid}/download?as=${encodeURIComponent(as)}`), {
+  const query = `beam=${encodeURIComponent(bid)}&as=${encodeURIComponent(as)}`;
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/download?${query}`), {
     headers: authHeaders(token),
   });
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));

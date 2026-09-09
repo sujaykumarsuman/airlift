@@ -2,11 +2,11 @@ import "../shared/style.css";
 import { ApiError, createSession, deleteSession, eventsURL, fetchDownload, getSnapshot } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
-import { formatBytes, formatDuration, hex8 } from "../shared/format";
+import { formatBytes, formatDuration } from "../shared/format";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { Snapshot, State, Verdict } from "../shared/types";
+import type { Beam, Snapshot, State, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
-import { failedStage, initialView, parseDeepLink, reduce, tick, type View } from "./state";
+import { type BeamView, failedStage, initialView, parseDeepLink, reduce, tick, type View } from "./state";
 
 interface Stored {
   sid: string;
@@ -16,7 +16,6 @@ interface Stored {
 
 const STORAGE_KEY = "airlift.session";
 const STATE_LABELS: Record<State, string> = {
-  WAITING_MANIFEST: "waiting for manifest",
   RECEIVING: "receiving",
   VERIFYING: "verifying",
   READY: "ready",
@@ -127,10 +126,10 @@ async function reset(): Promise<void> {
   await create();
 }
 
-async function download(as: string): Promise<void> {
-  if (!current) return;
+async function download(bid: string, as: string): Promise<void> {
+  if (!current || !bid) return;
   try {
-    const { blob, filename } = await fetchDownload(current.sid, current.token, as);
+    const { blob, filename } = await fetchDownload(current.sid, current.token, bid, as);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -187,33 +186,51 @@ function renderStatus(): void {
     }</div>`.html;
     return;
   }
+  const relays = `${s.relays} ${s.relays === 1 ? "relay" : "relays"}`;
   statusEl.innerHTML = html`
-    <div class="card">
+    <div class="card place">
       <div class="head">
-        <span class="badge" data-state="${s.state}">${STATE_LABELS[s.state]}</span>
-        <strong>${s.name || "waiting for the manifest"}</strong>
-        <span class="muted">sender ${hex8(s.sender_session)} · ${s.relays} ${s.relays === 1 ? "relay" : "relays"} · link ${connection}</span>
+        <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
+        <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
       </div>
-      <div class="progress">
-        <div class="big">${s.total > 0 ? `${s.have} / ${s.total}` : "— / —"}</div>
-        <div class="bar"><div class="fill" style="width: ${view.pct.toFixed(1)}%"></div></div>
-        <div class="metrics">
-          <span><b>${s.fps.toFixed(1)}</b> fps decoded</span>
-          <span>elapsed <b>${formatDuration(view.elapsedMs)}</b></span>
-          <span>ETA <b>${view.etaSec === null ? "—" : formatDuration(view.etaSec * 1000)}</b></span>
-        </div>
-      </div>
-      <canvas id="grid" class="grid" ${s.total > 0 ? "" : raw("hidden")}></canvas>
+      ${s.beams.length === 0 ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
     </div>
-    ${s.state === "READY" ? resultCard(s) : ""}
-    ${s.state === "FAILED" ? failedCard(s) : ""}
+    ${view.beams.map((bv) => beamCard(bv))}
     ${notice ? html`<p class="warn">${notice}</p>` : ""}
   `.html;
-  if (s.total > 0) drawBitmap($<HTMLCanvasElement>("#grid", statusEl), decodeBitmap(s.bitmap, s.total), { cell: 10, gap: 2 });
-  statusEl.querySelectorAll<HTMLButtonElement>("[data-download]").forEach((b) =>
-    b.addEventListener("click", () => void download(b.dataset.download ?? "raw")),
+  for (const bv of view.beams) {
+    const b = bv.beam;
+    if (b.total > 0) {
+      drawBitmap($<HTMLCanvasElement>(`#grid-${b.bid}`, statusEl), decodeBitmap(b.bitmap, b.total), { cell: 10, gap: 2 });
+    }
+  }
+  statusEl.querySelectorAll<HTMLButtonElement>("[data-download]").forEach((btn) =>
+    btn.addEventListener("click", () => void download(btn.dataset.beam ?? "", btn.dataset.download ?? "raw")),
   );
-  statusEl.querySelector<HTMLButtonElement>("[data-reset]")?.addEventListener("click", () => void reset());
+}
+
+/** One beam's card: progress, then a verified or failed panel once terminal. */
+function beamCard(bv: BeamView): Raw {
+  const b = bv.beam;
+  return html`<div class="card beam" data-bid="${b.bid}">
+    <div class="head">
+      <span class="badge" data-state="${b.state}">${STATE_LABELS[b.state]}</span>
+      <strong>${b.name || "(unnamed)"}</strong>
+      <span class="muted">beam ${b.bid}</span>
+    </div>
+    <div class="progress">
+      <div class="big">${b.total > 0 ? `${b.have} / ${b.total}` : "— / —"}</div>
+      <div class="bar"><div class="fill" style="width: ${bv.pct.toFixed(1)}%"></div></div>
+      <div class="metrics">
+        <span><b>${b.fps.toFixed(1)}</b> fps decoded</span>
+        <span>elapsed <b>${formatDuration(bv.elapsedMs)}</b></span>
+        <span>ETA <b>${bv.etaSec === null ? "—" : formatDuration(bv.etaSec * 1000)}</b></span>
+      </div>
+    </div>
+    <canvas id="grid-${b.bid}" class="grid" ${b.total > 0 ? "" : raw("hidden")}></canvas>
+    ${b.state === "READY" ? resultCard(b) : ""}
+    ${b.state === "FAILED" ? failedCard(b) : ""}
+  </div>`;
 }
 
 function verdictRow(label: string, v: Verdict | null): Raw {
@@ -225,43 +242,44 @@ function verdictRow(label: string, v: Verdict | null): Raw {
   </tr>`;
 }
 
-function resultCard(s: Snapshot): Raw {
-  const v = s.verdicts;
-  return html`<div class="card ok">
-    <h2>Verified</h2>
+function resultCard(b: Beam): Raw {
+  const v = b.verdicts;
+  return html`<div class="result ok">
+    <h3>Verified</h3>
     <table class="verdicts">
       ${verdictRow(STAGE_LABELS.gz_sha, v.gz_sha)}${verdictRow(STAGE_LABELS.orig_sha, v.orig_sha)}${verdictRow(STAGE_LABELS.bundle, v.bundle)}
     </table>
     ${
-      s.bundle
-        ? html`<p>Repobundle of <b>${s.bundle.files}</b> ${s.bundle.files === 1 ? "file" : "files"}, ${formatBytes(s.bundle.total_bytes)}.</p>
+      b.bundle
+        ? html`<p>Repobundle of <b>${b.bundle.files}</b> ${b.bundle.files === 1 ? "file" : "files"}, ${formatBytes(b.bundle.total_bytes)}.</p>
             <ul class="paths">
-              ${s.bundle.paths.map((p) => html`<li><code>${p}</code></li>`)}
-              ${s.bundle.files > s.bundle.paths.length ? html`<li class="muted">… ${s.bundle.files - s.bundle.paths.length} more</li>` : ""}
+              ${b.bundle.paths.map((p) => html`<li><code>${p}</code></li>`)}
+              ${b.bundle.files > b.bundle.paths.length ? html`<li class="muted">… ${b.bundle.files - b.bundle.paths.length} more</li>` : ""}
             </ul>`
         : html`<p>Not a repobundle: the raw file is the result.</p>`
     }
     <p class="downloads">
-      ${s.downloads.map((d) => html`<button class="btn primary" data-download="${d}">Download ${DOWNLOAD_LABELS[d] ?? d}</button>`)}
+      ${b.downloads.map(
+        (d) => html`<button class="btn primary" data-beam="${b.bid}" data-download="${d}">Download ${DOWNLOAD_LABELS[d] ?? d}</button>`,
+      )}
     </p>
-    ${s.dest_path ? html`<p>Written to <code>${s.dest_path}</code></p>` : ""}
-    ${s.error ? html`<p class="warn">${s.error}</p>` : ""}
+    ${b.saved_path ? html`<p>Written to <code>${b.saved_path}</code></p>` : ""}
+    ${b.error ? html`<p class="warn">${b.error}</p>` : ""}
   </div>`;
 }
 
-function failedCard(s: Snapshot): Raw {
-  const stage = failedStage(s);
-  const v = stage ? s.verdicts[stage] : null;
-  return html`<div class="card bad">
-    <h2>Failed</h2>
-    <p>${s.error ?? "Verification failed."}</p>
+function failedCard(b: Beam): Raw {
+  const stage = failedStage(b);
+  const v = stage ? b.verdicts[stage] : null;
+  return html`<div class="result bad">
+    <h3>Failed</h3>
+    <p>${b.error ?? "Verification failed."}</p>
     ${
       stage && v
         ? html`<p><b>${STAGE_LABELS[stage]}</b> did not match.</p>
             <table class="verdicts"><tr><th>expected</th><td colspan="2"><code>${v.expected}</code></td></tr><tr><th>actual</th><td colspan="2"><code>${v.actual}</code></td></tr></table>`
         : ""
     }
-    <p><button class="btn" data-reset>Reset: start a new session</button></p>
   </div>`;
 }
 

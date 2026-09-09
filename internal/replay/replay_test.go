@@ -63,11 +63,17 @@ func TestEncodeRoundTripsThroughSession(t *testing.T) {
 		t.Fatal("frame 0 is not the manifest")
 	}
 	st := session.NewStore(time.Hour, 4)
+	done := make(chan *session.Beam, 1)
+	st.SetCompleteHook(func(_ *session.Session, b *session.Beam) { done <- b })
 	s, _ := st.Create()
-	if r := s.Ingest(d.Frames); !r.Completed {
+	if r := s.Ingest(d.Frames); len(r.CompletedBeams) != 1 {
 		t.Fatalf("ingest %+v", r)
 	}
-	m, chunks, _ := s.Chunks()
+	b := <-done
+	m, chunks, ok := s.BeamChunks(b)
+	if !ok {
+		t.Fatal("no chunks for a completed beam")
+	}
 	res := verify.Chain(chunks, m)
 	if res.Err != nil || !bytes.Equal(res.Data, data) {
 		t.Fatalf("chain: %v", res.Err)
@@ -131,28 +137,38 @@ func TestPlanIsSeededAndLossy(t *testing.T) {
 	}
 }
 
-// fakeTower is the two API routes Run needs, backed by a real session.
-func fakeTower(t *testing.T, s *session.Session, finish func(*session.Session)) *httptest.Server {
+// fakeTower is the two API routes Run needs, backed by a real store. Its reply
+// mirrors the tower: {accepted, dup, bad, completed_beams}. Completion is driven
+// by the store's beam hook, so set it before creating sessions.
+func fakeTower(t *testing.T, st *session.Store) *httptest.Server {
 	t.Helper()
-	mux := http.NewServeMux()
-	auth := func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer "+s.Token }
-	mux.HandleFunc("POST /api/sessions/{sid}/frames", func(w http.ResponseWriter, r *http.Request) {
-		if !auth(r) || r.PathValue("sid") != s.ID {
+	get := func(w http.ResponseWriter, r *http.Request) (*session.Session, bool) {
+		s, ok := st.Get(r.PathValue("sid"))
+		if !ok || r.Header.Get("Authorization") != "Bearer "+s.Token {
 			http.Error(w, "nope", http.StatusUnauthorized)
+			return nil, false
+		}
+		return s, true
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/sessions/{sid}/frames", func(w http.ResponseWriter, r *http.Request) {
+		s, ok := get(w, r)
+		if !ok {
 			return
 		}
 		var req struct{ Frames []string }
 		json.NewDecoder(r.Body).Decode(&req)
 		res := s.Ingest(req.Frames)
-		if res.Completed {
-			go finish(s)
+		completed := res.CompletedBeams
+		if completed == nil {
+			completed = []string{}
 		}
 		json.NewEncoder(w).Encode(map[string]any{"accepted": res.Accepted, "dup": res.Dup, "bad": res.Bad,
-			"have": res.Have, "total": res.Total, "state": res.State})
+			"completed_beams": completed})
 	})
 	mux.HandleFunc("GET /api/sessions/{sid}", func(w http.ResponseWriter, r *http.Request) {
-		if !auth(r) {
-			http.Error(w, "nope", http.StatusUnauthorized)
+		s, ok := get(w, r)
+		if !ok {
 			return
 		}
 		json.NewEncoder(w).Encode(s.Snapshot())
@@ -168,11 +184,12 @@ func TestRunReachesReadyThroughLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := session.NewStore(time.Hour, 4)
-	s, _ := st.Create()
-	ts := fakeTower(t, s, func(s *session.Session) {
+	st.SetCompleteHook(func(s *session.Session, b *session.Beam) {
 		time.Sleep(20 * time.Millisecond) // verification takes a moment
-		s.Finish(session.Outcome{Downloads: map[string]session.Download{"raw": {Name: "x"}}})
+		s.FinishBeam(b, session.Outcome{Downloads: map[string]session.Download{"raw": {Name: "x"}}})
 	})
+	s, _ := st.Create()
+	ts := fakeTower(t, st)
 	var logs []string
 	rep, err := Run(context.Background(), ts.Client(), ts.URL, s.ID, s.Token, d, Options{
 		Drop: 0.2, Shuffle: true, Passes: 5, Seed: 1,
@@ -193,7 +210,7 @@ func TestRunStopsWhenPassesRunOut(t *testing.T) {
 	d, _, _ := beam.Load(vectorsPath)
 	st := session.NewStore(time.Hour, 4)
 	s, _ := st.Create()
-	ts := fakeTower(t, s, func(*session.Session) {})
+	ts := fakeTower(t, st)
 	rep, err := Run(context.Background(), ts.Client(), ts.URL, s.ID, s.Token, d, Options{Drop: 0.99, Passes: 2, Seed: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +224,7 @@ func TestRunStopsWhenPassesRunOut(t *testing.T) {
 	}
 	// Pacing is honoured: 8 frames at 100 fps must take at least 60 ms.
 	s2, _ := st.Create()
-	ts2 := fakeTower(t, s2, func(*session.Session) {})
+	ts2 := ts // the same tower serves every session in the store
 	start := time.Now()
 	Run(context.Background(), ts2.Client(), ts2.URL, s2.ID, s2.Token, &beam.Dump{Frames: d.Frames[:9], SenderSession: d.SenderSession}, Options{Rate: 100, Passes: 1})
 	if time.Since(start) < 60*time.Millisecond {

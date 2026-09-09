@@ -1,17 +1,24 @@
-import type { Snapshot } from "../shared/types";
+import type { Beam, Snapshot } from "../shared/types";
 import { isTerminal } from "../shared/types";
 
-/** What the dashboard renders: the latest snapshot plus timing derived here. */
-export interface View {
-  snap: Snapshot | null;
-  startedAt: number | null; // first sign of frames arriving
-  finishedAt: number | null; // first terminal snapshot
+/** One beam's derived timing, carried across snapshots so a reloaded or
+ *  ticking dashboard keeps a stable clock. */
+export interface BeamView {
+  beam: Beam;
+  startedAt: number | null;
+  finishedAt: number | null;
   elapsedMs: number;
   etaSec: number | null;
   pct: number;
 }
 
-export const initialView: View = { snap: null, startedAt: null, finishedAt: null, elapsedMs: 0, etaSec: null, pct: 0 };
+/** What the dashboard renders: the latest place snapshot and a view per beam. */
+export interface View {
+  snap: Snapshot | null;
+  beams: BeamView[];
+}
+
+export const initialView: View = { snap: null, beams: [] };
 
 /** Milliseconds since the epoch for an RFC 3339 stamp, or null. */
 function stamp(value: string | null | undefined): number | null {
@@ -20,36 +27,43 @@ function stamp(value: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-export function reduce(prev: View, snap: Snapshot, now: number): View {
-  // The tower records when frames first arrived and when it finished, so a
-  // reloaded dashboard keeps the true elapsed time; fall back to our clock.
-  let startedAt = stamp(snap.started_at) ?? prev.startedAt;
-  if (startedAt === null && (snap.state !== "WAITING_MANIFEST" || snap.have > 0)) startedAt = now;
-  let finishedAt = stamp(snap.finished_at) ?? prev.finishedAt;
-  if (finishedAt === null && isTerminal(snap.state)) finishedAt = now;
-  const remaining = snap.total - snap.have;
+function deriveBeam(prev: BeamView | undefined, beam: Beam, now: number): BeamView {
+  // A beam exists only because its manifest arrived, so it has always started;
+  // prefer the tower's stamp, else the one we first recorded, else now.
+  const startedAt = stamp(beam.started_at) ?? prev?.startedAt ?? now;
+  let finishedAt = stamp(beam.finished_at) ?? prev?.finishedAt ?? null;
+  if (finishedAt === null && isTerminal(beam.state)) finishedAt = now;
+  const remaining = beam.total - beam.have;
   return {
-    snap,
+    beam,
     startedAt,
     finishedAt,
-    elapsedMs: startedAt === null ? 0 : (finishedAt ?? now) - startedAt,
-    etaSec: snap.state === "RECEIVING" && snap.fps > 0 && remaining > 0 ? remaining / snap.fps : null,
-    pct: snap.total > 0 ? (100 * snap.have) / snap.total : 0,
+    elapsedMs: (finishedAt ?? now) - startedAt,
+    etaSec: beam.state === "RECEIVING" && beam.fps > 0 && remaining > 0 ? remaining / beam.fps : null,
+    pct: beam.total > 0 ? (100 * beam.have) / beam.total : 0,
   };
 }
 
-/** Advances the clock between snapshots. */
+export function reduce(prev: View, snap: Snapshot, now: number): View {
+  const byBid = new Map(prev.beams.map((bv) => [bv.beam.bid, bv]));
+  return { snap, beams: snap.beams.map((beam) => deriveBeam(byBid.get(beam.bid), beam, now)) };
+}
+
+/** Advances the clock between snapshots for beams still running. */
 export function tick(prev: View, now: number): View {
-  if (prev.startedAt === null || prev.finishedAt !== null) return prev;
-  return { ...prev, elapsedMs: now - prev.startedAt };
+  if (!prev.snap || !prev.beams.some((bv) => bv.finishedAt === null)) return prev;
+  const beams = prev.beams.map((bv) =>
+    bv.finishedAt === null ? { ...bv, elapsedMs: now - (bv.startedAt ?? now) } : bv,
+  );
+  return { ...prev, beams };
 }
 
 export type Stage = "gz_sha" | "orig_sha" | "bundle";
 
 /** The first verdict that failed, in chain order. */
-export function failedStage(snap: Snapshot): Stage | null {
+export function failedStage(beam: Beam): Stage | null {
   for (const stage of ["gz_sha", "orig_sha", "bundle"] as const) {
-    const v = snap.verdicts[stage];
+    const v = beam.verdicts[stage];
     if (v && !v.ok) return stage;
   }
   return null;

@@ -3,35 +3,37 @@ package session
 import (
 	"crypto/subtle"
 	"encoding/base64"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/proto"
 )
 
-// State is the session state machine: WAITING_MANIFEST → RECEIVING →
-// VERIFYING → READY | FAILED.
+// State is a beam's transfer state: RECEIVING → VERIFYING → READY | FAILED. A
+// beam is born RECEIVING (it exists only because its MANIFEST arrived), so
+// there is no WAITING_MANIFEST — an empty place simply has no beams yet.
 type State string
 
-// States.
+// Beam transfer states.
 const (
-	StateWaitingManifest State = "WAITING_MANIFEST"
-	StateReceiving       State = "RECEIVING"
-	StateVerifying       State = "VERIFYING"
-	StateReady           State = "READY"
-	StateFailed          State = "FAILED"
+	StateReceiving State = "RECEIVING"
+	StateVerifying State = "VERIFYING"
+	StateReady     State = "READY"
+	StateFailed    State = "FAILED"
 )
 
-// Terminal reports whether the session has finished, one way or the other.
+// Terminal reports whether a beam has finished, one way or the other.
 func (s State) Terminal() bool { return s == StateReady || s == StateFailed }
 
-// Accepting reports whether frames can still make progress.
-func (s State) Accepting() bool { return s == StateWaitingManifest || s == StateReceiving }
+// Accepting reports whether a beam can still take frames.
+func (s State) Accepting() bool { return s == StateReceiving }
 
 const (
-	fpsWindow      = 2 * time.Second
-	maxHeldFrames  = 65536 // DATA frames held before a manifest binds the session
-	maxHeldSenders = 8     // distinct sender sessions held before binding
+	fpsWindow       = 2 * time.Second
+	maxHeldFrames   = 65536 // pre-manifest DATA/FOUNTAIN frames held across all senders
+	maxHeldSenders  = 8     // distinct senders whose MANIFEST has not arrived yet
+	defaultMaxBeams = 10    // beams a place holds unless the store sets another cap
 )
 
 // Verdict is one verification result with the values the dashboard shows.
@@ -62,53 +64,18 @@ type Download struct {
 	Data        []byte
 }
 
-// Outcome is what the verification stage hands back via Finish. A non-empty
-// Err means FAILED; Warning is surfaced as `error` on a READY session. (DestPath
-// and Warning are unwritten in the HTTP-only phase; the per-beam on-disk write
-// that sets them lands in ADR 0013.)
+// Outcome is what the verification stage hands back via FinishBeam. A non-empty
+// Err means FAILED. SavedPath is the on-disk location once the per-beam write
+// lands (ADR 0013); unset until then.
 type Outcome struct {
 	Verdicts  Verdicts
 	Bundle    *BundleSummary
 	Downloads map[string]Download
-	DestPath  string
+	SavedPath string
 	Err       string
-	Warning   string
 }
 
-// Snapshot is the state document served by GET and pushed over SSE
-// (docs/API.md).
-type Snapshot struct {
-	SID           string         `json:"sid"`
-	State         State          `json:"state"`
-	SenderSession *uint32        `json:"sender_session"`
-	Name          string         `json:"name"`
-	Total         int            `json:"total"`
-	Have          int            `json:"have"`
-	Bitmap        string         `json:"bitmap"`
-	FPS           float64        `json:"fps"`
-	Relays        int            `json:"relays"`
-	Verdicts      Verdicts       `json:"verdicts"`
-	Bundle        *BundleSummary `json:"bundle"`
-	Downloads     []string       `json:"downloads"`
-	DestPath      *string        `json:"dest_path"`
-	Error         *string        `json:"error"`
-	StartedAt     *time.Time     `json:"started_at"`
-	FinishedAt    *time.Time     `json:"finished_at"`
-	ExpiresAt     time.Time      `json:"expires_at"`
-}
-
-// IngestResult is the per-POST accounting returned to a relay.
-type IngestResult struct {
-	Accepted  int
-	Dup       int
-	Bad       int
-	Have      int
-	Total     int
-	State     State
-	Completed bool // this ingest filled the last chunk
-}
-
-// heldKey identifies a frame held before the manifest binds the session.
+// heldKey identifies a frame held before its beam's MANIFEST arrives.
 type heldKey struct {
 	typ proto.Type
 	seq uint16
@@ -120,34 +87,59 @@ type Subscriber struct {
 	relay bool
 }
 
-// Session is one transfer. Exported fields are immutable after creation.
+// Beam is one named payload accumulating in a session, identified by the
+// sender-session u32 from the frame header. It is created the instant its
+// MANIFEST arrives and runs RECEIVING → VERIFYING → READY | FAILED independently
+// of every other beam in the place. All fields are guarded by the owning
+// session's mutex.
+type Beam struct {
+	Sender   uint32
+	manifest proto.Manifest
+	total    int
+	state    State
+
+	decoder *proto.Decoder  // live while RECEIVING; nil after
+	packets map[uint16]bool // fountain seeds seen
+	chunks  [][]byte        // set on completion, released by FinishBeam
+	have    int
+
+	startedAt  time.Time
+	finishedAt time.Time
+	ticks      []time.Time // per-beam decode-fps window
+
+	outcome Outcome
+	arrival int // index into Session.order, for stable listing
+}
+
+// bid is the beam's identifier for URLs, downloads and the web: eight hex
+// digits of the sender u32, unique within the place.
+func (b *Beam) BID() string { return fmt.Sprintf("%08x", b.Sender) }
+
+// Session is a place: identity, token, subscribers and TTL, holding a list of
+// beams keyed by their sender u32. Exported fields are immutable after
+// creation. One mutex guards the beam map and every beam's fields.
 type Session struct {
 	ID        string
 	Token     string
 	CreatedAt time.Time
 
-	mu         sync.Mutex
-	now        func() time.Time
-	ttl        time.Duration
-	expiresAt  time.Time
-	state      State
-	closed     bool
-	bound      bool
-	sender     uint32
-	manifest   proto.Manifest
-	total      int
-	decoder    *proto.Decoder  // live while receiving
-	packets    map[uint16]bool // fountain seeds seen for the bound sender
-	chunks     [][]byte        // set on completion, released by Finish
-	have       int
-	held       map[uint32]map[heldKey][]byte
-	heldCount  int
-	startedAt  time.Time
-	finishedAt time.Time
-	ticks      []time.Time
+	mu        sync.Mutex
+	now       func() time.Time
+	ttl       time.Duration
+	expiresAt time.Time
+	closed    bool
+
+	maxBeams int
+	maxGz    int64 // per-beam gzip ceiling; 0 disables the check
+
+	beams map[uint32]*Beam // keyed by sender u32
+	order []uint32         // arrival order, for a stable Snapshot listing
+
+	held      map[uint32]map[heldKey][]byte // pre-manifest frames, keyed by sender
+	heldCount int
+
 	subs       map[*Subscriber]struct{}
-	outcome    Outcome
-	onComplete func(*Session)
+	onComplete func(*Session, *Beam)
 }
 
 // TokenMatches compares in constant time.
@@ -174,18 +166,22 @@ func (s *Session) Expired(now time.Time) bool {
 	return !now.Before(s.ExpiresAt())
 }
 
-// State is the current state.
-func (s *Session) State() State {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.state
-}
-
-// Closed reports whether the session was deleted or swept.
+// Closed reports whether the place was deleted or swept.
 func (s *Session) Closed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// BeamState reports a beam's transfer state, and whether it exists.
+func (s *Session) BeamState(sender uint32) (State, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.beams[sender]
+	if !ok {
+		return "", false
+	}
+	return b.state, true
 }
 
 // Subscribe registers for change signals. relay marks a scanner, which the
@@ -227,20 +223,25 @@ func (s *Session) close() {
 	s.notifyLocked()
 }
 
-// Ingest parses, validates and stores relayed frames. Frames are held per
-// sender session until a MANIFEST binds one; frames from other sender
-// sessions are then bad. Late frames after completion count as dup.
+// IngestResult is the per-POST accounting returned to a relay. There is no
+// session-level transfer state: a POST may touch several beams, and each
+// completed beam is reported by its bid so the relay keeps feeding the place.
+type IngestResult struct {
+	Accepted       int
+	Dup            int
+	Bad            int
+	CompletedBeams []string // bids (hex sender) whose beam filled during this POST
+}
+
+// Ingest parses relayed frames and routes each to its beam by sender u32,
+// creating a beam on a new MANIFEST and holding DATA/FOUNTAIN frames that arrive
+// before their MANIFEST. Every beam decodes, verifies and completes on its own.
 func (s *Session) Ingest(texts []string) IngestResult {
 	s.mu.Lock()
 	now := s.now()
-	s.expiresAt = now.Add(s.ttl)
 	var r IngestResult
-	before := s.state
+	var completed []*Beam
 	for _, text := range texts {
-		if !s.state.Accepting() {
-			r.Dup++
-			continue
-		}
 		fr, err := proto.ParseText(text)
 		if err != nil {
 			r.Bad++
@@ -248,75 +249,186 @@ func (s *Session) Ingest(texts []string) IngestResult {
 		}
 		switch fr.Type {
 		case proto.TypeManifest:
-			s.ingestManifest(fr, &r)
+			if b := s.ingestManifestLocked(fr, now, &r); b != nil {
+				completed = append(completed, b)
+			}
 		case proto.TypeData, proto.TypeFountain:
-			s.ingestPayload(fr, now, &r)
+			if b := s.ingestPayloadLocked(fr, now, &r); b != nil {
+				completed = append(completed, b)
+			}
 		default:
 			r.Bad++
 		}
 	}
-	if r.Accepted > 0 && s.startedAt.IsZero() {
-		s.startedAt = now
-	}
-	r.Have, r.Total, r.State = s.have, s.total, s.state
-	if r.Accepted > 0 || s.state != before {
+	// Only real progress is worth a snapshot push: an all-bad noise POST changes
+	// nothing, so it wakes no subscribers. The TTL is refreshed by auth.Touch on
+	// every authenticated call (docs/API.md), not here.
+	if r.Accepted+r.Dup > 0 {
 		s.notifyLocked()
 	}
-	var hook func(*Session)
-	if r.Completed {
-		hook = s.onComplete
+	for _, b := range completed {
+		r.CompletedBeams = append(r.CompletedBeams, b.BID())
 	}
+	hook := s.onComplete
 	s.mu.Unlock()
 	if hook != nil {
-		go hook(s)
+		for _, b := range completed {
+			go hook(s, b)
+		}
 	}
 	return r
 }
 
-func (s *Session) ingestManifest(fr proto.Frame, r *IngestResult) {
-	if s.bound {
-		if fr.Session == s.sender {
-			r.Dup++
-		} else {
-			r.Bad++
-		}
-		return
+// ingestManifestLocked creates a beam for a new sender, or dedups a re-inserted
+// schedule manifest for a known one. A differing sender is a different beam,
+// never an error. Returns the beam if it completed from its drained hold bucket.
+func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestResult) *Beam {
+	if _, ok := s.beams[fr.Session]; ok {
+		r.Dup++ // the every-20-frames re-loop, for a beam in any state
+		return nil
 	}
 	m, err := proto.ParseManifest(fr.Payload)
 	if err != nil || int(fr.Total) != m.Total() {
 		r.Bad++
-		return
+		return nil
 	}
-	s.bound, s.sender, s.manifest = true, fr.Session, m
-	s.total = m.Total()
-	s.decoder = proto.NewDecoder(s.total, m.Chunk)
-	s.packets = map[uint16]bool{}
-	s.state = StateReceiving
+	if len(s.beams) >= s.maxBeams {
+		r.Bad++ // the place is full; the operator can remove a beam (6.5)
+		return nil
+	}
+	b := &Beam{
+		Sender:    fr.Session,
+		manifest:  m,
+		total:     m.Total(),
+		state:     StateReceiving,
+		arrival:   len(s.order),
+		startedAt: now,
+	}
+	s.beams[fr.Session] = b
+	s.order = append(s.order, fr.Session)
 	r.Accepted++
-	for key, payload := range s.held[fr.Session] {
-		s.place(key.typ, key.seq, payload)
+
+	// A payload over the per-beam ceiling fails on arrival, allocating no
+	// decoder — the memory backstop for an accumulating place.
+	if s.maxGz > 0 && m.GzSize > s.maxGz {
+		b.state = StateFailed
+		b.finishedAt = now
+		b.outcome = Outcome{Err: fmt.Sprintf("manifest gz_size %d exceeds the %d-byte limit", m.GzSize, s.maxGz)}
+		s.dropHeldLocked(fr.Session)
+		return nil
 	}
-	s.held, s.heldCount = nil, 0
-	s.checkComplete(r)
+	b.decoder = proto.NewDecoder(m.Total(), m.Chunk)
+	b.packets = map[uint16]bool{}
+
+	// Drain ONLY this sender's held bucket. Never clear the whole map — other
+	// senders' pre-manifest frames must survive to become their own beams.
+	if bucket, ok := s.held[fr.Session]; ok {
+		for key, payload := range bucket {
+			if b.placeLocked(key.typ, key.seq, payload) {
+				b.tickLocked(now)
+			}
+		}
+		s.dropHeldLocked(fr.Session)
+	}
+	if b.checkCompleteLocked() {
+		return b
+	}
+	return nil
 }
 
-// place feeds a DATA chunk or FOUNTAIN packet to the decoder. It returns
-// false for a frame that cannot belong here (wrong length, out of range).
-func (s *Session) place(typ proto.Type, seq uint16, payload []byte) bool {
+func (s *Session) dropHeldLocked(sender uint32) {
+	if bucket, ok := s.held[sender]; ok {
+		s.heldCount -= len(bucket)
+		delete(s.held, sender)
+	}
+}
+
+// ingestPayloadLocked routes a DATA/FOUNTAIN frame to its beam, or holds it when
+// the beam's MANIFEST has not arrived yet. Returns the beam if it completed.
+func (s *Session) ingestPayloadLocked(fr proto.Frame, now time.Time, r *IngestResult) *Beam {
+	b, ok := s.beams[fr.Session]
+	if !ok {
+		s.holdLocked(fr, r)
+		return nil
+	}
+	if !b.state.Accepting() {
+		r.Dup++ // a re-looped frame for a beam that already finished
+		return nil
+	}
+	if int(fr.Total) != b.total {
+		r.Bad++
+		return nil
+	}
+	switch fr.Type {
+	case proto.TypeData:
+		if int(fr.Seq) < b.total && b.decoder.Have(int(fr.Seq)) {
+			r.Dup++
+			return nil
+		}
+	case proto.TypeFountain:
+		if b.packets[fr.Seq] {
+			r.Dup++
+			return nil
+		}
+	}
+	if !b.placeLocked(fr.Type, fr.Seq, fr.Payload) {
+		r.Bad++
+		return nil
+	}
+	r.Accepted++
+	b.tickLocked(now)
+	if b.checkCompleteLocked() {
+		return b
+	}
+	return nil
+}
+
+// holdLocked buffers a DATA/FOUNTAIN frame for a sender whose MANIFEST has not
+// arrived, keyed by sender so each becomes its own beam later.
+func (s *Session) holdLocked(fr proto.Frame, r *IngestResult) {
+	key := heldKey{fr.Type, fr.Seq}
+	if s.held == nil {
+		s.held = map[uint32]map[heldKey][]byte{}
+	}
+	bucket, ok := s.held[fr.Session]
+	if !ok {
+		if len(s.held) >= maxHeldSenders {
+			r.Bad++
+			return
+		}
+		bucket = map[heldKey][]byte{}
+		s.held[fr.Session] = bucket
+	}
+	if _, dup := bucket[key]; dup {
+		r.Dup++
+		return
+	}
+	if s.heldCount >= maxHeldFrames {
+		r.Bad++
+		return
+	}
+	bucket[key] = fr.Payload
+	s.heldCount++
+	r.Accepted++
+}
+
+// placeLocked feeds a DATA chunk or FOUNTAIN packet to the beam's decoder. It
+// returns false for a frame that cannot belong here (wrong length, out of range).
+func (b *Beam) placeLocked(typ proto.Type, seq uint16, payload []byte) bool {
 	var progress bool
 	var err error
 	switch typ {
 	case proto.TypeData:
-		if int(seq) >= s.total || len(payload) != s.manifest.ChunkLen(int(seq)) {
+		if int(seq) >= b.total || len(payload) != b.manifest.ChunkLen(int(seq)) {
 			return false
 		}
-		progress, err = s.decoder.AddData(int(seq), payload)
+		progress, err = b.decoder.AddData(int(seq), payload)
 	case proto.TypeFountain:
-		if len(payload) != s.manifest.Chunk {
+		if len(payload) != b.manifest.Chunk {
 			return false
 		}
-		s.packets[seq] = true
-		progress, err = s.decoder.AddPacket(seq, payload)
+		b.packets[seq] = true
+		progress, err = b.decoder.AddPacket(seq, payload)
 	default:
 		return false
 	}
@@ -324,195 +436,176 @@ func (s *Session) place(typ proto.Type, seq uint16, payload []byte) bool {
 		return false
 	}
 	if progress {
-		s.have = s.decoder.Decoded()
+		b.have = b.decoder.Decoded()
 	}
 	return true
 }
 
-func (s *Session) ingestPayload(fr proto.Frame, now time.Time, r *IngestResult) {
-	key := heldKey{fr.Type, fr.Seq}
-	if !s.bound {
-		if s.held == nil {
-			s.held = map[uint32]map[heldKey][]byte{}
-		}
-		bucket, ok := s.held[fr.Session]
-		if !ok {
-			if len(s.held) >= maxHeldSenders {
-				r.Bad++
-				return
-			}
-			bucket = map[heldKey][]byte{}
-			s.held[fr.Session] = bucket
-		}
-		if _, dup := bucket[key]; dup {
-			r.Dup++
-			return
-		}
-		if s.heldCount >= maxHeldFrames {
-			r.Bad++
-			return
-		}
-		bucket[key] = fr.Payload
-		s.heldCount++
-		r.Accepted++
-		s.tick(now)
-		return
+// checkCompleteLocked moves a beam to VERIFYING once every chunk is present,
+// snapshotting the blocks for the verifier.
+func (b *Beam) checkCompleteLocked() bool {
+	if b.state == StateReceiving && b.decoder != nil && b.decoder.Complete() {
+		b.chunks = b.decoder.Blocks(b.manifest.GzSize)
+		b.have = b.total
+		b.decoder, b.packets = nil, nil
+		b.state = StateVerifying
+		return true
 	}
-	if fr.Session != s.sender || int(fr.Total) != s.total {
-		r.Bad++
-		return
-	}
-	switch fr.Type {
-	case proto.TypeData:
-		if int(fr.Seq) < s.total && s.decoder.Have(int(fr.Seq)) {
-			r.Dup++
-			return
-		}
-	case proto.TypeFountain:
-		if s.packets[fr.Seq] {
-			r.Dup++
-			return
-		}
-	}
-	if !s.place(fr.Type, fr.Seq, fr.Payload) {
-		r.Bad++
-		return
-	}
-	r.Accepted++
-	s.tick(now)
-	s.checkComplete(r)
+	return false
 }
 
-func (s *Session) checkComplete(r *IngestResult) {
-	if s.state == StateReceiving && s.decoder != nil && s.decoder.Complete() {
-		s.chunks = s.decoder.Blocks(s.manifest.GzSize)
-		s.have = s.total
-		s.decoder, s.packets = nil, nil
-		s.state = StateVerifying
-		r.Completed = true
-	}
+func (b *Beam) tickLocked(now time.Time) {
+	b.ticks = append(b.ticks, now)
+	b.pruneTicksLocked(now)
 }
 
-func (s *Session) tick(now time.Time) {
-	s.ticks = append(s.ticks, now)
-	s.pruneTicks(now)
-}
-
-func (s *Session) pruneTicks(now time.Time) {
+func (b *Beam) pruneTicksLocked(now time.Time) {
 	cut := now.Add(-fpsWindow)
 	i := 0
-	for i < len(s.ticks) && !s.ticks[i].After(cut) {
+	for i < len(b.ticks) && !b.ticks[i].After(cut) {
 		i++
 	}
-	s.ticks = s.ticks[i:]
+	b.ticks = b.ticks[i:]
 }
 
-// Chunks hands the completed chunks to the verifier. ok is false unless the
-// session is VERIFYING; the slices must be treated as read-only.
-func (s *Session) Chunks() (m proto.Manifest, chunks [][]byte, ok bool) {
+// BeamChunks hands a completed beam's chunks to the verifier. ok is false unless
+// the beam is VERIFYING; the slices must be treated as read-only.
+func (s *Session) BeamChunks(b *Beam) (proto.Manifest, [][]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != StateVerifying {
+	if b.state != StateVerifying {
 		return proto.Manifest{}, nil, false
 	}
-	return s.manifest, s.chunks, true
+	return b.manifest, b.chunks, true
 }
 
-// Finish records the verification outcome and moves to READY or FAILED.
-// The chunk buffers are released; the raw result lives in Downloads.
-func (s *Session) Finish(o Outcome) {
+// FinishBeam records a beam's verification outcome and moves it to READY or
+// FAILED, releasing its chunk buffers.
+func (s *Session) FinishBeam(b *Beam, o Outcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != StateVerifying {
+	if b.state != StateVerifying {
 		return
 	}
-	s.outcome = o
-	s.chunks = nil
-	s.finishedAt = s.now()
+	b.outcome = o
+	b.chunks = nil
+	b.finishedAt = s.now()
 	if o.Err != "" {
-		s.state = StateFailed
+		b.state = StateFailed
 	} else {
-		s.state = StateReady
+		b.state = StateReady
 	}
 	s.notifyLocked()
 }
 
-// Download returns a result by `as` key; only READY sessions serve any.
-func (s *Session) Download(as string) (Download, bool) {
+var downloadOrder = []string{"raw", "file", "zip"}
+
+// BeamDownload returns a READY beam's result by `as` key.
+func (s *Session) BeamDownload(sender uint32, as string) (Download, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != StateReady {
+	b, ok := s.beams[sender]
+	if !ok || b.state != StateReady {
 		return Download{}, false
 	}
-	d, ok := s.outcome.Downloads[as]
+	d, ok := b.outcome.Downloads[as]
 	return d, ok
 }
 
-var downloadOrder = []string{"raw", "file", "zip"}
+// Snapshot is the place envelope served by GET and pushed over SSE
+// (docs/API.md): the beams in arrival order, each with its own progress and
+// verdicts.
+type Snapshot struct {
+	SID       string         `json:"sid"`
+	Relays    int            `json:"relays"`
+	Beams     []BeamSnapshot `json:"beams"`
+	ExpiresAt time.Time      `json:"expires_at"`
+}
 
-// Snapshot renders the state document.
+// BeamSnapshot is one beam's state within a place.
+type BeamSnapshot struct {
+	BID           string         `json:"bid"`
+	SenderSession uint32         `json:"sender_session"`
+	Name          string         `json:"name"`
+	State         State          `json:"state"`
+	Total         int            `json:"total"`
+	Have          int            `json:"have"`
+	Bitmap        string         `json:"bitmap"`
+	FPS           float64        `json:"fps"`
+	Verdicts      Verdicts       `json:"verdicts"`
+	Bundle        *BundleSummary `json:"bundle"`
+	Downloads     []string       `json:"downloads"`
+	SavedPath     *string        `json:"saved_path"`
+	Error         *string        `json:"error"`
+	StartedAt     *time.Time     `json:"started_at"`
+	FinishedAt    *time.Time     `json:"finished_at"`
+}
+
+// Snapshot renders the place document.
 func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	s.pruneTicks(now)
-	snap := Snapshot{
-		SID:       s.ID,
-		State:     s.state,
-		Total:     s.total,
-		Have:      s.have,
-		Bitmap:    s.bitmapLocked(),
-		FPS:       float64(len(s.ticks)) / fpsWindow.Seconds(),
-		Verdicts:  s.outcome.Verdicts,
-		Bundle:    s.outcome.Bundle,
-		Downloads: []string{},
-		ExpiresAt: s.expiresAt,
-	}
-	if s.bound {
-		sender := s.sender
-		snap.SenderSession = &sender
-		snap.Name = s.manifest.Name
-	}
+	snap := Snapshot{SID: s.ID, Beams: []BeamSnapshot{}, ExpiresAt: s.expiresAt}
 	for sub := range s.subs {
 		if sub.relay {
 			snap.Relays++
 		}
 	}
-	for _, k := range downloadOrder {
-		if _, ok := s.outcome.Downloads[k]; ok && s.state == StateReady {
-			snap.Downloads = append(snap.Downloads, k)
+	for _, sender := range s.order {
+		b := s.beams[sender]
+		b.pruneTicksLocked(now)
+		bs := BeamSnapshot{
+			BID:           b.BID(),
+			SenderSession: b.Sender,
+			Name:          b.manifest.Name,
+			State:         b.state,
+			Total:         b.total,
+			Have:          b.have,
+			Bitmap:        b.bitmapLocked(),
+			FPS:           float64(len(b.ticks)) / fpsWindow.Seconds(),
+			Verdicts:      b.outcome.Verdicts,
+			Bundle:        b.outcome.Bundle,
+			Downloads:     []string{},
 		}
-	}
-	if s.outcome.DestPath != "" {
-		p := s.outcome.DestPath
-		snap.DestPath = &p
-	}
-	if msg := s.outcome.Err; msg != "" {
-		snap.Error = &msg
-	} else if msg := s.outcome.Warning; msg != "" {
-		snap.Error = &msg
-	}
-	if !s.startedAt.IsZero() {
-		t := s.startedAt
-		snap.StartedAt = &t
-	}
-	if !s.finishedAt.IsZero() {
-		t := s.finishedAt
-		snap.FinishedAt = &t
+		if b.state == StateReady {
+			for _, k := range downloadOrder {
+				if _, ok := b.outcome.Downloads[k]; ok {
+					bs.Downloads = append(bs.Downloads, k)
+				}
+			}
+		}
+		if b.outcome.SavedPath != "" {
+			p := b.outcome.SavedPath
+			bs.SavedPath = &p
+		}
+		if b.outcome.Err != "" {
+			msg := b.outcome.Err
+			bs.Error = &msg
+		}
+		if !b.startedAt.IsZero() {
+			t := b.startedAt
+			bs.StartedAt = &t
+		}
+		if !b.finishedAt.IsZero() {
+			t := b.finishedAt
+			bs.FinishedAt = &t
+		}
+		snap.Beams = append(snap.Beams, bs)
 	}
 	return snap
 }
 
 // bitmapLocked packs chunk presence MSB-first, base64 (standard) encoded.
-func (s *Session) bitmapLocked() string {
-	if s.total == 0 {
+func (b *Beam) bitmapLocked() string {
+	if b.total == 0 {
 		return ""
 	}
-	bits := make([]byte, (s.total+7)/8)
-	for i := 0; i < s.total; i++ {
-		present := s.have == s.total
-		if s.decoder != nil {
-			present = s.decoder.Have(i)
+	bits := make([]byte, (b.total+7)/8)
+	for i := 0; i < b.total; i++ {
+		present := b.have == b.total
+		if b.decoder != nil {
+			present = b.decoder.Have(i)
 		}
 		if present {
 			bits[i/8] |= 0x80 >> (i % 8)

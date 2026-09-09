@@ -201,13 +201,15 @@ func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Ses
 		return
 	}
 	res := s.Ingest(req.Frames)
+	completed := res.CompletedBeams
+	if completed == nil {
+		completed = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accepted": res.Accepted,
-		"dup":      res.Dup,
-		"bad":      res.Bad,
-		"have":     res.Have,
-		"total":    res.Total,
-		"state":    res.State,
+		"accepted":        res.Accepted,
+		"dup":             res.Dup,
+		"bad":             res.Bad,
+		"completed_beams": completed,
 	})
 }
 
@@ -264,13 +266,22 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 }
 
 func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	sender, perr := strconv.ParseUint(r.URL.Query().Get("beam"), 16, 32)
+	if perr != nil {
+		writeError(w, http.StatusBadRequest, "missing or malformed beam id")
+		return
+	}
 	as := r.URL.Query().Get("as")
-	d, ok := s.Download(as)
+	d, ok := s.BeamDownload(uint32(sender), as)
 	if !ok {
-		if s.State() != session.StateReady {
-			writeError(w, http.StatusConflict, "session is not READY")
-		} else {
-			writeError(w, http.StatusConflict, fmt.Sprintf("no %q download for this session", as))
+		st, exists := s.BeamState(uint32(sender))
+		switch {
+		case !exists:
+			writeError(w, http.StatusNotFound, "no such beam")
+		case st != session.StateReady:
+			writeError(w, http.StatusConflict, "beam is not READY")
+		default:
+			writeError(w, http.StatusConflict, fmt.Sprintf("no %q download for this beam", as))
 		}
 		return
 	}

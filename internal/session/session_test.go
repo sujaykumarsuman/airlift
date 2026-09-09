@@ -3,9 +3,11 @@ package session
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,15 +19,8 @@ type dump struct {
 	Frames        []string `json:"frames"`
 }
 
-func vectors(t *testing.T) dump {
-	t.Helper()
-	return load(t, "vectors.json")
-}
-
-func fountainVectors(t *testing.T) dump {
-	t.Helper()
-	return load(t, "vectors-fountain.json")
-}
+func vectors(t *testing.T) dump         { t.Helper(); return load(t, "vectors.json") }
+func fountainVectors(t *testing.T) dump { t.Helper(); return load(t, "vectors-fountain.json") }
 
 func load(t *testing.T, name string) dump {
 	t.Helper()
@@ -38,6 +33,31 @@ func load(t *testing.T, name string) dump {
 		t.Fatal(err)
 	}
 	return d
+}
+
+// reSender re-signs a dump's frames under a different sender id, so one payload
+// can play the part of a second, distinct beam.
+func reSender(t *testing.T, frames []string, sender uint32) []string {
+	t.Helper()
+	out := make([]string, len(frames))
+	for i, f := range frames {
+		fr, err := proto.ParseText(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fr.Session = sender
+		out[i] = fr.Text()
+	}
+	return out
+}
+
+func bidOf(sender uint32) string { return fmt.Sprintf("%08x", sender) }
+
+// beamOf reaches a beam under the session lock, for tests that finalize it.
+func beamOf(s *Session, sender uint32) *Beam {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.beams[sender]
 }
 
 type clock struct{ t time.Time }
@@ -67,8 +87,8 @@ func TestCreateGetDelete(t *testing.T) {
 	if got, ok := st.Get(s.ID); !ok || got != s {
 		t.Fatal("Get")
 	}
-	if s.State() != StateWaitingManifest || st.Len() != 1 {
-		t.Fatal("initial state")
+	if len(s.Snapshot().Beams) != 0 || st.Len() != 1 {
+		t.Fatal("a new place has no beams")
 	}
 	sub := s.Subscribe(false)
 	if !st.Delete(s.ID) || st.Delete(s.ID) || st.Len() != 0 {
@@ -122,79 +142,78 @@ func TestSweepAndTouch(t *testing.T) {
 	}
 }
 
-func TestIngestVectorsCompletes(t *testing.T) {
+func TestIngestOneBeamCompletes(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
-	done := make(chan *Session, 1)
-	st.SetCompleteHook(func(s *Session) { done <- s })
+	done := make(chan *Beam, 1)
+	st.SetCompleteHook(func(_ *Session, b *Beam) { done <- b })
 	s, _ := st.Create()
 	d := vectors(t)
 	r := s.Ingest(d.Frames)
-	if r.Accepted != len(d.Frames) || r.Dup != 0 || r.Bad != 0 || !r.Completed || r.State != StateVerifying {
+	if r.Accepted != len(d.Frames) || r.Dup != 0 || r.Bad != 0 || len(r.CompletedBeams) != 1 || r.CompletedBeams[0] != bidOf(d.SenderSession) {
 		t.Fatalf("ingest: %+v", r)
 	}
-	if r.Have != r.Total || r.Total != len(d.Frames)-1 {
-		t.Fatalf("have %d total %d", r.Have, r.Total)
-	}
+	var b *Beam
 	select {
-	case got := <-done:
-		if got != s {
-			t.Fatal("hook got another session")
-		}
+	case b = <-done:
 	case <-time.After(time.Second):
 		t.Fatal("complete hook not called")
 	}
-	m, chunks, ok := s.Chunks()
+	m, chunks, ok := s.BeamChunks(b)
 	if !ok || m.Name != "bundle-base64.txt" || len(chunks) != m.Total() {
-		t.Fatalf("Chunks: %v %+v %d", ok, m, len(chunks))
+		t.Fatalf("BeamChunks: %v %+v %d", ok, m, len(chunks))
 	}
 	snap := s.Snapshot()
-	if snap.State != StateVerifying || snap.Name != "bundle-base64.txt" || *snap.SenderSession != d.SenderSession {
-		t.Fatalf("snapshot %+v", snap)
+	if len(snap.Beams) != 1 {
+		t.Fatalf("beams %+v", snap.Beams)
 	}
-	bits, _ := base64.StdEncoding.DecodeString(snap.Bitmap)
-	if len(bits) != (snap.Total+7)/8 {
-		t.Fatalf("bitmap %d bytes for %d chunks", len(bits), snap.Total)
+	bs := snap.Beams[0]
+	if bs.State != StateVerifying || bs.Name != "bundle-base64.txt" || bs.SenderSession != d.SenderSession || bs.BID != bidOf(d.SenderSession) {
+		t.Fatalf("beam snapshot %+v", bs)
 	}
-	for i := 0; i < snap.Total; i++ {
+	bits, _ := base64.StdEncoding.DecodeString(bs.Bitmap)
+	if len(bits) != (bs.Total+7)/8 {
+		t.Fatalf("bitmap %d bytes for %d chunks", len(bits), bs.Total)
+	}
+	for i := 0; i < bs.Total; i++ {
 		if bits[i/8]&(0x80>>(i%8)) == 0 {
 			t.Fatalf("bit %d clear", i)
 		}
 	}
-	if len(snap.Downloads) != 0 || snap.Verdicts.GzSHA != nil {
+	if len(bs.Downloads) != 0 || bs.Verdicts.GzSHA != nil {
 		t.Fatal("verdicts before Finish")
 	}
 	// Late frames after completion are dup, never bad.
 	if late := s.Ingest(d.Frames[:3]); late.Dup != 3 || late.Accepted != 0 || late.Bad != 0 {
 		t.Fatalf("late: %+v", late)
 	}
-	dest := "/tmp/x"
-	s.Finish(Outcome{
+	saved := "/tmp/x"
+	s.FinishBeam(b, Outcome{
 		Verdicts:  Verdicts{GzSHA: &Verdict{OK: true}, OrigSHA: &Verdict{OK: true}},
 		Downloads: map[string]Download{"zip": {Name: "a.zip"}, "raw": {Name: "a.txt", Data: []byte("x")}},
-		DestPath:  dest,
+		SavedPath: saved,
 	})
-	snap = s.Snapshot()
-	if snap.State != StateReady || *snap.DestPath != dest || snap.Error != nil {
-		t.Fatalf("after finish: %+v", snap)
+	bs = s.Snapshot().Beams[0]
+	if bs.State != StateReady || *bs.SavedPath != saved || bs.Error != nil {
+		t.Fatalf("after finish: %+v", bs)
 	}
-	if len(snap.Downloads) != 2 || snap.Downloads[0] != "raw" || snap.Downloads[1] != "zip" {
-		t.Fatalf("downloads %v", snap.Downloads)
+	if len(bs.Downloads) != 2 || bs.Downloads[0] != "raw" || bs.Downloads[1] != "zip" {
+		t.Fatalf("downloads %v", bs.Downloads)
 	}
-	if snap.Have != snap.Total || snap.Bitmap == "" {
+	if bs.Have != bs.Total || bs.Bitmap == "" {
 		t.Fatal("bitmap after chunks released")
 	}
-	if dl, ok := s.Download("raw"); !ok || string(dl.Data) != "x" {
-		t.Fatal("Download raw")
+	if dl, ok := s.BeamDownload(d.SenderSession, "raw"); !ok || string(dl.Data) != "x" {
+		t.Fatal("BeamDownload raw")
 	}
-	if _, ok := s.Download("file"); ok {
-		t.Fatal("Download of an absent key")
+	if _, ok := s.BeamDownload(d.SenderSession, "file"); ok {
+		t.Fatal("BeamDownload of an absent key")
 	}
-	if _, _, ok := s.Chunks(); ok {
-		t.Fatal("Chunks after Finish")
+	if _, _, ok := s.BeamChunks(b); ok {
+		t.Fatal("BeamChunks after Finish")
 	}
 }
 
-func TestIngestOrderIndependentWithNoise(t *testing.T) {
+func TestPreManifestHoldAndAdopt(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	s, _ := st.Create()
 	d := vectors(t)
@@ -203,19 +222,137 @@ func TestIngestOrderIndependentWithNoise(t *testing.T) {
 	rand.New(rand.NewSource(3)).Shuffle(len(data), func(i, j int) { data[i], data[j] = data[j], data[i] })
 	feed := append(append(data, data...), "GARBAGE", "", d.Frames[1][:len(d.Frames[1])-1]+"!")
 	r := s.Ingest(feed)
-	if r.Accepted != len(data) || r.Dup != len(data) || r.Bad != 3 || r.State != StateWaitingManifest {
+	if r.Accepted != len(data) || r.Dup != len(data) || r.Bad != 3 || len(r.CompletedBeams) != 0 {
 		t.Fatalf("pre-manifest: %+v", r)
 	}
-	if snap := s.Snapshot(); snap.Total != 0 || snap.Have != 0 || snap.SenderSession != nil {
-		t.Fatalf("snapshot before manifest: %+v", snap)
+	if snap := s.Snapshot(); len(snap.Beams) != 0 {
+		t.Fatalf("no beam before its manifest: %+v", snap.Beams)
 	}
 	r = s.Ingest([]string{d.Frames[0]})
-	if r.Accepted != 1 || !r.Completed || r.Have != r.Total || r.State != StateVerifying {
+	if r.Accepted != 1 || len(r.CompletedBeams) != 1 {
 		t.Fatalf("manifest adoption: %+v", r)
+	}
+	bs := s.Snapshot().Beams[0]
+	if bs.State != StateVerifying || bs.Have != bs.Total {
+		t.Fatalf("adopted beam %+v", bs)
 	}
 }
 
-func TestIngestRejectsForeignAndMalformed(t *testing.T) {
+// TestTwoBeamsDecodeIndependently is the headline of the multi-beam model: two
+// distinct senders accumulate as two beams in one place and complete on their own.
+func TestTwoBeamsDecodeIndependently(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	completed := make(chan string, 2)
+	st.SetCompleteHook(func(_ *Session, b *Beam) { completed <- b.BID() })
+	s, _ := st.Create()
+	d := vectors(t)
+	a := d.Frames
+	b := reSender(t, d.Frames, d.SenderSession^0xFFFF) // a second, distinct sender
+
+	// Interleave the two beams' frames in one stream.
+	var feed []string
+	for i := 0; i < len(a) || i < len(b); i++ {
+		if i < len(a) {
+			feed = append(feed, a[i])
+		}
+		if i < len(b) {
+			feed = append(feed, b[i])
+		}
+	}
+	r := s.Ingest(feed)
+	if len(r.CompletedBeams) != 2 || r.Bad != 0 {
+		t.Fatalf("both beams should complete: %+v", r)
+	}
+	got := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case bid := <-completed:
+			got[bid] = true
+		case <-time.After(time.Second):
+			t.Fatal("hook not called per beam")
+		}
+	}
+	if !got[bidOf(d.SenderSession)] || !got[bidOf(d.SenderSession^0xFFFF)] {
+		t.Fatalf("hook fired for %v", got)
+	}
+	snap := s.Snapshot()
+	if len(snap.Beams) != 2 {
+		t.Fatalf("place should list two beams: %+v", snap.Beams)
+	}
+	for _, bs := range snap.Beams {
+		if bs.State != StateVerifying || bs.Have != bs.Total {
+			t.Fatalf("beam %s not complete: %+v", bs.BID, bs)
+		}
+	}
+}
+
+// TestHeldSurvivesOtherManifest pins the load-bearing fix: draining beam A's
+// held bucket must NOT discard beam B's pre-manifest frames.
+func TestHeldSurvivesOtherManifest(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	d := vectors(t)
+	senderB := d.SenderSession ^ 0x1234
+	b := reSender(t, d.Frames, senderB)
+
+	// Hold beam B's DATA first (no manifest yet), then send beam A entirely.
+	if r := s.Ingest(b[1:]); r.Accepted != len(b)-1 {
+		t.Fatalf("hold B: %+v", r)
+	}
+	if r := s.Ingest(d.Frames); len(r.CompletedBeams) != 1 || r.CompletedBeams[0] != bidOf(d.SenderSession) {
+		t.Fatalf("A completes: %+v", r)
+	}
+	// B's held DATA must still be there: its manifest alone completes it.
+	r := s.Ingest([]string{b[0]})
+	if len(r.CompletedBeams) != 1 || r.CompletedBeams[0] != bidOf(senderB) {
+		t.Fatalf("B's held frames were dropped by A's manifest: %+v", r)
+	}
+	if len(s.Snapshot().Beams) != 2 {
+		t.Fatal("both beams should be present")
+	}
+}
+
+func TestManifestDupCollisionAndCaps(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	st.SetLimits(2, 0) // cap at two beams
+	s, _ := st.Create()
+	d := vectors(t)
+
+	s.Ingest([]string{d.Frames[0]})
+	// A re-looped manifest for a known beam is a dup, never bad.
+	if r := s.Ingest([]string{d.Frames[0]}); r.Dup != 1 || r.Bad != 0 || r.Accepted != 0 {
+		t.Fatalf("re-looped manifest: %+v", r)
+	}
+	// A second sender is a new beam; a third exceeds the cap.
+	s.Ingest([]string{reSender(t, d.Frames, 2)[0]})
+	if r := s.Ingest([]string{reSender(t, d.Frames, 3)[0]}); r.Bad != 1 || r.Accepted != 0 {
+		t.Fatalf("beam cap not enforced: %+v", r)
+	}
+	if len(s.Snapshot().Beams) != 2 {
+		t.Fatal("cap should hold at two beams")
+	}
+}
+
+func TestMaxGzFailsBeamOnArrival(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	st.SetLimits(10, 1024) // 1 KiB gzip ceiling
+	s, _ := st.Create()
+	d := vectors(t) // gz_size is ~14 KB, over the cap
+	r := s.Ingest(d.Frames)
+	if r.Accepted != 1 || len(r.CompletedBeams) != 0 {
+		t.Fatalf("over-cap manifest: %+v", r)
+	}
+	bs := s.Snapshot().Beams[0]
+	if bs.State != StateFailed || bs.Error == nil || !strings.Contains(*bs.Error, "exceeds") {
+		t.Fatalf("over-cap beam should fail on arrival: %+v", bs)
+	}
+	// Its data frames after the failed manifest are dup (the beam is terminal).
+	if r := s.Ingest(d.Frames[1:4]); r.Dup != 3 {
+		t.Fatalf("frames for a failed beam: %+v", r)
+	}
+}
+
+func TestIngestMalformed(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	s, _ := st.Create()
 	d := vectors(t)
@@ -223,25 +360,21 @@ func TestIngestRejectsForeignAndMalformed(t *testing.T) {
 	m, _ := proto.ParseManifest(manifest.Payload)
 	first, _ := proto.ParseText(d.Frames[1])
 
-	foreignData := proto.Frame{Type: proto.TypeData, Session: manifest.Session + 1, Seq: 0, Total: first.Total, Payload: first.Payload}.Text()
-	foreignManifest := proto.Frame{Type: proto.TypeManifest, Session: manifest.Session + 1, Seq: 0, Total: manifest.Total, Payload: manifest.Payload}.Text()
 	wrongLen := proto.Frame{Type: proto.TypeData, Session: manifest.Session, Seq: 1, Total: first.Total, Payload: first.Payload[:10]}.Text()
 	badSeq := proto.Frame{Type: proto.TypeData, Session: manifest.Session, Seq: uint16(m.Total()), Total: first.Total, Payload: first.Payload}.Text()
 	badTotal := proto.Frame{Type: proto.TypeData, Session: manifest.Session, Seq: 2, Total: first.Total + 1, Payload: first.Payload}.Text()
-	fountain := proto.Frame{Type: proto.TypeFountain, Session: manifest.Session, Seq: 5, Total: first.Total, Payload: first.Payload}.Text()
 	badManifestTotal := proto.Frame{Type: proto.TypeManifest, Session: manifest.Session, Seq: 0, Total: manifest.Total + 1, Payload: manifest.Payload}.Text()
 
-	if r := s.Ingest([]string{badManifestTotal}); r.Bad != 1 || s.State() != StateWaitingManifest {
+	if r := s.Ingest([]string{badManifestTotal}); r.Bad != 1 || len(s.Snapshot().Beams) != 0 {
 		t.Fatalf("manifest with wrong total accepted: %+v", r)
 	}
-	// A foreign data frame before binding is merely held; binding discards it.
-	if r := s.Ingest([]string{foreignData, d.Frames[0]}); r.Accepted != 2 || r.Have != 0 {
-		t.Fatalf("hold/bind: %+v", r)
-	}
-	r := s.Ingest([]string{foreignData, foreignManifest, wrongLen, badSeq, badTotal, fountain, d.Frames[0], d.Frames[1], d.Frames[1]})
-	// The well-formed fountain packet is accepted (it feeds the decoder); the rest are bad or dup.
-	if r.Bad != 5 || r.Dup != 2 || r.Accepted != 2 || r.Have != 1 {
+	// Bind the beam, then feed malformed frames and one good one plus a dup.
+	r := s.Ingest([]string{d.Frames[0], wrongLen, badSeq, badTotal, d.Frames[1], d.Frames[1]})
+	if r.Accepted != 2 || r.Bad != 3 || r.Dup != 1 {
 		t.Fatalf("after bind: %+v", r)
+	}
+	if bs := s.Snapshot().Beams[0]; bs.Have != 1 {
+		t.Fatalf("only the good frame decoded: have %d", bs.Have)
 	}
 }
 
@@ -263,15 +396,15 @@ func TestFPSCounter(t *testing.T) {
 	s, _ := st.Create()
 	d := vectors(t)
 	s.Ingest(d.Frames[:9]) // manifest + 8 data frames at t0
-	if fps := s.Snapshot().FPS; fps != 4 {
+	if fps := s.Snapshot().Beams[0].FPS; fps != 4 {
 		t.Fatalf("fps at t0 = %v, want 4 (8 frames over a 2 s window)", fps)
 	}
 	c.t = c.t.Add(time.Second)
-	if fps := s.Snapshot().FPS; fps != 4 {
+	if fps := s.Snapshot().Beams[0].FPS; fps != 4 {
 		t.Fatalf("fps at t0+1s = %v, want 4", fps)
 	}
 	c.t = c.t.Add(1500 * time.Millisecond)
-	if fps := s.Snapshot().FPS; fps != 0 {
+	if fps := s.Snapshot().Beams[0].FPS; fps != 0 {
 		t.Fatalf("fps at t0+2.5s = %v, want 0", fps)
 	}
 }
@@ -316,40 +449,28 @@ func TestFinishFailed(t *testing.T) {
 	s, _ := st.Create()
 	d := vectors(t)
 	s.Ingest(d.Frames)
-	s.Finish(Outcome{Verdicts: Verdicts{GzSHA: &Verdict{OK: false, Expected: "a", Actual: "b"}}, Err: "gzip blob sha256 mismatch"})
-	snap := s.Snapshot()
-	if snap.State != StateFailed || snap.Error == nil || *snap.Error != "gzip blob sha256 mismatch" {
-		t.Fatalf("%+v", snap)
+	b := beamOf(s, d.SenderSession)
+	s.FinishBeam(b, Outcome{Verdicts: Verdicts{GzSHA: &Verdict{OK: false, Expected: "a", Actual: "b"}}, Err: "gzip blob sha256 mismatch"})
+	bs := s.Snapshot().Beams[0]
+	if bs.State != StateFailed || bs.Error == nil || *bs.Error != "gzip blob sha256 mismatch" {
+		t.Fatalf("%+v", bs)
 	}
-	if snap.Verdicts.GzSHA == nil || snap.Verdicts.GzSHA.OK || snap.Verdicts.OrigSHA != nil {
-		t.Fatalf("verdicts %+v", snap.Verdicts)
+	if bs.Verdicts.GzSHA == nil || bs.Verdicts.GzSHA.OK || bs.Verdicts.OrigSHA != nil {
+		t.Fatalf("verdicts %+v", bs.Verdicts)
 	}
-	if _, ok := s.Download("raw"); ok {
-		t.Fatal("download from a FAILED session")
+	if _, ok := s.BeamDownload(d.SenderSession, "raw"); ok {
+		t.Fatal("download from a FAILED beam")
 	}
-	s.Finish(Outcome{}) // a second Finish is ignored
-	if s.State() != StateFailed {
+	s.FinishBeam(b, Outcome{}) // a second Finish is ignored
+	if st, _ := s.BeamState(d.SenderSession); st != StateFailed {
 		t.Fatal("state changed by a stray Finish")
 	}
-	js, _ := json.Marshal(snap)
-	for _, key := range []string{`"sid"`, `"state"`, `"sender_session"`, `"bitmap"`, `"fps"`, `"relays"`, `"verdicts"`, `"bundle":null`, `"downloads":[]`, `"dest_path":null`, `"expires_at"`} {
-		if !json.Valid(js) || !contains(string(js), key) {
+	js, _ := json.Marshal(s.Snapshot())
+	for _, key := range []string{`"sid"`, `"relays"`, `"expires_at"`, `"beams"`, `"bid"`, `"sender_session"`, `"state"`, `"bitmap"`, `"downloads":[]`, `"saved_path":null`} {
+		if !json.Valid(js) || !strings.Contains(string(js), key) {
 			t.Fatalf("snapshot JSON lacks %s: %s", key, js)
 		}
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 func TestIngestFountainShuffledWithLoss(t *testing.T) {
@@ -361,21 +482,19 @@ func TestIngestFountainShuffledWithLoss(t *testing.T) {
 	kept := packets[:len(packets)*3/4]
 	// Packets before the manifest are held, then adopted when it arrives.
 	r := s.Ingest(kept[:10])
-	if r.Accepted != 10 || r.State != StateWaitingManifest {
+	if r.Accepted != 10 || len(r.CompletedBeams) != 0 {
 		t.Fatalf("held: %+v", r)
 	}
-	if snap := s.Snapshot(); snap.StartedAt == nil || !snap.StartedAt.Equal(c.t) {
-		t.Fatalf("started_at not set on first accepted frame: %+v", snap.StartedAt)
-	}
 	r = s.Ingest(append([]string{d.Frames[0]}, kept[10:]...))
-	if !r.Completed || r.State != StateVerifying || r.Have != r.Total || r.Bad != 0 {
+	if len(r.CompletedBeams) != 1 || r.Bad != 0 {
 		t.Fatalf("fountain: %+v", r)
 	}
-	// The decoder completes part-way through the batch; the rest count as dup.
-	if r.Accepted+r.Dup != len(kept)-10+1 || r.Accepted < 10 {
-		t.Fatalf("accepted %d + dup %d, want %d frames accounted for", r.Accepted, r.Dup, len(kept)-10+1)
+	bs := s.Snapshot().Beams[0]
+	if bs.State != StateVerifying || bs.Have != bs.Total || bs.StartedAt == nil {
+		t.Fatalf("fountain beam %+v", bs)
 	}
-	m, chunks, ok := s.Chunks()
+	b := beamOf(s, d.SenderSession)
+	m, chunks, ok := s.BeamChunks(b)
 	if !ok || len(chunks) != m.Total() || len(chunks[len(chunks)-1]) != m.ChunkLen(m.Total()-1) {
 		t.Fatalf("chunks: ok=%v n=%d", ok, len(chunks))
 	}
@@ -386,14 +505,15 @@ func TestIngestFountainShuffledWithLoss(t *testing.T) {
 	if total != m.GzSize {
 		t.Fatalf("chunks sum to %d, gz_size %d", total, m.GzSize)
 	}
-	// Repeats and late packets are dup; a packet of the wrong length is bad.
+	// Repeats and late packets are dup.
 	if r := s.Ingest(kept[:3]); r.Dup != 3 {
 		t.Fatalf("late: %+v", r)
 	}
-	s.Finish(Outcome{})
-	if snap := s.Snapshot(); snap.FinishedAt == nil || snap.State != StateReady {
-		t.Fatalf("finished_at: %+v", snap)
+	s.FinishBeam(b, Outcome{})
+	if bs := s.Snapshot().Beams[0]; bs.FinishedAt == nil || bs.State != StateReady {
+		t.Fatalf("finished_at: %+v", bs)
 	}
+	_ = c
 }
 
 func TestIngestFountainValidation(t *testing.T) {
@@ -408,7 +528,7 @@ func TestIngestFountainValidation(t *testing.T) {
 	if r.Accepted != 1 || r.Dup != 1 || r.Bad != 1 {
 		t.Fatalf("%+v", r)
 	}
-	if snap := s.Snapshot(); snap.Total != int(manifest.Total) || snap.Have > int(manifest.Total) {
-		t.Fatalf("snapshot %+v", snap)
+	if bs := s.Snapshot().Beams[0]; bs.Total != int(manifest.Total) || bs.Have > int(manifest.Total) {
+		t.Fatalf("beam %+v", bs)
 	}
 }

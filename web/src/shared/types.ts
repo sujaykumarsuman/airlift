@@ -1,5 +1,5 @@
 /** Mirrors docs/API.md. */
-export type State = "WAITING_MANIFEST" | "RECEIVING" | "VERIFYING" | "READY" | "FAILED";
+export type State = "RECEIVING" | "VERIFYING" | "READY" | "FAILED";
 
 export interface Verdict {
   ok: boolean;
@@ -13,23 +13,30 @@ export interface BundleSummary {
   paths: string[];
 }
 
-export interface Snapshot {
-  sid: string;
-  state: State;
-  sender_session: number | null;
+/** One beam accumulating in a place, keyed by its sender u32 (bid = hex). */
+export interface Beam {
+  bid: string;
+  sender_session: number;
   name: string;
+  state: State;
   total: number;
   have: number;
   bitmap: string;
   fps: number;
-  relays: number;
   verdicts: { gz_sha: Verdict | null; orig_sha: Verdict | null; bundle: Verdict | null };
   bundle: BundleSummary | null;
   downloads: string[];
-  dest_path: string | null;
+  saved_path: string | null;
   error: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+}
+
+/** A place: identity, relay count and the list of beams read into it. */
+export interface Snapshot {
+  sid: string;
+  relays: number;
+  beams: Beam[];
   expires_at: string;
 }
 
@@ -58,13 +65,7 @@ export interface IngestResult {
   accepted: number;
   dup: number;
   bad: number;
-  have: number;
-  total: number;
-  state: State;
-}
-
-export function isReceiving(state: State): boolean {
-  return state === "WAITING_MANIFEST" || state === "RECEIVING";
+  completed_beams: string[];
 }
 
 export function isTerminal(state: State): boolean {

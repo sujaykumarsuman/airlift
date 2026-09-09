@@ -9,11 +9,11 @@ and the server tests are its reference clients.
 
 ```
 POST   /api/sessions                      → {sid, token, join_url, expires_at}
-GET    /api/sessions/{sid}                token → state snapshot
-GET    /api/sessions/{sid}/events         token → SSE state snapshots
+GET    /api/sessions/{sid}                token → place snapshot
+GET    /api/sessions/{sid}/events         token → SSE place snapshots
 POST   /api/sessions/{sid}/frames         token → body {frames:[base45,...]}
-                                          → {accepted, dup, bad, have, total, state}
-GET    /api/sessions/{sid}/download?as=raw|file|zip   token → bytes
+                                          → {accepted, dup, bad, completed_beams}
+GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip   token → bytes
 DELETE /api/sessions/{sid}                token
 GET    /api/info                          → {version, public_url, base_path, admin_enabled, caps}
 GET    /                                  tower dashboard
@@ -53,17 +53,26 @@ call refreshes the session's TTL.
 
 | Limit | Value | Response |
 | --- | ---: | --- |
-| Request body | 256 MiB | `413` |
+| Request body | `max_body` (default 8 MiB) | `413` |
 | Frames per `POST /frames` | 500 | `413` |
 | Frame string | 4096 characters | counted as `bad` |
+| Beams per place | `max_beams` (default 10) | over-cap MANIFEST counted as `bad` |
+| Held pre-manifest senders | 8 (65 536 frames) | further held frames counted as `bad` |
 | Concurrent sessions | 32 | `429` on create |
 | Malformed JSON body | — | `400` |
 
-## State machine
+## The place model
+
+A session is a *place*: a named join field holding a list of beams (ADR 0015).
+Each beam is one payload, identified by its sender-session u32 from the frame
+header (`bid` = eight hex digits). A beam is born the instant its MANIFEST
+arrives and runs its own state machine; beams in one place decode, verify and
+complete independently. There is no place-level transfer state — an empty place
+simply has no beams yet.
 
 ```
-WAITING_MANIFEST → RECEIVING → VERIFYING → READY
-                                         ↘ FAILED
+(no beam)   ─MANIFEST→   RECEIVING → VERIFYING → READY
+                                              ↘ FAILED
 ```
 
 ## Create
@@ -72,29 +81,36 @@ WAITING_MANIFEST → RECEIVING → VERIFYING → READY
 is `<public base>/s/{sid}#t={token}`. In serve mode the tower also prints it,
 with a terminal QR code, to stdout.
 
-## State snapshot
+## Place snapshot
 
 Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `sid` | string | tower session id |
-| `state` | string | see state machine |
-| `sender_session` | u32 or null | bound by the first MANIFEST |
-| `name` | string | from the manifest; `""` before it |
-| `total` | int | `N` chunks; `0` before the manifest |
-| `have` | int | distinct chunks received |
-| `bitmap` | string | `⌈N/8⌉` bytes, standard base64; bit `i` is chunk `i`, most significant bit first; `""` before the manifest |
-| `fps` | number | frames accepted in the last 2 s, divided by 2 |
 | `relays` | int | open event streams that declared `role=relay` |
+| `beams` | object[] | the beams read into the place, in arrival order |
+| `expires_at` | RFC 3339 | refreshed on every authenticated call |
+
+Each entry of `beams` is:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `bid` | string | eight hex digits of `sender_session`; the beam's id in URLs and downloads |
+| `sender_session` | u32 | the sender u32 from the frame header |
+| `name` | string | from the manifest |
+| `state` | string | `RECEIVING`, `VERIFYING`, `READY` or `FAILED` |
+| `total` | int | `N` chunks |
+| `have` | int | distinct chunks received |
+| `bitmap` | string | `⌈N/8⌉` bytes, standard base64; bit `i` is chunk `i`, most significant bit first |
+| `fps` | number | frames accepted for this beam in the last 2 s, divided by 2 |
 | `verdicts` | object | `{gz_sha, orig_sha, bundle}`; each `null` until its stage ran, then `{ok, expected, actual}` |
 | `bundle` | object or null | `{files, total_bytes, paths}` for a verified repobundle; `paths` holds the first 50 |
 | `downloads` | string[] | subset of `raw`, `file`, `zip`; empty unless `READY` |
-| `dest_path` | string or null | on-disk path once written under `data_dir` (per beam, ADR 0013); null until then |
+| `saved_path` | string or null | on-disk path once written under `data_dir` (per beam, ADR 0013); null until then |
 | `error` | string or null | the failure reason in `FAILED` |
-| `started_at` | RFC 3339 or null | when the first frame was accepted |
-| `finished_at` | RFC 3339 or null | when verification ended, either way |
-| `expires_at` | RFC 3339 | refreshed on every authenticated call |
+| `started_at` | RFC 3339 or null | when the beam's MANIFEST arrived |
+| `finished_at` | RFC 3339 or null | when the beam's verification ended, either way |
 
 `expected` and `actual` are hex digests for `gz_sha` and `orig_sha`. For
 `bundle` they are prose: `"7 files, each matching its sha256"` against
@@ -103,20 +119,27 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 ## Frames ingest
 
 `POST /api/sessions/{sid}/frames` with `{"frames": ["<base45>", …]}` →
-`200 {accepted, dup, bad, have, total, state}`.
+`200 {accepted, dup, bad, completed_beams}`. `completed_beams` lists the `bid`s
+whose beam received its last chunk during this POST (`[]` otherwise), so a relay
+keeps feeding the place after any one beam fills.
 
-- `accepted`: new frames, including DATA frames held before the manifest.
-- `dup`: frames already held, and every frame once the session has left the
-  receiving states.
-- `bad`: undecodable, failing CRC, from another sender session once bound,
-  the wrong length for their position, or out-of-range `seq`.
+- `accepted`: new frames, including DATA/FOUNTAIN frames held before their beam's
+  manifest.
+- `dup`: frames already held or already decoded, a re-inserted schedule MANIFEST
+  for a known beam, and every frame for a beam that has left `RECEIVING`.
+- `bad`: undecodable, failing CRC, the wrong length for their position,
+  out-of-range `seq`, a MANIFEST whose `total` disagrees with its payload, or a
+  MANIFEST that would exceed the per-place beam cap.
 
-FOUNTAIN packets are accepted like DATA chunks; `have` counts recovered
-chunks either way, so it can rise by several per packet.
+FOUNTAIN packets are accepted like DATA chunks; a beam's `have` (in the
+snapshot) counts recovered chunks either way, so it can rise by several per
+packet.
 
-Multiple scanners may post concurrently. The first MANIFEST binds the sender
-session; until then DATA frames from up to 8 sender sessions (65 536 frames)
-are held and adopted when their manifest arrives.
+Multiple scanners may post concurrently, and one place may hold several beams
+(cap `max_beams`, default 10). A differing sender is a different beam, never an
+error. DATA/FOUNTAIN frames that arrive before their own MANIFEST are held —
+up to 8 pending senders, 65 536 frames across them — and adopted when that
+sender's manifest arrives, without disturbing any other beam.
 
 ## Events
 
@@ -127,13 +150,15 @@ the connection under `relays`; the dashboard omits it.
 
 ```
 event: state
-data: {"sid":"…","state":"RECEIVING",…}
+data: {"sid":"…","relays":0,"beams":[…],…}
 ```
 
 ## Downloads
 
-`GET /api/sessions/{sid}/download?as=…`, `READY` only; otherwise `409`, as
-is an `as` not listed in `downloads`. Per ADR 0006:
+`GET /api/sessions/{sid}/download?beam=<bid>&as=…`. `beam` is the eight-hex-digit
+bid; a missing or malformed one is `400`, an unknown one `404`. The beam must be
+`READY`, otherwise `409`, as is an `as` not listed in that beam's `downloads`.
+Per ADR 0006:
 
 - `raw` — the byte-identical input, named after the manifest (reduced to a
   safe base name). Always available.

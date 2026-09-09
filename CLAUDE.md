@@ -68,7 +68,10 @@ directly (out of scope; see non-goals).
 4. Sender output is one self-contained HTML file. (ADR 0003)
 5. Loop schedule `[M, D0..D(N-1)]`, M re-inserted every 20 data frames.
 6. The phone is a stateless relay: decode → dedup → batch → POST. (ADR 0004)
-7. The server is the source of truth; in-memory sessions with TTL. (ADR 0005)
+7. The server is the source of truth; in-memory sessions with TTL (ADR 0005). A
+   session is a *place* holding a list of beams keyed by the sender u32
+   (`bid` = its hex); each beam runs RECEIVING → VERIFYING → READY | FAILED
+   independently. (ADR 0015)
 8. Verification chain: concat → sha256 → gunzip → sha256 → per-file sha256.
 9. Bundle stage in Go after verification; zip / bare file / raw bundle
    downloads; one path sanitiser for zip entries and the `data_dir` tree. (ADR 0006)

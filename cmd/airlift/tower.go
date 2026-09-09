@@ -92,6 +92,7 @@ func runServe(ctx context.Context, cfg *config.Config, headless bool, stdout io.
 	}
 
 	store := session.NewStore(cfg.InactiveTTL, cfg.Sessions)
+	store.SetLimits(cfg.MaxBeams, cfg.MaxGzBytes)
 	go store.Run(ctx, sweepEvery)
 	srv := server.New(server.Options{
 		Store:          store,

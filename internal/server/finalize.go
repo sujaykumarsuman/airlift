@@ -12,14 +12,16 @@ import (
 
 const maxSummaryPaths = 50
 
-// finalize runs once a session has every chunk: the hash chain, the bundle
-// stage and the in-memory downloads. It ends in READY or FAILED. (Per-beam
-// on-disk persistence under data_dir lands in a later step.)
-func (srv *Server) finalize(s *session.Session) {
-	m, chunks, ok := s.Chunks()
+// finalize runs once a beam has every chunk: the hash chain, the bundle stage
+// and the in-memory downloads. It ends the beam in READY or FAILED, independent
+// of every other beam in the place. (Per-beam on-disk persistence under
+// data_dir lands in a later step.)
+func (srv *Server) finalize(s *session.Session, b *session.Beam) {
+	m, chunks, ok := s.BeamChunks(b)
 	if !ok {
 		return
 	}
+	bid := b.BID()
 	out := session.Outcome{Downloads: map[string]session.Download{}}
 	res := verify.Chain(chunks, m)
 	out.Verdicts.GzSHA = &session.Verdict{OK: res.GzSHA.OK, Expected: res.GzSHA.Expected, Actual: res.GzSHA.Actual}
@@ -28,8 +30,8 @@ func (srv *Server) finalize(s *session.Session) {
 	}
 	if res.Err != nil {
 		out.Err = res.Err.Error()
-		srv.opts.Logf("session %s FAILED: %s", s.ID, out.Err)
-		s.Finish(out)
+		srv.opts.Logf("session %s beam %s FAILED: %s", s.ID, bid, out.Err)
+		s.FinishBeam(b, out)
 		return
 	}
 	data := res.Data
@@ -38,32 +40,32 @@ func (srv *Server) finalize(s *session.Session) {
 
 	var files []bundle.File
 	if bundle.IsBundle(data) {
-		b, err := bundle.Parse(data)
+		bun, err := bundle.Parse(data)
 		if err != nil {
 			out.Verdicts.Bundle = &session.Verdict{Expected: "well-formed repobundle", Actual: err.Error()}
 			out.Err = "bundle: " + err.Error()
-			srv.opts.Logf("session %s FAILED: %s", s.ID, out.Err)
-			s.Finish(out)
+			srv.opts.Logf("session %s beam %s FAILED: %s", s.ID, bid, out.Err)
+			s.FinishBeam(b, out)
 			return
 		}
-		bad := b.Bad()
+		bad := bun.Bad()
 		out.Verdicts.Bundle = &session.Verdict{
 			OK:       len(bad) == 0,
-			Expected: fmt.Sprintf("%d files, each matching its sha256", len(b.Files)),
-			Actual:   describeBad(b, bad),
+			Expected: fmt.Sprintf("%d files, each matching its sha256", len(bun.Files)),
+			Actual:   describeBad(bun, bad),
 		}
 		if len(bad) > 0 {
-			out.Err = fmt.Sprintf("bundle: %d of %d files failed verification", len(bad), len(b.Files))
-			srv.opts.Logf("session %s FAILED: %s (%s)", s.ID, out.Err, strings.Join(bad, ", "))
-			s.Finish(out)
+			out.Err = fmt.Sprintf("bundle: %d of %d files failed verification", len(bad), len(bun.Files))
+			srv.opts.Logf("session %s beam %s FAILED: %s (%s)", s.ID, bid, out.Err, strings.Join(bad, ", "))
+			s.FinishBeam(b, out)
 			return
 		}
-		files = b.Files
+		files = bun.Files
 		paths := make([]string, 0, min(len(files), maxSummaryPaths))
 		for _, f := range files[:min(len(files), maxSummaryPaths)] {
 			paths = append(paths, f.Path)
 		}
-		out.Bundle = &session.BundleSummary{Files: len(files), TotalBytes: b.TotalBytes(), Paths: paths}
+		out.Bundle = &session.BundleSummary{Files: len(files), TotalBytes: bun.TotalBytes(), Paths: paths}
 		switch len(files) {
 		case 0:
 		case 1:
@@ -72,15 +74,15 @@ func (srv *Server) finalize(s *session.Session) {
 			z, err := bundle.Zip(files)
 			if err != nil {
 				out.Err = "bundle: zip: " + err.Error()
-				s.Finish(out)
+				s.FinishBeam(b, out)
 				return
 			}
 			out.Downloads["zip"] = session.Download{Name: stem(name) + ".zip", ContentType: "application/zip", Data: z}
 		}
 	}
 
-	s.Finish(out)
-	srv.opts.Logf("session %s READY: %s, %d bytes, gz %s, orig %s%s", s.ID, name, len(data),
+	s.FinishBeam(b, out)
+	srv.opts.Logf("session %s beam %s READY: %s, %d bytes, gz %s, orig %s%s", s.ID, bid, name, len(data),
 		res.GzSHA.Actual[:12], res.OrigSHA.Actual[:12], describeBundle(out.Bundle))
 }
 

@@ -19,18 +19,33 @@ type Store struct {
 	sessions   map[string]*Session
 	ttl        time.Duration
 	max        int
+	maxBeams   int
+	maxGz      int64
 	now        func() time.Time
-	onComplete func(*Session)
+	onComplete func(*Session, *Beam)
 }
 
-// NewStore creates a store with the given TTL and concurrency limit.
+// NewStore creates a store with the given TTL and session concurrency limit.
+// The per-place beam cap defaults to defaultMaxBeams and the per-beam gzip
+// ceiling is off until SetLimits sets them (the tower does, from config).
 func NewStore(ttl time.Duration, max int) *Store {
-	return &Store{sessions: map[string]*Session{}, ttl: ttl, max: max, now: time.Now}
+	return &Store{sessions: map[string]*Session{}, ttl: ttl, max: max, maxBeams: defaultMaxBeams, now: time.Now}
 }
 
-// SetCompleteHook installs the function run (in its own goroutine) when a
-// session fills its last chunk. Set it before creating sessions.
-func (st *Store) SetCompleteHook(fn func(*Session)) {
+// SetLimits sets the per-place beam cap and per-beam gzip ceiling new sessions
+// inherit (maxGz 0 disables the check). Set it before creating sessions.
+func (st *Store) SetLimits(maxBeams int, maxGz int64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if maxBeams > 0 {
+		st.maxBeams = maxBeams
+	}
+	st.maxGz = maxGz
+}
+
+// SetCompleteHook installs the function run (in its own goroutine) when a beam
+// fills its last chunk. Set it before creating sessions.
+func (st *Store) SetCompleteHook(fn func(*Session, *Beam)) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.onComplete = fn
@@ -59,7 +74,9 @@ func (st *Store) Create() (*Session, error) {
 		now:        st.now,
 		ttl:        st.ttl,
 		expiresAt:  now.Add(st.ttl),
-		state:      StateWaitingManifest,
+		maxBeams:   st.maxBeams,
+		maxGz:      st.maxGz,
+		beams:      map[uint32]*Beam{},
 		subs:       map[*Subscriber]struct{}{},
 		onComplete: st.onComplete,
 	}

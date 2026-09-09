@@ -127,16 +127,17 @@ On the tower (ADR 0005), and identically in the offline `internal/beam.Decode`:
 
 1. Frames arrive as base45 strings; decode → parse → CRC check → dedup by
    `(session, type, seq)`.
-2. Frames are held per sender session. The first MANIFEST seen binds the
-   tower session to its sender session; frames held for other sender
-   sessions are discarded and later ones rejected (counted as `bad` in the
-   API). Holding DATA frames that precede the manifest matters because a
-   scanner usually joins mid-loop.
-3. The MANIFEST sets `N` and the expected hashes; the state moves
-   `WAITING_MANIFEST → RECEIVING`.
-4. DATA chunks (as degree-1 packets) and FOUNTAIN packets feed one peeling
-   decoder; `have` and the bitmap report recovered chunks. When every chunk
-   is recovered the state moves to `VERIFYING`. Packets from several
+2. Each sender session is its own beam within the tower session (ADR 0015). A
+   MANIFEST for a new sender creates a beam; a MANIFEST for a known one is a
+   re-inserted schedule frame (counted as `dup`). DATA/FOUNTAIN frames that
+   precede their own manifest are held per sender and adopted when it arrives —
+   which matters because a scanner usually joins mid-loop — without disturbing
+   any other beam. This is the multi-beam place: one join field, many payloads.
+3. A beam is born `RECEIVING` when its MANIFEST sets `N` and the expected
+   hashes; there is no place-level `WAITING_MANIFEST`.
+4. DATA chunks (as degree-1 packets) and FOUNTAIN packets feed that beam's
+   peeling decoder; its `have` and bitmap report recovered chunks. When every
+   chunk is recovered the beam moves to `VERIFYING`. Packets from several
    scanners merge in any order.
 5. Verify: concatenate chunks in `seq` order → the length must equal
    `gz_size` and the sha256 must equal `gz_sha256` → gunzip → the length must
@@ -175,5 +176,6 @@ sender and never regenerated from Go (ADR 0010).
 `session` in the frame header is a u32 minted by `airlift` per run, from the
 OS CSPRNG or, with `--seed N`, deterministically so that dumps are
 reproducible. The tower session (`sid` + token) is minted by the tower when
-the dashboard creates one. A tower session accepts frames from exactly one
-sender session, bound by the first MANIFEST it sees.
+the dashboard creates one. A tower session is a place that holds one beam per
+distinct sender session; the sender u32 keys the beam (`bid` = its eight hex
+digits) and never leaves the frame header (ADR 0015).

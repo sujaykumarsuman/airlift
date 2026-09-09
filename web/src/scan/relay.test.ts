@@ -2,13 +2,11 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { IngestResult } from "../shared/types";
 import { Relay } from "./relay";
 
-const ok = (frames: string[], state: IngestResult["state"] = "RECEIVING"): IngestResult => ({
+const ok = (frames: string[], completed: string[] = []): IngestResult => ({
   accepted: frames.length,
   dup: 0,
   bad: 0,
-  have: frames.length,
-  total: 100,
-  state,
+  completed_beams: completed,
 });
 
 beforeEach(() => vi.useFakeTimers());
@@ -26,7 +24,7 @@ test("dedups by content and batches after 250 ms", async () => {
   await vi.advanceTimersByTimeAsync(1);
   expect(post).toHaveBeenCalledTimes(1);
   expect(post.mock.calls[0]?.[0]).toEqual(["A", "B"]);
-  expect(relay.stats).toMatchObject({ sent: 2, accepted: 2, buffered: 0, inflight: false, state: "RECEIVING" });
+  expect(relay.stats).toMatchObject({ sent: 2, accepted: 2, buffered: 0, inflight: false });
   expect(relay.push("A")).toBe(false); // still remembered after sending
 });
 
@@ -71,15 +69,18 @@ test("keeps buffering and retries with backoff; nothing is dropped", async () =>
   expect(Math.max(...updates)).toBe(3);
 });
 
-test("stops once the session leaves the receiving states", async () => {
-  const post = vi.fn(async (frames: string[]) => ok(frames, "VERIFYING"));
+test("records completed beams but keeps relaying (a place holds many)", async () => {
+  const post = vi.fn(async (frames: string[]) => ok(frames, frames.includes("A") ? ["000000a1"] : []));
   const relay = new Relay({ post });
   relay.push("A");
   await vi.advanceTimersByTimeAsync(250);
-  expect(relay.stats.done).toBe(true);
-  expect(relay.push("B")).toBe(false);
-  await vi.advanceTimersByTimeAsync(1000);
-  expect(post).toHaveBeenCalledTimes(1);
+  expect(relay.stats.completed).toEqual(["000000a1"]);
+  // A beam finishing does not stop the relay: the next beam's frames still go.
+  expect(relay.push("B")).toBe(true);
+  await vi.advanceTimersByTimeAsync(250);
+  expect(post).toHaveBeenCalledTimes(2);
+  expect(post.mock.calls[1]?.[0]).toEqual(["B"]);
+  expect(relay.stats.completed).toEqual(["000000a1"]); // not duplicated
 });
 
 test("stop cancels pending sends", async () => {

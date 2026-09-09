@@ -31,7 +31,8 @@ type Options struct {
 	Logf          func(format string, args ...any)
 }
 
-// Report is what happened.
+// Report is what happened. Have/Total/State describe the one beam this dump
+// fed (a dump is a single sender session).
 type Report struct {
 	Passes   int
 	Posted   int
@@ -45,16 +46,15 @@ type Report struct {
 }
 
 type ingestResponse struct {
-	Accepted int           `json:"accepted"`
-	Dup      int           `json:"dup"`
-	Bad      int           `json:"bad"`
-	Have     int           `json:"have"`
-	Total    int           `json:"total"`
-	State    session.State `json:"state"`
+	Accepted       int      `json:"accepted"`
+	Dup            int      `json:"dup"`
+	Bad            int      `json:"bad"`
+	CompletedBeams []string `json:"completed_beams"`
 }
 
-// Run relays dump into session sid at base until the session leaves the
-// receiving states or the passes run out, then waits for verification.
+// Run relays dump into session sid at base. A dump is one sender session, so it
+// feeds one beam (bid = the sender in hex); it stops once that beam fills or the
+// passes run out, then waits for the beam's verification.
 func Run(ctx context.Context, client *http.Client, base, sid, token string, dump *beam.Dump, opts Options) (*Report, error) {
 	if opts.Passes <= 0 {
 		opts.Passes = 10
@@ -73,13 +73,14 @@ func Run(ctx context.Context, client *http.Client, base, sid, token string, dump
 		batch = max(1, int(opts.Rate/4))
 	}
 	rng := rand.New(rand.NewSource(opts.Seed))
-	rep := &Report{State: session.StateWaitingManifest}
+	bid := fmt.Sprintf("%08x", dump.SenderSession)
+	rep := &Report{State: session.StateReceiving}
 	url := base + "/api/sessions/" + sid + "/frames"
-	receiving := true
-	for pass := 1; pass <= opts.Passes && receiving; pass++ {
+	filled := false // our beam has every chunk
+	for pass := 1; pass <= opts.Passes && !filled; pass++ {
 		rep.Passes = pass
 		frames := plan(rng, dump.Loop(opts.ManifestEvery), opts.Drop, opts.Shuffle)
-		for i := 0; i < len(frames) && receiving; i += batch {
+		for i := 0; i < len(frames) && !filled; i += batch {
 			part := frames[i:min(i+batch, len(frames))]
 			if opts.Rate > 0 {
 				if err := pause(ctx, time.Duration(float64(len(part))/opts.Rate*float64(time.Second))); err != nil {
@@ -94,27 +95,40 @@ func Run(ctx context.Context, client *http.Client, base, sid, token string, dump
 			rep.Accepted += resp.Accepted
 			rep.Dup += resp.Dup
 			rep.Bad += resp.Bad
-			rep.Have, rep.Total, rep.State = resp.Have, resp.Total, resp.State
-			receiving = resp.State.Accepting()
+			for _, b := range resp.CompletedBeams {
+				if b == bid {
+					filled = true
+				}
+			}
 		}
-		opts.Logf("replay pass %d: %d/%d chunks, state %s", pass, rep.Have, rep.Total, rep.State)
+		opts.Logf("replay pass %d: posted %d, filled %v", pass, rep.Posted, filled)
 	}
 	deadline := time.Now().Add(opts.Timeout)
 	for {
-		snap, state, err := getSnapshot(ctx, client, base, sid, token)
+		snap, bs, err := getBeamSnapshot(ctx, client, base, sid, token, bid)
 		if err != nil {
 			return rep, err
 		}
-		rep.Snapshot, rep.State = snap, state
-		if state.Terminal() || state.Accepting() {
-			return rep, nil
+		rep.Snapshot = snap
+		if bs != nil {
+			rep.Have, rep.Total, rep.State = bs.Have, bs.Total, bs.State
+			if bs.State.Terminal() {
+				return rep, nil
+			}
+			// The beam filled but has not verified yet: wait.
+			if bs.State == session.StateVerifying {
+				if time.Now().After(deadline) {
+					return rep, errors.New("timed out waiting for verification")
+				}
+				if err := pause(ctx, 50*time.Millisecond); err != nil {
+					return rep, err
+				}
+				continue
+			}
 		}
-		if time.Now().After(deadline) {
-			return rep, errors.New("timed out waiting for verification")
-		}
-		if err := pause(ctx, 50*time.Millisecond); err != nil {
-			return rep, err
-		}
+		// Absent or still RECEIVING and we have stopped feeding: nothing more
+		// will happen, so report where it landed.
+		return rep, nil
 	}
 }
 
@@ -173,29 +187,44 @@ func post(ctx context.Context, client *http.Client, url, token string, frames []
 	return ir, nil
 }
 
-func getSnapshot(ctx context.Context, client *http.Client, base, sid, token string) (json.RawMessage, session.State, error) {
+// beamProbe is the slice of a beam snapshot replay needs to track one beam.
+type beamProbe struct {
+	BID   string        `json:"bid"`
+	Have  int           `json:"have"`
+	Total int           `json:"total"`
+	State session.State `json:"state"`
+}
+
+// getBeamSnapshot fetches the place snapshot and returns the beam with the given
+// bid (nil if it has not appeared yet).
+func getBeamSnapshot(ctx context.Context, client *http.Client, base, sid, token, bid string) (json.RawMessage, *beamProbe, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/sessions/"+sid, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("GET session: %s: %s", resp.Status, bytes.TrimSpace(raw))
+		return nil, nil, fmt.Errorf("GET session: %s: %s", resp.Status, bytes.TrimSpace(raw))
 	}
 	var probe struct {
-		State session.State `json:"state"`
+		Beams []beamProbe `json:"beams"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	return raw, probe.State, nil
+	for i := range probe.Beams {
+		if probe.Beams[i].BID == bid {
+			return raw, &probe.Beams[i], nil
+		}
+	}
+	return raw, nil, nil
 }

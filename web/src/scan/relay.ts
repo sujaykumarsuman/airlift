@@ -1,5 +1,5 @@
 import { cyrb53 } from "../shared/hash";
-import { isReceiving, type IngestResult, type State } from "../shared/types";
+import type { IngestResult } from "../shared/types";
 
 export interface RelayStats {
   seen: number; // strings pushed
@@ -12,10 +12,7 @@ export interface RelayStats {
   inflight: boolean;
   failures: number; // consecutive failed POSTs
   lastError: string | null;
-  have: number;
-  total: number;
-  state: State | null;
-  done: boolean; // the session left the receiving states
+  completed: string[]; // bids the server reported filled, in the order seen
 }
 
 export interface RelayOptions {
@@ -30,8 +27,9 @@ const defaultBackoff = [500, 1000, 2000, 4000, 5000];
 
 /**
  * The stateless relay: dedup by string hash, batch every 250 ms or 50
- * frames, POST, and on failure keep buffering and retry with backoff.
- * Nothing is dropped until the server says the session is past receiving.
+ * frames, POST, and on failure keep buffering and retry with backoff. A place
+ * may hold many beams, so the relay never latches "done" — it keeps feeding
+ * whatever the camera decodes until stop(); the tower sorts frames into beams.
  */
 export class Relay {
   readonly stats: RelayStats = {
@@ -45,10 +43,7 @@ export class Relay {
     inflight: false,
     failures: 0,
     lastError: null,
-    have: 0,
-    total: 0,
-    state: null,
-    done: false,
+    completed: [],
   };
   private readonly seen = new Set<number>();
   private readonly queue: string[] = [];
@@ -67,7 +62,7 @@ export class Relay {
 
   /** Returns true when the string was new for this session. */
   push(text: string): boolean {
-    if (this.stopped || this.stats.done) return false;
+    if (this.stopped) return false;
     this.stats.seen++;
     const h = cyrb53(text);
     if (this.seen.has(h)) {
@@ -116,7 +111,7 @@ export class Relay {
    *  partial remainder waits for the next tick so POSTs stay ≤ 4/s. */
   private async drain(): Promise<void> {
     let first = true;
-    while (!this.stopped && !this.stats.done && this.queue.length > 0 && (first || this.queue.length >= this.maxBatch)) {
+    while (!this.stopped && this.queue.length > 0 && (first || this.queue.length >= this.maxBatch)) {
       first = false;
       const batch = this.queue.slice(0, this.maxBatch);
       this.stats.inflight = true;
@@ -138,20 +133,16 @@ export class Relay {
       this.stats.accepted += res.accepted;
       this.stats.dup += res.dup;
       this.stats.bad += res.bad;
-      this.stats.have = res.have;
-      this.stats.total = res.total;
-      this.stats.state = res.state;
+      for (const bid of res.completed_beams) {
+        if (!this.stats.completed.includes(bid)) this.stats.completed.push(bid);
+      }
       this.stats.failures = 0;
       this.stats.lastError = null;
       this.stats.inflight = false;
-      if (!isReceiving(res.state)) {
-        this.stats.done = true;
-        this.queue.length = 0;
-      }
       this.stats.buffered = this.queue.length;
       this.emit();
     }
-    if (!this.stopped && !this.stats.done && this.queue.length > 0) this.schedule(this.flushMs, false);
+    if (!this.stopped && this.queue.length > 0) this.schedule(this.flushMs, false);
   }
 
   private emit(): void {

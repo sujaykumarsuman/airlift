@@ -2,9 +2,8 @@ import "../shared/style.css";
 import { eventsURL, postFrames } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw } from "../shared/dom";
-import { hex8 } from "../shared/format";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import { isTerminal, type Snapshot } from "../shared/types";
+import type { Beam, Snapshot } from "../shared/types";
 import {
   activeDeviceId,
   describeCamera,
@@ -73,16 +72,27 @@ const relay = new Relay({
   },
 });
 
+/** The beam the scanner is feeding now: the last one still receiving, else the
+ *  most recently arrived. A place may hold several; the scan page tracks one. */
+function activeBeam(): Beam | null {
+  if (!snap || snap.beams.length === 0) return null;
+  for (let i = snap.beams.length - 1; i >= 0; i--) {
+    if (snap.beams[i]!.state === "RECEIVING") return snap.beams[i]!;
+  }
+  return snap.beams[snap.beams.length - 1]!;
+}
+
 function render(): void {
-  const total = snap?.total ?? 0;
-  const have = snap?.have ?? relayStats?.have ?? 0;
-  progressEl.textContent = total > 0 ? `${have} / ${total}` : snap ? "waiting for manifest" : "…";
-  const state = snap?.state ?? "connecting";
-  stateEl.textContent = state.replace("_", " ").toLowerCase();
+  const beam = activeBeam();
+  const total = beam?.total ?? 0;
+  const have = beam?.have ?? 0;
+  progressEl.textContent = total > 0 ? `${have} / ${total}` : snap ? "waiting for a beam" : "…";
+  const state = beam?.state ?? (snap ? "waiting" : "connecting");
+  stateEl.textContent = state.toLowerCase();
   stateEl.dataset.state = state;
-  if (snap && total > 0) {
+  if (beam && total > 0) {
     bitmapCanvas.hidden = false;
-    drawBitmap(bitmapCanvas, decodeBitmap(snap.bitmap, total), { cell: 6, gap: 1 });
+    drawBitmap(bitmapCanvas, decodeBitmap(beam.bitmap, total), { cell: 6, gap: 1 });
   } else {
     bitmapCanvas.hidden = true;
   }
@@ -95,10 +105,11 @@ function render(): void {
       parts.push(`buffered ${relayStats.buffered}${relayStats.failures ? ` · retrying (${relayStats.lastError ?? "network"})` : ""}`);
     }
   }
-  if (snap?.sender_session != null) parts.push(`sender ${hex8(snap.sender_session)}`);
+  if (snap && snap.beams.length > 1) parts.push(`${snap.beams.length} beams`);
+  if (beam) parts.push(`beam ${beam.bid}`);
   if (connection !== "open") parts.push(`link: ${connection}`);
   statsEl.innerHTML = html`${parts.map((p) => html`<span>${p}</span>`)}`.html;
-  messageEl.textContent = snap?.state === "READY" ? "Done. The tower has the file." : (snap?.error ?? message);
+  messageEl.textContent = beam?.state === "READY" ? "Beam received. Point at the next, or stop." : (beam?.error ?? message);
   document.body.dataset.state = state;
 }
 
@@ -110,11 +121,9 @@ function subscribeProgress(as: "viewer" | "relay"): () => void {
     {
       onEvent: (ev) => {
         if (ev.event === "state") {
+          // A place stays open across beams; keep relaying whatever the camera
+          // decodes so the operator can move on to the next beam.
           snap = JSON.parse(ev.data) as Snapshot;
-          if (isTerminal(snap.state)) {
-            stopCamera();
-            relay.stop();
-          }
         } else if (ev.event === "closed") {
           message = "The session was closed on the tower.";
           stopCamera();

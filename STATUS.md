@@ -15,9 +15,20 @@
   updated. Verified live: `/api/info`, `<base href>`, session create over plain
   HTTP, config + data-dir sentinel; a prefix-strip httptest proves rooted
   routing behind `/airlift`.
-- **Next**: 6.3 multi-beam session core (the operator override), then on-disk
-  (6.4), clients/password/limits (6.5), lifecycle (6.6), web lifecycle UI (6.7).
-  Still single-transfer until 6.3.
+- **6.3 multi-beam session core** (done, ADR 0015): a session is now a *place*
+  holding a list of beams keyed by the sender u32 (`bid` = its hex). `Session`
+  routes each frame to its beam; a new sender's MANIFEST births a beam, a known
+  one's is `dup`, pre-manifest frames are held per sender and adopted draining
+  only that sender's bucket (never the whole hold). Each beam runs
+  RECEIVING → VERIFYING → READY | FAILED on its own decoder; `max_beams` and a
+  per-beam gzip ceiling bound the place. Snapshot is a place envelope
+  (`{sid, relays, beams[], expires_at}`); frames reply is `completed_beams`;
+  downloads are `?beam=<bid>&as=…`. Web: types split into `Beam`/`Snapshot`, the
+  relay no longer latches `done`, the scan page tracks an active beam, the
+  dashboard lists beam cards. `WAITING_MANIFEST` removed. API.md/PROTOCOL.md/
+  CLAUDE.md updated; two-beam end-to-end test added. Go + web gates green.
+- **Next**: on-disk (6.4), clients/password/limits (6.5), lifecycle (6.6), web
+  lifecycle UI (6.7).
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
@@ -53,16 +64,11 @@
 
 ## Next
 
-- 6.3 multi-beam session core (the operator override: a session is a place
-  holding a list of beams keyed by sender-session id), then 6.4 per-beam
-  on-disk + downloads-from-disk, 6.5 open creation + clients + password + rate
-  limits, 6.6 lifecycle (status + three clocks + terminate/extend/review), 6.7
-  web lifecycle UI. ADR 0013.
-- **Multiple beams per session** (operator request): a live session should
-  accept and list several named beams. The tower today binds one sender session
-  per tower session (the first MANIFEST), so this needs the Phase 6 session
-  model — a session holding N payloads keyed by beam name, each with its own
-  reassembly and download. Design it there.
+- 6.4 per-beam on-disk + downloads-from-disk + `session.json`, 6.5 open creation
+  + clients + password + rate limits (incl. per-session `max_age` override,
+  airlift-admin only; beam removal + auto-evict oldest terminal at cap), 6.6
+  lifecycle (status + three clocks + terminate/extend/review/reopen), 6.7 web
+  lifecycle UI. ADR 0013.
 
 ## Open questions
 

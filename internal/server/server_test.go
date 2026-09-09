@@ -114,6 +114,23 @@ func (h *harness) snapshot(t *testing.T, c created) session.Snapshot {
 	return snap
 }
 
+// oneBeam asserts the place holds exactly one beam and returns it. Most tests
+// feed a single dump, so its beam is the whole story.
+func (h *harness) oneBeam(t *testing.T, c created) session.BeamSnapshot {
+	t.Helper()
+	snap := h.snapshot(t, c)
+	if len(snap.Beams) != 1 {
+		t.Fatalf("want exactly one beam, got %d: %+v", len(snap.Beams), snap.Beams)
+	}
+	return snap.Beams[0]
+}
+
+// download fetches one beam's result by bid and `as` key.
+func (h *harness) download(t *testing.T, c created, bid, as string) (*http.Response, []byte) {
+	t.Helper()
+	return h.do(t, "GET", "/api/sessions/"+c.SID+"/download?beam="+bid+"&as="+as, c.Token, nil)
+}
+
 func (h *harness) replay(t *testing.T, c created, d *beam.Dump, opts replay.Options) *replay.Report {
 	t.Helper()
 	rep, err := replay.Run(context.Background(), h.ts.Client(), h.ts.URL, c.SID, c.Token, d, opts)
@@ -184,13 +201,13 @@ func TestEndToEndGoPackBeam(t *testing.T) {
 	if rep.State != session.StateReady {
 		t.Fatalf("not READY: %+v\n%s", rep, rep.Snapshot)
 	}
-	snap := h.snapshot(t, c)
-	if snap.Name != "multi" || strings.Join(snap.Downloads, ",") != "raw,zip" {
-		t.Fatalf("snapshot %+v", snap)
+	b := h.oneBeam(t, c)
+	if b.Name != "multi" || strings.Join(b.Downloads, ",") != "raw,zip" {
+		t.Fatalf("beam %+v", b)
 	}
 	// The zip download unpacks to the source tree. (Downloads are served from
 	// memory this phase; per-beam on-disk persistence returns in a later step.)
-	_, body := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=zip", c.Token, nil)
+	_, body := h.download(t, c, b.BID, "zip")
 	got := unzip(t, body)
 	sameTree(t, got, readTree(t, filepath.Join(fixtures, "multi", "tree")), "go-beam zip")
 }
@@ -230,31 +247,31 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 		t.Fatalf("report %+v", rep)
 	}
 
-	snap := h.snapshot(t, c)
-	if snap.State != session.StateReady || snap.Have != snap.Total || snap.Total != d.Manifest.Total() {
-		t.Fatalf("snapshot %+v", snap)
+	b := h.oneBeam(t, c)
+	if b.State != session.StateReady || b.Have != b.Total || b.Total != d.Manifest.Total() {
+		t.Fatalf("beam %+v", b)
 	}
-	if *snap.SenderSession != d.SenderSession || snap.Name != "bundle-base64.txt" || snap.Error != nil {
-		t.Fatalf("snapshot %+v", snap)
+	if b.SenderSession != d.SenderSession || b.Name != "bundle-base64.txt" || b.Error != nil {
+		t.Fatalf("beam %+v", b)
 	}
-	v := snap.Verdicts
+	v := b.Verdicts
 	if v.GzSHA == nil || !v.GzSHA.OK || v.GzSHA.Actual != d.Manifest.GzSHA256 || v.GzSHA.Expected != v.GzSHA.Actual {
 		t.Fatalf("gz verdict %+v", v.GzSHA)
 	}
 	if v.OrigSHA == nil || !v.OrigSHA.OK || v.OrigSHA.Actual != d.Manifest.OrigSHA256 {
 		t.Fatalf("orig verdict %+v", v.OrigSHA)
 	}
-	if v.Bundle == nil || !v.Bundle.OK || snap.Bundle == nil || snap.Bundle.Files != 7 || len(snap.Bundle.Paths) != 7 {
-		t.Fatalf("bundle verdict %+v summary %+v", v.Bundle, snap.Bundle)
+	if v.Bundle == nil || !v.Bundle.OK || b.Bundle == nil || b.Bundle.Files != 7 || len(b.Bundle.Paths) != 7 {
+		t.Fatalf("bundle verdict %+v summary %+v", v.Bundle, b.Bundle)
 	}
-	if strings.Join(snap.Downloads, ",") != "raw,zip" {
-		t.Fatalf("downloads %v", snap.Downloads)
+	if strings.Join(b.Downloads, ",") != "raw,zip" {
+		t.Fatalf("downloads %v", b.Downloads)
 	}
 	wantTree := readTree(t, filepath.Join(fixtures, "multi", "tree"))
 
 	// raw download is the byte-identical input
 	input, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
-	resp, body := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=raw", c.Token, nil)
+	resp, body := h.download(t, c, b.BID, "raw")
 	if resp.StatusCode != 200 || !bytes.Equal(body, input) {
 		t.Fatalf("raw download: %s, %d bytes", resp.Status, len(body))
 	}
@@ -262,7 +279,7 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 		t.Fatalf("content-disposition %q", cd)
 	}
 	// zip download unpacks to the fixture tree with modes
-	resp, body = h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=zip", c.Token, nil)
+	resp, body = h.download(t, c, b.BID, "zip")
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/zip" {
 		t.Fatalf("zip download: %s %s", resp.Status, resp.Header.Get("Content-Type"))
 	}
@@ -284,7 +301,7 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 	}
 	sameTree(t, gotZip, wantTree, "zip")
 	// no bare-file download for a multi-file bundle
-	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=file", c.Token, nil); resp.StatusCode != http.StatusConflict {
+	if resp, _ := h.download(t, c, b.BID, "file"); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("file download: %s", resp.Status)
 	}
 	// late frames after READY are harmless
@@ -306,11 +323,11 @@ func TestSingleFileBundle(t *testing.T) {
 	if rep.State != session.StateReady || rep.Passes != 1 {
 		t.Fatalf("%+v", rep)
 	}
-	snap := h.snapshot(t, c)
-	if strings.Join(snap.Downloads, ",") != "raw,file" || snap.Bundle.Files != 1 {
-		t.Fatalf("%+v", snap)
+	b := h.oneBeam(t, c)
+	if strings.Join(b.Downloads, ",") != "raw,file" || b.Bundle.Files != 1 {
+		t.Fatalf("%+v", b)
 	}
-	_, body := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=file", c.Token, nil)
+	_, body := h.download(t, c, b.BID, "file")
 	if string(body) != "hello, airlift\n" {
 		t.Fatalf("file download %q", body)
 	}
@@ -325,12 +342,12 @@ func TestRawFileIsNotABundle(t *testing.T) {
 	if rep := h.replay(t, c, d, replay.Options{Shuffle: true, Seed: 2}); rep.State != session.StateReady {
 		t.Fatalf("%+v", rep)
 	}
-	snap := h.snapshot(t, c)
-	if strings.Join(snap.Downloads, ",") != "raw" || snap.Bundle != nil || snap.Verdicts.Bundle != nil {
-		t.Fatalf("%+v", snap)
+	b := h.oneBeam(t, c)
+	if strings.Join(b.Downloads, ",") != "raw" || b.Bundle != nil || b.Verdicts.Bundle != nil {
+		t.Fatalf("%+v", b)
 	}
 	// The raw download is the byte-identical input.
-	_, got := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=raw", c.Token, nil)
+	_, got := h.download(t, c, b.BID, "raw")
 	if !bytes.Equal(got, data) {
 		t.Fatal("raw download differs")
 	}
@@ -348,17 +365,17 @@ func TestCorruptedChunkFails(t *testing.T) {
 	if rep.State != session.StateFailed {
 		t.Fatalf("%+v", rep)
 	}
-	snap := h.snapshot(t, c)
-	if snap.Error == nil || !strings.Contains(*snap.Error, "gzip blob") || len(snap.Downloads) != 0 {
-		t.Fatalf("%+v", snap)
+	b := h.oneBeam(t, c)
+	if b.Error == nil || !strings.Contains(*b.Error, "gzip blob") || len(b.Downloads) != 0 {
+		t.Fatalf("%+v", b)
 	}
-	if v := snap.Verdicts.GzSHA; v == nil || v.OK || v.Expected != d.Manifest.GzSHA256 || v.Actual == v.Expected {
+	if v := b.Verdicts.GzSHA; v == nil || v.OK || v.Expected != d.Manifest.GzSHA256 || v.Actual == v.Expected {
 		t.Fatalf("gz verdict %+v", v)
 	}
-	if snap.Verdicts.OrigSHA != nil {
-		t.Fatalf("%+v", snap)
+	if b.Verdicts.OrigSHA != nil {
+		t.Fatalf("%+v", b)
 	}
-	if resp, _ := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=raw", c.Token, nil); resp.StatusCode != http.StatusConflict {
+	if resp, _ := h.download(t, c, b.BID, "raw"); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("download from FAILED: %s", resp.Status)
 	}
 }
@@ -372,15 +389,15 @@ func TestBundleWithBadFileFails(t *testing.T) {
 	if rep := h.replay(t, c, d, replay.Options{}); rep.State != session.StateFailed {
 		t.Fatalf("%+v", rep)
 	}
-	snap := h.snapshot(t, c)
-	if snap.Error == nil || !strings.Contains(*snap.Error, "bundle: 1 of 6") {
-		t.Fatalf("%+v", snap)
+	b := h.oneBeam(t, c)
+	if b.Error == nil || !strings.Contains(*b.Error, "bundle: 1 of 6") {
+		t.Fatalf("%+v", b)
 	}
-	if v := snap.Verdicts.Bundle; v == nil || v.OK || !strings.Contains(v.Actual, "notes/NOTES.txt") {
+	if v := b.Verdicts.Bundle; v == nil || v.OK || !strings.Contains(v.Actual, "notes/NOTES.txt") {
 		t.Fatalf("bundle verdict %+v", v)
 	}
-	if !snap.Verdicts.GzSHA.OK || !snap.Verdicts.OrigSHA.OK || len(snap.Downloads) != 0 {
-		t.Fatalf("%+v", snap)
+	if !b.Verdicts.GzSHA.OK || !b.Verdicts.OrigSHA.OK || len(b.Downloads) != 0 {
+		t.Fatalf("%+v", b)
 	}
 }
 
@@ -405,7 +422,7 @@ func TestAuth(t *testing.T) {
 			t.Errorf("%s %s: %s", p.method, other, resp.Status)
 		}
 	}
-	if h.snapshot(t, c).State != session.StateWaitingManifest {
+	if len(h.snapshot(t, c).Beams) != 0 {
 		t.Fatal("session damaged by unauthorised calls")
 	}
 }
@@ -482,7 +499,7 @@ func TestSSE(t *testing.T) {
 	}
 	viewer, vr := open("")
 	defer viewer.Body.Close()
-	if name, snap := readEvent(t, vr); name != "state" || snap.State != session.StateWaitingManifest || snap.Relays != 0 {
+	if name, snap := readEvent(t, vr); name != "state" || len(snap.Beams) != 0 || snap.Relays != 0 {
 		t.Fatalf("first event %s %+v", name, snap)
 	}
 	relay, rr := open("?role=relay")
@@ -493,7 +510,7 @@ func TestSSE(t *testing.T) {
 		t.Fatalf("viewer not told about the relay: %+v", snap)
 	}
 	h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, []byte(`{"frames":["`+d.Frames[0]+`","`+d.Frames[1]+`"]}`))
-	if _, snap := readEvent(t, vr); snap.State != session.StateReceiving || snap.Have != 1 || snap.Total != d.Manifest.Total() {
+	if _, snap := readEvent(t, vr); len(snap.Beams) != 1 || snap.Beams[0].State != session.StateReceiving || snap.Beams[0].Have != 1 || snap.Beams[0].Total != d.Manifest.Total() {
 		t.Fatalf("after frames: %+v", snap)
 	}
 	relay.Body.Close()
@@ -613,16 +630,77 @@ func TestFountainReplayWithLossAndReorder(t *testing.T) {
 	if rep.Passes > 2 || rep.Bad != 0 {
 		t.Fatalf("fountain should finish within two lossy passes: %+v", rep)
 	}
-	snap := h.snapshot(t, c)
-	if snap.Total != d.Manifest.Total() || snap.Have != snap.Total || !snap.Verdicts.OrigSHA.OK || snap.Bundle.Files != 7 {
-		t.Fatalf("%+v", snap)
+	b := h.oneBeam(t, c)
+	if b.Total != d.Manifest.Total() || b.Have != b.Total || !b.Verdicts.OrigSHA.OK || b.Bundle.Files != 7 {
+		t.Fatalf("%+v", b)
 	}
-	if snap.StartedAt == nil || snap.FinishedAt == nil || snap.FinishedAt.Before(*snap.StartedAt) {
-		t.Fatalf("timestamps %v %v", snap.StartedAt, snap.FinishedAt)
+	if b.StartedAt == nil || b.FinishedAt == nil || b.FinishedAt.Before(*b.StartedAt) {
+		t.Fatalf("timestamps %v %v", b.StartedAt, b.FinishedAt)
 	}
 	input, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
-	if _, got := h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=raw", c.Token, nil); !bytes.Equal(got, input) {
+	if _, got := h.download(t, c, b.BID, "raw"); !bytes.Equal(got, input) {
 		t.Fatal("raw download differs")
+	}
+}
+
+// TestTwoBeamsInOnePlace drives two distinct senders into one session over the
+// real HTTP surface: they accumulate as two independent beams, each verifies on
+// its own, and each is downloadable by its own bid.
+func TestTwoBeamsInOnePlace(t *testing.T) {
+	h := start(t, nil)
+	c := h.create(t)
+
+	single, _ := os.ReadFile(filepath.Join(fixtures, "single", "bundle-text.txt"))
+	a, err := beam.Encode(single, "alpha.txt", 200, 0xA1, beam.ModeSequential, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noise := make([]byte, 4000)
+	rand.New(rand.NewSource(9)).Read(noise)
+	b, err := beam.Encode(noise, "bravo.bin", 500, 0xB2, beam.ModeSequential, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Feed both concurrently through loss; the server routes each frame to its
+	// beam by sender u32.
+	var wg sync.WaitGroup
+	for _, d := range []*beam.Dump{a, b} {
+		wg.Add(1)
+		go func(d *beam.Dump) {
+			defer wg.Done()
+			if _, err := replay.Run(context.Background(), h.ts.Client(), h.ts.URL, c.SID, c.Token, d,
+				replay.Options{Drop: 0.2, Shuffle: true, Passes: 6, Seed: int64(d.SenderSession)}); err != nil {
+				t.Errorf("replay %s: %v", d.Manifest.Name, err)
+			}
+		}(d)
+	}
+	wg.Wait()
+
+	snap := h.snapshot(t, c)
+	if len(snap.Beams) != 2 {
+		t.Fatalf("place should hold two beams: %+v", snap.Beams)
+	}
+	byName := map[string]session.BeamSnapshot{}
+	for _, bs := range snap.Beams {
+		if bs.State != session.StateReady {
+			t.Fatalf("beam %s not READY: %+v", bs.Name, bs)
+		}
+		byName[bs.Name] = bs
+	}
+	if byName["alpha.txt"].BID == byName["bravo.bin"].BID {
+		t.Fatalf("two senders collapsed to one bid: %v", byName)
+	}
+	// Each beam's raw download is its own byte-identical input, keyed by bid.
+	if _, got := h.download(t, c, byName["alpha.txt"].BID, "raw"); !bytes.Equal(got, single) {
+		t.Fatal("alpha raw download differs")
+	}
+	if _, got := h.download(t, c, byName["bravo.bin"].BID, "raw"); !bytes.Equal(got, noise) {
+		t.Fatal("bravo raw download differs")
+	}
+	// A bid that is not in the place is a 404, not another beam's data.
+	if resp, _ := h.download(t, c, "0000ffff", "raw"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown beam: %s", resp.Status)
 	}
 }
 
@@ -648,8 +726,8 @@ func relayWork(t *testing.T, h *harness, d *beam.Dump, relays int, drop float64)
 		}(i)
 	}
 	wg.Wait()
-	if h.snapshot(t, c).State != session.StateReady {
-		t.Fatalf("%d relays at drop %v: not READY", relays, drop)
+	if b := h.oneBeam(t, c); b.State != session.StateReady {
+		t.Fatalf("%d relays at drop %v: not READY (%s)", relays, drop, b.State)
 	}
 	least := posted[0]
 	for _, p := range posted[1:] {
@@ -687,7 +765,7 @@ func TestTokensNeverLogged(t *testing.T) {
 	c := h.create(t)
 	h.do(t, "GET", "/api/sessions/"+c.SID, "wrong-"+c.Token, nil)
 	h.replay(t, c, loadVectors(t), replay.Options{})
-	h.do(t, "GET", "/api/sessions/"+c.SID+"/download?as=zip", c.Token, nil)
+	h.download(t, c, h.oneBeam(t, c).BID, "zip")
 	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, nil)
 	mu.Lock()
 	defer mu.Unlock()
