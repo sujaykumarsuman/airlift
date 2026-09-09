@@ -83,6 +83,7 @@ func New(opts Options) *Server {
 	})
 	opts.Store.SetCompleteHook(srv.finalize)
 	opts.Store.SetEvictHook(srv.removeSessionDir)
+	opts.Store.SetBeamEvictHook(srv.removeBeamDir)
 	srv.routes()
 	return srv
 }
@@ -101,6 +102,8 @@ func (srv *Server) routes() {
 	m.HandleFunc("POST /api/sessions/{sid}/frames", srv.client(srv.frames))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.client(srv.download))
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.sessionAdmin(srv.deleteSession))
+	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
+	m.HandleFunc("DELETE /api/sessions/{sid}/beams/{bid}", srv.sessionAdmin(srv.deleteBeam))
 	m.HandleFunc("GET /api/info", srv.info)
 	m.HandleFunc("GET /s/{sid}", srv.page("scan.html", scanPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
@@ -293,6 +296,11 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	send := func() bool {
+		if sub.Evicted() {
+			fmt.Fprint(w, "event: evicted\ndata: {}\n\n")
+			flusher.Flush()
+			return false
+		}
 		if s.Closed() {
 			fmt.Fprint(w, "event: closed\ndata: {}\n\n")
 			flusher.Flush()

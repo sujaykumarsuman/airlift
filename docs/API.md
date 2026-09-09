@@ -7,17 +7,28 @@ and the server tests are its reference clients.
 
 ## Routes
 
+The middle column is the auth tier (see Auth): *public*, *token* (a valid token,
+no client yet), *client* (token + a registered client), *admin* (a session-admin
+client).
+
 ```
-POST   /api/sessions                      → {sid, token, join_url, expires_at}
-GET    /api/sessions/{sid}                token → place snapshot
-GET    /api/sessions/{sid}/events         token → SSE place snapshots
-POST   /api/sessions/{sid}/frames         token → body {frames:[base45,...]}
-                                          → {accepted, dup, bad, completed_beams}
-GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip   token → bytes
-DELETE /api/sessions/{sid}                token
-GET    /api/info                          → {version, public_url, base_path, admin_enabled, caps}
-GET    /                                  tower dashboard
-GET    /s/{sid}                           scan page (token arrives in #t=)
+POST   /api/sessions                  public → body {label?,password?,joiners_admin?,
+                                               max_gz_bytes?,idle_ttl?,inactive_ttl?}
+                                             → {sid, token, client_id, name, join_url, expires_at}
+POST   /api/sessions/{sid}/join       public → body {password, name?} → {token, client_id, name}
+POST   /api/sessions/{sid}/clients    token  → body {name?, role?} → {client_id, name, session_admin, roles}
+GET    /api/sessions/{sid}            client → place snapshot
+GET    /api/sessions/{sid}/events     client → SSE place snapshots
+POST   /api/sessions/{sid}/frames     client → body {frames:[base45,...]}
+                                             → {accepted, dup, bad, completed_beams}
+GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes
+PATCH  /api/sessions/{sid}            admin  → body {password} (set or, with "", clear)
+DELETE /api/sessions/{sid}/clients/{cid}  admin  → evict a client's address
+DELETE /api/sessions/{sid}/beams/{bid}    admin  → remove a beam and its files
+DELETE /api/sessions/{sid}            admin  → delete the session
+GET    /api/info                      public → {version, public_url, base_path, admin_enabled, caps}
+GET    /                              tower dashboard
+GET    /s/{sid}                       scan page (token arrives in #t=)
 ```
 
 `GET /api/info` is unauthenticated (the pages call it before any session
@@ -34,20 +45,37 @@ is client-spoofable and is never trusted on its own.
 
 ## Auth
 
-Every `/api/sessions/{sid}…` call carries the session token in the
-`Authorization: Bearer <token>` header. Tokens are 128-bit random, base64url
-(22 characters), minted with the session; ids are 64-bit random hex. The
-join URL places the token in the fragment (`/s/{sid}#t=<token>`) so it never
-reaches server logs; the scan page reads `location.hash` and sends the
-header. Tokens are never logged.
+A session is multi-user (ADR 0017). Every `/api/sessions/{sid}…` call carries
+the session token in the `Authorization: Bearer <token>` header; tokens are
+128-bit random, base64url (22 characters), minted with the session, and never
+logged. The join URL places the token in the fragment (`/s/{sid}#t=<token>`) so
+it never reaches server logs; the scan page reads `location.hash`.
+
+Beyond the token, most calls also carry a **client id** in the
+`X-Airlift-Client` header. A client is one participant, registered once per
+address (`POST …/clients`, or minted by create/join). The id is rechecked
+against the caller's address on every call, so it is not a secret. There are
+four tiers:
+
+- **public** — no auth: create, join, `/api/info`, static pages.
+- **token** — a valid token, no client needed: register a client.
+- **client** — token + a registered, non-evicted client whose id matches the
+  caller's address: snapshot, events, frames, download.
+- **admin** — a client that is a session admin: delete the session, evict a
+  client, set the password, remove a beam.
+
+A client's roles are the union of its open streams' roles (`?role=relay` on the
+event stream marks a scanner). The creator is the first session admin; password/
+token joiners are admins iff `joiners_admin` was set.
 
 There is no query-string fallback, so browsers use `fetch` throughout: a
 streaming `fetch` with a small SSE parser instead of `EventSource`, and
-`fetch` → blob → object URL instead of a bare download link. The web UI
-(Phase 3) does exactly that.
+`fetch` → blob → object URL instead of a bare download link.
 
-Unknown `sid` → `404`. Missing or wrong token → `401`. Every authenticated
-call refreshes the session's TTL.
+Unknown `sid` → `404`. Missing or wrong token → `401`. A valid token with no or
+an unknown client → `401`; a client id from a different address, a non-admin on
+an admin route, or an evicted address → `403` (an evicted address gets
+`{"error":"evicted"}`). Every authenticated call refreshes the session's TTL.
 
 ## Limits
 
@@ -56,10 +84,15 @@ call refreshes the session's TTL.
 | Request body | `max_body` (default 8 MiB) | `413` |
 | Frames per `POST /frames` | 500 | `413` |
 | Frame string | 4096 characters | counted as `bad` |
-| Beams per place | `max_beams` (default 10) | over-cap MANIFEST counted as `bad` |
+| Beams per place | `max_beams` (default 10) | over-cap MANIFEST auto-evicts the oldest terminal beam, else counted as `bad` |
 | Held pre-manifest senders | 8 (65 536 frames) | further held frames counted as `bad` |
-| Concurrent sessions | 32 | `429` on create |
+| Concurrent sessions | `sessions` (default 32) | `429` + `Retry-After` on create |
+| Create / join / frames rate | `rate_create` / `rate_join` / `rate_frames` (per address; join also per session) | `429` + `Retry-After` |
 | Malformed JSON body | — | `400` |
+| Create option over its cap | — | `400` naming the cap |
+
+Rate budgets come from the config `rate_*` keys (a zero budget disables that
+limit); the frames rate check runs before the body is read.
 
 ## The place model
 
@@ -77,9 +110,20 @@ simply has no beams yet.
 
 ## Create
 
-`POST /api/sessions` → `201 {sid, token, join_url, expires_at}`. `join_url`
-is `<public base>/s/{sid}#t={token}`. In serve mode the tower also prints it,
-with a terminal QR code, to stdout.
+`POST /api/sessions` takes an optional body `{label, password, joiners_admin,
+max_gz_bytes, idle_ttl, inactive_ttl}` (durations in seconds); each limit is
+clamped to its cap, and a value above a cap is a `400` naming it. It registers
+the caller as the first session admin and returns `201 {sid, token, client_id,
+name, join_url, expires_at}`. `join_url` is `<public base>/s/{sid}#t={token}`;
+in serve mode the tower also prints it, with a terminal QR code, to stdout.
+`idle_ttl`/`inactive_ttl` are stored for the lifecycle clocks (a later phase);
+6.5 does not enforce them.
+
+When a password is set the session is also joinable without a token: `POST
+/api/sessions/{sid}/join {password, name}` → `{token, client_id, name}` (a `404`
+when no password is set). `PATCH /api/sessions/{sid} {password}` sets or (with
+`""`) clears it. Passwords are salted SHA-256 in memory, never stored in
+plaintext or logged.
 
 ## Place snapshot
 
@@ -90,6 +134,7 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `sid` | string | tower session id |
 | `relays` | int | open event streams that declared `role=relay` |
 | `beams` | object[] | the beams read into the place, in arrival order |
+| `clients` | object[] | the registered clients: `{client_id, name, roles, session_admin, connected, last_active}` |
 | `expires_at` | RFC 3339 | refreshed on every authenticated call |
 
 Each entry of `beams` is:
@@ -144,9 +189,10 @@ sender's manifest arrives, without disturbing any other beam.
 ## Events
 
 `GET /api/sessions/{sid}/events` → `text/event-stream`: a snapshot on
-connect, one per change (coalesced), a `: keepalive` comment every 15 s, and
-`event: closed` when the session is deleted or expires. `?role=relay` counts
-the connection under `relays`; the dashboard omits it.
+connect, one per change (coalesced), a `: keepalive` comment every 15 s,
+`event: closed` when the session is deleted or expires, and `event: evicted`
+when the viewer's address has been evicted (the stream then ends). `?role=relay`
+counts the connection under `relays` and adds `relay` to the client's roles.
 
 ```
 event: state

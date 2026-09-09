@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/session"
@@ -215,6 +216,39 @@ func (srv *Server) patchSession(w http.ResponseWriter, r *http.Request, s *sessi
 		return
 	}
 	s.SetPassword(*req.Password)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// evictClient bars a client's address from the session (session admin).
+func (srv *Server) evictClient(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
+	cid := r.PathValue("cid")
+	if cid == c.ID {
+		writeError(w, http.StatusBadRequest, "cannot evict yourself")
+		return
+	}
+	if _, ok := s.EvictClientByID(cid); !ok {
+		writeError(w, http.StatusNotFound, "no such client")
+		return
+	}
+	srv.opts.Logf("session %s evicted a client", s.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteBeam removes a beam from the place and reclaims its on-disk directory
+// (session admin).
+func (srv *Server) deleteBeam(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+	sender, err := strconv.ParseUint(r.PathValue("bid"), 16, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed beam id")
+		return
+	}
+	bid, ok := s.RemoveBeam(uint32(sender))
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such beam")
+		return
+	}
+	srv.removeBeamDir(s.ID, bid)
+	srv.opts.Logf("session %s beam %s removed", s.ID, bid)
 	w.WriteHeader(http.StatusNoContent)
 }
 

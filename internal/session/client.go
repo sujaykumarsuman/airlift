@@ -123,6 +123,42 @@ func (s *Session) JoinersAdmin() bool {
 	return s.joinersAdmin
 }
 
+// EvictClientByID bars the address of client cid from the session: every client
+// at that address is removed, the address is remembered as evicted for the
+// session's life, and each of its open streams is flagged and woken so the
+// events handler can send `event: evicted`. Returns the evicted address.
+func (s *Session) EvictClientByID(cid string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clients[cid]
+	if !ok {
+		return "", false
+	}
+	addr := c.Addr
+	s.evicted[addr] = true
+	kept := s.clientOrder[:0]
+	for _, id := range s.clientOrder {
+		if cl := s.clients[id]; cl != nil && cl.Addr == addr {
+			delete(s.clients, id)
+		} else {
+			kept = append(kept, id)
+		}
+	}
+	s.clientOrder = kept
+	delete(s.byAddr, addr)
+	for sub := range s.subs {
+		if sub.client != nil && sub.client.Addr == addr {
+			sub.evicted.Store(true)
+			select {
+			case sub.C <- struct{}{}:
+			default:
+			}
+		}
+	}
+	s.notifyLocked()
+	return addr, true
+}
+
 // uniqueNameLocked cleans a proposed name (or generates one) and makes it unique
 // within the session with a " 2", " 3", … suffix.
 func (s *Session) uniqueNameLocked(proposed string) string {

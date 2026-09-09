@@ -133,6 +133,10 @@ function subscribeProgress(as: "viewer" | "relay"): () => void {
           message = "The session was closed on the tower.";
           stopCamera();
           relay.stop();
+        } else if (ev.event === "evicted") {
+          message = "You were removed from this session.";
+          stopCamera();
+          relay.stop();
         }
         render();
       },

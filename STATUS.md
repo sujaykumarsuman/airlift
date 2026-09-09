@@ -38,7 +38,17 @@
   reclaimed on delete/sweep via a new store `SetEvictHook`. Design + adversarial
   review by workflow; Go gates green under `-race`. `meta.json` not `beam.json`
   (ADR 0010). The session-level `session.json` (clients, lifecycle) is 6.6.
-- **Next**: clients/password/limits (6.5), lifecycle (6.6), web lifecycle UI (6.7).
+- **6.5 open multi-user access** (done, ADR 0017): a client per address
+  (`X-Airlift-Client`) with four auth tiers (public/token/client/admin); open
+  creation with clamped options; salted-SHA-256 password join + `PATCH` to
+  set/clear it; token-bucket rate limits (create/join/frames, 429 +
+  `Retry-After`); address eviction (`event: evicted`, 403); operator beam
+  removal (`DELETE …/beams/{bid}`) + auto-evict of the oldest terminal beam at
+  the cap. `internal/replay` and both web pages register a client; the dashboard
+  lists clients with evict/remove controls; the scan page has a password-join
+  form. API.md/CLAUDE.md + ADR 0017. Landed in three commits; Go gates green
+  under `-race`, web tsc/eslint/vitest green.
+- **Next**: lifecycle (6.6), web lifecycle UI (6.7).
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
@@ -74,12 +84,13 @@
 
 ## Next
 
-- 6.5 open creation + clients + password + rate limits (incl. per-session
-  `max_age` override, airlift-admin only; beam removal + auto-evict oldest
-  terminal at cap), 6.6 lifecycle (status + three clocks +
-  terminate/extend/review/reopen; the session-level `session.json` with clients
-  and lifecycle events; directory cleanup tied to `TERMINATED`/`REJECTED`), 6.7
-  web lifecycle UI. ADR 0013.
+- 6.6 lifecycle (the `status` machine `OPEN/TERMINATING/TERMINATED/
+  PENDING_REVIEW/REJECTED` + three clocks `idle_ttl`/`inactive_ttl`/`max_age` +
+  the activity model + `POST …/ping` + terminate/extend/review/reopen; the
+  session-level `session.json` with clients and lifecycle events; directory
+  cleanup tied to `TERMINATED`/`REJECTED`), 6.7 web lifecycle UI. ADR 0013. The
+  airlift-admin-only per-session `max_age` override needs the admin tier, so it
+  waits for Phase 7.
 
 ## Open questions
 

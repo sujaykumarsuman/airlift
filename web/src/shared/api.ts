@@ -117,6 +117,41 @@ export async function deleteSession(
   if (!resp.ok && resp.status !== 404) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
+/** Evicts a client (session admin). */
+export async function deleteClient(
+  sid: string,
+  token: string,
+  clientId: string,
+  cid: string,
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/clients/${cid}`), {
+    method: "DELETE",
+    headers: clientHeaders(token, clientId),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
+/** Removes a beam and reclaims its files (session admin). */
+export async function deleteBeam(
+  sid: string,
+  token: string,
+  clientId: string,
+  bid: string,
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/beams/${bid}`), {
+    method: "DELETE",
+    headers: clientHeaders(token, clientId),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
+/** True for the 403 {error:"evicted"} an evicted address receives. */
+export function isEvicted(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403 && err.message === "evicted";
+}
+
 export function eventsURL(sid: string, role: "relay" | "viewer"): string {
   return apiURL(`api/sessions/${sid}/events${role === "relay" ? "?role=relay" : ""}`);
 }

@@ -132,6 +132,21 @@ func (srv *Server) removeSessionDir(sid string) {
 	}
 }
 
+// removeBeamDir best-effort removes one beam's tree under a place. sid is 16-hex
+// and bid 8-hex, both minted by airlift; the guards are defence in depth.
+func (srv *Server) removeBeamDir(sid, bid string) {
+	if srv.opts.DataDir == "" {
+		return
+	}
+	if sid == "" || bid == "" || strings.ContainsAny(sid, `/\.`) || strings.ContainsAny(bid, `/\.`) {
+		srv.opts.Logf("refusing to remove suspicious beam dir %q/%q", sid, bid)
+		return
+	}
+	if err := os.RemoveAll(filepath.Join(srv.opts.DataDir, sid, bid)); err != nil {
+		srv.opts.Logf("session %s beam %s: data cleanup failed: %v", sid, bid, err)
+	}
+}
+
 // downloadsList reports which download kinds a map holds, in the snapshot order.
 func downloadsList(m map[string]session.Download) []string {
 	out := []string{}

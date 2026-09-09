@@ -328,6 +328,85 @@ func TestHeldSurvivesOtherManifest(t *testing.T) {
 	}
 }
 
+func TestClientRegistryAndEviction(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	a := s.RegisterClient("10.0.0.1", "alice", true)
+	if a.Name != "alice" || !a.SessionAdmin {
+		t.Fatalf("first client %+v", a)
+	}
+	// Same address returns the same client; a proposed name is ignored; admin
+	// upgrades but never downgrades.
+	again := s.RegisterClient("10.0.0.1", "bob", false)
+	if again != a || again.Name != "alice" || !again.SessionAdmin {
+		t.Fatalf("re-register %+v", again)
+	}
+	// A different address is a different client; a duplicate name is suffixed.
+	b := s.RegisterClient("10.0.0.2", "alice", false)
+	if b == a || b.Name != "alice 2" {
+		t.Fatalf("second client %+v", b)
+	}
+	if _, ok := s.ClientByID(a.ID); !ok {
+		t.Fatal("ClientByID")
+	}
+	if s.Snapshot().Clients[0].Name != "alice" || len(s.Snapshot().Clients) != 2 {
+		t.Fatalf("clients %+v", s.Snapshot().Clients)
+	}
+	// Evicting b's address removes b and bars the address.
+	addr, ok := s.EvictClientByID(b.ID)
+	if !ok || addr != "10.0.0.2" || !s.Evicted("10.0.0.2") {
+		t.Fatalf("evict %v %v", addr, ok)
+	}
+	if _, ok := s.ClientByID(b.ID); ok {
+		t.Fatal("evicted client still present")
+	}
+	if len(s.Snapshot().Clients) != 1 {
+		t.Fatal("evicted client still listed")
+	}
+	if _, ok := s.EvictClientByID("nope"); ok {
+		t.Fatal("evicting an unknown client")
+	}
+}
+
+func TestRemoveBeamAndAutoEvict(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	st.SetLimits(2, 0)
+	evicted := make(chan string, 4)
+	st.SetBeamEvictHook(func(_, bid string) { evicted <- bid })
+	s, _ := st.Create()
+	d := vectors(t)
+	// Beam A completes (VERIFYING), beam B stays RECEIVING. At the cap a third
+	// MANIFEST finds no terminal victim → bad.
+	s.Ingest(d.Frames)                                                // A → VERIFYING
+	s.Ingest([]string{reSender(t, d.Frames, d.SenderSession^0x1)[0]}) // B RECEIVING
+	if r := s.Ingest([]string{reSender(t, d.Frames, d.SenderSession^0x2)[0]}); r.Bad != 1 {
+		t.Fatalf("cap with no terminal victim: %+v", r)
+	}
+	// Finish A (terminal); now a new MANIFEST auto-evicts A and admits the beam.
+	s.FinishBeam(beamOf(s, d.SenderSession), Outcome{})
+	if r := s.Ingest([]string{reSender(t, d.Frames, d.SenderSession^0x2)[0]}); r.Accepted != 1 {
+		t.Fatalf("auto-evict should admit the new beam: %+v", r)
+	}
+	if _, ok := s.BeamState(d.SenderSession); ok {
+		t.Fatal("the oldest terminal beam was not evicted")
+	}
+	select {
+	case bid := <-evicted:
+		if bid != bidOf(d.SenderSession) {
+			t.Fatalf("evicted the wrong beam: %s", bid)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("beam-evict hook not fired for the auto-evicted beam")
+	}
+	// Explicit RemoveBeam of B; an absent sender is a miss.
+	if bid, ok := s.RemoveBeam(d.SenderSession ^ 0x1); !ok || bid != bidOf(d.SenderSession^0x1) {
+		t.Fatalf("RemoveBeam %v %v", bid, ok)
+	}
+	if _, ok := s.RemoveBeam(0xDEAD); ok {
+		t.Fatal("RemoveBeam of an absent sender")
+	}
+}
+
 func TestManifestDupCollisionAndCaps(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	st.SetLimits(2, 0) // cap at two beams

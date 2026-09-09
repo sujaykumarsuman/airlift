@@ -115,6 +115,9 @@ type Subscriber struct {
 	evicted atomic.Bool // set when the client's address is evicted (6.5)
 }
 
+// Evicted reports whether this stream's client has been evicted.
+func (sub *Subscriber) Evicted() bool { return sub.evicted.Load() }
+
 // Beam is one named payload accumulating in a session, identified by the
 // sender-session u32 from the frame header. It is created the instant its
 // MANIFEST arrives and runs RECEIVING → VERIFYING → READY | FAILED independently
@@ -136,7 +139,7 @@ type Beam struct {
 	ticks      []time.Time // per-beam decode-fps window
 
 	outcome Outcome
-	arrival int // index into Session.order, for stable listing
+	removed bool // operator removed it (or it was auto-evicted at the cap)
 }
 
 // bid is the beam's identifier for URLs, downloads and the web: eight hex
@@ -166,8 +169,9 @@ type Session struct {
 	held      map[uint32]map[heldKey][]byte // pre-manifest frames, keyed by sender
 	heldCount int
 
-	subs       map[*Subscriber]struct{}
-	onComplete func(*Session, *Beam)
+	subs        map[*Subscriber]struct{}
+	onComplete  func(*Session, *Beam)
+	onBeamEvict func(sid, bid string) // reclaims a removed beam's on-disk dir
 
 	// Access layer (6.5, ADR 0017): one client per address, a stable listing
 	// order, the names in use for uniqueness, and the addresses evicted for the
@@ -216,6 +220,57 @@ func (s *Session) Closed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// oldestTerminalLocked returns the earliest-arrived beam that has finished
+// (READY or FAILED), the safe victim to evict at the cap.
+func (s *Session) oldestTerminalLocked() (uint32, bool) {
+	for _, sender := range s.order {
+		if b := s.beams[sender]; b != nil && b.state.Terminal() {
+			return sender, true
+		}
+	}
+	return 0, false
+}
+
+// removeBeamLocked drops a beam from the place and its hold bucket, marking it
+// removed so a late finalize reclaims its own directory. It does not notify.
+func (s *Session) removeBeamLocked(sender uint32) {
+	b := s.beams[sender]
+	if b == nil {
+		return
+	}
+	b.removed = true
+	delete(s.beams, sender)
+	for i, id := range s.order {
+		if id == sender {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
+	s.dropHeldLocked(sender)
+}
+
+// RemoveBeam removes a beam by sender and returns its bid. The caller reclaims
+// its on-disk directory.
+func (s *Session) RemoveBeam(sender uint32) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.beams[sender]
+	if b == nil {
+		return "", false
+	}
+	bid := b.BID()
+	s.removeBeamLocked(sender)
+	s.notifyLocked()
+	return bid, true
+}
+
+// BeamRemoved reports whether a beam has been removed from its place.
+func (s *Session) BeamRemoved(b *Beam) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return b.removed
 }
 
 // BeamState reports a beam's transfer state, and whether it exists.
@@ -293,6 +348,7 @@ func (s *Session) Ingest(texts []string) IngestResult {
 	now := s.now()
 	var r IngestResult
 	var completed []*Beam
+	var evicted []string
 	for _, text := range texts {
 		fr, err := proto.ParseText(text)
 		if err != nil {
@@ -301,7 +357,7 @@ func (s *Session) Ingest(texts []string) IngestResult {
 		}
 		switch fr.Type {
 		case proto.TypeManifest:
-			if b := s.ingestManifestLocked(fr, now, &r); b != nil {
+			if b := s.ingestManifestLocked(fr, now, &r, &evicted); b != nil {
 				completed = append(completed, b)
 			}
 		case proto.TypeData, proto.TypeFountain:
@@ -322,10 +378,16 @@ func (s *Session) Ingest(texts []string) IngestResult {
 		r.CompletedBeams = append(r.CompletedBeams, b.BID())
 	}
 	hook := s.onComplete
+	bhook := s.onBeamEvict
 	s.mu.Unlock()
 	if hook != nil {
 		for _, b := range completed {
 			go hook(s, b)
+		}
+	}
+	if bhook != nil {
+		for _, bid := range evicted {
+			go bhook(s.ID, bid)
 		}
 	}
 	return r
@@ -333,8 +395,11 @@ func (s *Session) Ingest(texts []string) IngestResult {
 
 // ingestManifestLocked creates a beam for a new sender, or dedups a re-inserted
 // schedule manifest for a known one. A differing sender is a different beam,
-// never an error. Returns the beam if it completed from its drained hold bucket.
-func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestResult) *Beam {
+// never an error. At the beam cap it auto-evicts the oldest terminal beam to
+// make room (appending its bid to *evicted for disk cleanup), rejecting only
+// when nothing is terminal. Returns the beam if it completed from its drained
+// hold bucket.
+func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestResult, evicted *[]string) *Beam {
 	if _, ok := s.beams[fr.Session]; ok {
 		r.Dup++ // the every-20-frames re-loop, for a beam in any state
 		return nil
@@ -345,15 +410,19 @@ func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestR
 		return nil
 	}
 	if len(s.beams) >= s.maxBeams {
-		r.Bad++ // the place is full; the operator can remove a beam (6.5)
-		return nil
+		victim, ok := s.oldestTerminalLocked()
+		if !ok {
+			r.Bad++ // the place is full and nothing is terminal to evict
+			return nil
+		}
+		*evicted = append(*evicted, s.beams[victim].BID())
+		s.removeBeamLocked(victim) // its end-of-Ingest coalesced notify covers this
 	}
 	b := &Beam{
 		Sender:    fr.Session,
 		manifest:  m,
 		total:     m.Total(),
 		state:     StateReceiving,
-		arrival:   len(s.order),
 		startedAt: now,
 	}
 	s.beams[fr.Session] = b

@@ -113,6 +113,10 @@ func (srv *Server) finalize(s *session.Session, b *session.Beam) {
 			// sets the closed flag before that cleanup, so a closed session seen
 			// here means our directory would be orphaned; reclaim it ourselves.
 			srv.removeSessionDir(s.ID)
+		} else if s.BeamRemoved(b) {
+			// The beam was removed or auto-evicted mid-verification; its dir
+			// cleanup may have run before our write, so reclaim it.
+			srv.removeBeamDir(s.ID, bid)
 		} else {
 			for k, d := range disk {
 				out.Downloads[k] = d // swap MemBlob → fileBlob; the in-memory copy is now unreachable

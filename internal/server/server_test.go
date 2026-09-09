@@ -1442,6 +1442,150 @@ func TestPersistReclaimedWhenSessionEvicted(t *testing.T) {
 	}
 }
 
+func TestEvictClient(t *testing.T) {
+	h := start(t, func(o *Options) { o.TrustedProxies = ParseTrustedProxies([]string{"127.0.0.1", "::1"}) })
+	c := h.create(t)                        // admin at 127.0.0.1
+	viewer := h.registerAs(t, c, "9.9.9.9") // a viewer at 9.9.9.9
+	// The viewer opens an SSE stream.
+	req, _ := http.NewRequest("GET", h.ts.URL+"/api/sessions/"+c.SID+"/events", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("X-Airlift-Client", viewer)
+	req.Header.Set("X-Forwarded-For", "9.9.9.9")
+	resp, err := h.ts.Client().Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("viewer sse: %v %v", err, resp)
+	}
+	defer resp.Body.Close()
+	rd := bufio.NewReader(resp.Body)
+	if name, _ := readEvent(t, rd); name != "state" {
+		t.Fatalf("first event %s", name)
+	}
+	// Self-eviction is refused.
+	if r, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID+"/clients/"+c.ClientID, c.Token, c.ClientID, nil); r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("self-evict: %s", r.Status)
+	}
+	// The admin evicts the viewer.
+	if r, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID+"/clients/"+viewer, c.Token, c.ClientID, nil); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("evict: %s", r.Status)
+	}
+	// The viewer's stream ends with event: evicted.
+	for {
+		if name, _ := readEvent(t, rd); name == "evicted" {
+			break
+		}
+	}
+	// The address is barred: re-registration and frames are 403 evicted.
+	if r, body := h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/clients", c.Token, "", "9.9.9.9", []byte(`{}`)); r.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "evicted") {
+		t.Fatalf("re-register: %s %s", r.Status, body)
+	}
+	if r, _ := h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, viewer, "9.9.9.9", []byte(`{"frames":[]}`)); r.StatusCode != http.StatusForbidden {
+		t.Fatalf("frames from evicted: %s", r.Status)
+	}
+	// Evicting an unknown client is 404.
+	if r, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID+"/clients/nope", c.Token, c.ClientID, nil); r.StatusCode != http.StatusNotFound {
+		t.Fatalf("evict unknown: %s", r.Status)
+	}
+}
+
+func TestDeleteBeam(t *testing.T) {
+	h := start(t, func(o *Options) { o.TrustedProxies = ParseTrustedProxies([]string{"127.0.0.1", "::1"}) })
+	c := h.create(t)
+	h.replay(t, c, loadVectors(t), replay.Options{})
+	b := h.oneBeam(t, c)
+	dir := filepath.Join(h.dataDir, c.SID, b.BID)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("no beam dir before remove: %v", err)
+	}
+	// A plain client cannot remove a beam.
+	plain := h.registerAs(t, c, "8.8.8.8")
+	if r, _ := h.doXFF(t, "DELETE", "/api/sessions/"+c.SID+"/beams/"+b.BID, c.Token, plain, "8.8.8.8", nil); r.StatusCode != http.StatusForbidden {
+		t.Fatalf("plain-client remove: %s", r.Status)
+	}
+	// Malformed and unknown bids.
+	if r, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID+"/beams/zzzz", c.Token, c.ClientID, nil); r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed bid: %s", r.Status)
+	}
+	if r, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID+"/beams/0000ffff", c.Token, c.ClientID, nil); r.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown bid: %s", r.Status)
+	}
+	// The admin removes it: gone from the snapshot, its dir reclaimed, download 404.
+	if r, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID+"/beams/"+b.BID, c.Token, c.ClientID, nil); r.StatusCode != http.StatusNoContent {
+		t.Fatalf("remove: %s", r.Status)
+	}
+	if len(h.snapshot(t, c).Beams) != 0 {
+		t.Fatal("beam still listed after remove")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("beam dir survived remove: %v", err)
+	}
+	if r, _ := h.download(t, c, b.BID, "raw"); r.StatusCode != http.StatusNotFound {
+		t.Fatalf("download after remove: %s", r.Status)
+	}
+}
+
+func TestAutoEvictAtCap(t *testing.T) {
+	h := start(t, func(o *Options) {
+		st := session.NewStore(time.Hour, 4)
+		st.SetLimits(2, 0) // at most two beams per place
+		o.Store = st
+	})
+	c := h.create(t)
+	noise := make([]byte, 2000)
+	rand.New(rand.NewSource(3)).Read(noise)
+	var bids []string
+	for _, sess := range []uint32{0x100, 0x200, 0x300} {
+		d, err := beam.Encode(noise, "b", 500, sess, beam.ModeSequential, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep := h.replay(t, c, d, replay.Options{}); rep.State != session.StateReady {
+			t.Fatalf("sess %x: %+v", sess, rep)
+		}
+		bids = append(bids, fmt.Sprintf("%08x", sess))
+	}
+	// The place holds the newest two; the oldest was auto-evicted.
+	snap := h.snapshot(t, c)
+	if len(snap.Beams) != 2 {
+		t.Fatalf("cap not held: %d beams", len(snap.Beams))
+	}
+	got := map[string]bool{}
+	for _, bs := range snap.Beams {
+		got[bs.BID] = true
+	}
+	if got[bids[0]] || !got[bids[1]] || !got[bids[2]] {
+		t.Fatalf("wrong beams remain: %v", got)
+	}
+	// The evicted beam's directory is reclaimed (asynchronously).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(h.dataDir, c.SID, bids[0])); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("auto-evicted beam dir not reclaimed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRemoveBeamDirGuard(t *testing.T) {
+	dd := t.TempDir()
+	srv := New(Options{Store: session.NewStore(time.Hour, 4), DataDir: dd, Logf: t.Logf})
+	// Craft a session dir and a sibling that must not be touched by a bad bid.
+	os.MkdirAll(filepath.Join(dd, "00000001", "0000000a"), 0o755)
+	os.MkdirAll(filepath.Join(dd, "sibling"), 0o755)
+	srv.removeBeamDir("00000001", "../sibling") // refused by the guard
+	if _, err := os.Stat(filepath.Join(dd, "sibling")); err != nil {
+		t.Fatalf("guard let a bad bid escape: %v", err)
+	}
+	srv.removeBeamDir("00000001", "0000000a")
+	if _, err := os.Stat(filepath.Join(dd, "00000001", "0000000a")); !os.IsNotExist(err) {
+		t.Fatalf("beam dir not removed: %v", err)
+	}
+	// A no-op when DataDir is empty.
+	(&Server{opts: Options{Logf: t.Logf}}).removeBeamDir("x", "y")
+}
+
 // TestSweepRemovesSessionData: sweeping an expired session reclaims its data
 // (exercises the evict hook off the store, not only DELETE).
 func TestSweepRemovesSessionData(t *testing.T) {

@@ -66,8 +66,8 @@ const defaultBackoff = [500, 1000, 2000, 4000, 8000];
 
 /**
  * Streams SSE through fetch (EventSource cannot send the auth header).
- * Reconnects with backoff; stops for good on 401/404, on an `event: closed`,
- * or when the returned function is called.
+ * Reconnects with backoff; stops for good on 401/403/404, on an `event: closed`
+ * or `event: evicted`, or when the returned function is called.
  */
 export function subscribe(
   url: string,
@@ -92,7 +92,7 @@ export function subscribe(
           cache: "no-store",
           signal: ctrl.signal,
         });
-        if (resp.status === 401 || resp.status === 404) {
+        if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
           stopped = true;
           status("stopped", `HTTP ${resp.status}`);
           return;
@@ -108,10 +108,10 @@ export function subscribe(
           if (done) break;
           for (const ev of parser.push(decoder.decode(value, { stream: true }))) {
             handlers.onEvent(ev);
-            if (ev.event === "closed") {
+            if (ev.event === "closed" || ev.event === "evicted") {
               stopped = true;
               ctrl.abort();
-              status("stopped", "closed");
+              status("stopped", ev.event);
               return;
             }
           }

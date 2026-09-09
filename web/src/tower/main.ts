@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteSession, eventsURL, fetchDownload, registerClient } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
@@ -100,6 +100,7 @@ function attach(s: Stored): void {
       onEvent: (ev) => {
         if (ev.event === "state") view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
         else if (ev.event === "closed") notice = "The session was closed.";
+        else if (ev.event === "evicted") notice = "You were removed from this session.";
         renderStatus();
       },
       onStatus: (status, detail) => {
@@ -152,6 +153,26 @@ async function download(bid: string, as: string): Promise<void> {
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
   } catch (err) {
     notice = `Download failed: ${err instanceof Error ? err.message : String(err)}`;
+    renderStatus();
+  }
+}
+
+async function evict(cid: string): Promise<void> {
+  if (!current || !cid) return;
+  try {
+    await deleteClient(current.sid, current.token, current.client_id, cid);
+  } catch (err) {
+    notice = `Evict failed: ${err instanceof Error ? err.message : String(err)}`;
+    renderStatus();
+  }
+}
+
+async function removeBeam(bid: string): Promise<void> {
+  if (!current || !bid) return;
+  try {
+    await deleteBeam(current.sid, current.token, current.client_id, bid);
+  } catch (err) {
+    notice = `Remove failed: ${err instanceof Error ? err.message : String(err)}`;
     renderStatus();
   }
 }
@@ -211,6 +232,7 @@ function renderStatus(): void {
     return;
   }
   const relays = `${s.relays} ${s.relays === 1 ? "relay" : "relays"}`;
+  const iAmAdmin = !!current && s.clients.some((cl) => cl.client_id === current!.client_id && cl.session_admin);
   statusEl.innerHTML = html`
     <div class="card place">
       <div class="head">
@@ -218,9 +240,9 @@ function renderStatus(): void {
         <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
       </div>
       ${s.beams.length === 0 ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
-      ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl))}</ul>` : ""}
+      ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>` : ""}
     </div>
-    ${view.beams.map((bv) => beamCard(bv))}
+    ${view.beams.map((bv) => beamCard(bv, iAmAdmin))}
     ${notice ? html`<p class="warn">${notice}</p>` : ""}
   `.html;
   for (const bv of view.beams) {
@@ -232,27 +254,36 @@ function renderStatus(): void {
   statusEl.querySelectorAll<HTMLButtonElement>("[data-download]").forEach((btn) =>
     btn.addEventListener("click", () => void download(btn.dataset.beam ?? "", btn.dataset.download ?? "raw")),
   );
+  statusEl.querySelectorAll<HTMLButtonElement>("[data-evict]").forEach((btn) =>
+    btn.addEventListener("click", () => void evict(btn.dataset.evict ?? "")),
+  );
+  statusEl.querySelectorAll<HTMLButtonElement>("[data-remove-beam]").forEach((btn) =>
+    btn.addEventListener("click", () => void removeBeam(btn.dataset.removeBeam ?? "")),
+  );
 }
 
-/** One client in the place's people list. */
-function clientRow(cl: ClientSummary): Raw {
+/** One client in the place's people list; admins get an Evict button on others. */
+function clientRow(cl: ClientSummary, iAmAdmin: boolean): Raw {
+  const me = !!current && cl.client_id === current.client_id;
   const tags: string[] = [];
   if (cl.session_admin) tags.push("admin");
   tags.push(...cl.roles);
-  if (current && cl.client_id === current.client_id) tags.push("you");
+  if (me) tags.push("you");
   return html`<li class="${cl.connected ? "on" : "off"}">
     <span class="who">${cl.name}</span>${tags.length ? html` <span class="tags">${tags.join(" · ")}</span>` : ""}
+    ${iAmAdmin && !me ? html` <button class="btn small" data-evict="${cl.client_id}">Evict</button>` : ""}
   </li>`;
 }
 
 /** One beam's card: progress, then a verified or failed panel once terminal. */
-function beamCard(bv: BeamView): Raw {
+function beamCard(bv: BeamView, iAmAdmin: boolean): Raw {
   const b = bv.beam;
   return html`<div class="card beam" data-bid="${b.bid}">
     <div class="head">
       <span class="badge" data-state="${b.state}">${STATE_LABELS[b.state]}</span>
       <strong>${b.name || "(unnamed)"}</strong>
       <span class="muted">beam ${b.bid}</span>
+      ${iAmAdmin ? html`<button class="btn small" data-remove-beam="${b.bid}">Remove</button>` : ""}
     </div>
     <div class="progress">
       <div class="big">${b.total > 0 ? `${b.have} / ${b.total}` : "— / —"}</div>

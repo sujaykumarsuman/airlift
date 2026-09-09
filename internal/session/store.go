@@ -15,15 +15,16 @@ var ErrTooManySessions = errors.New("too many sessions")
 
 // Store holds every live session.
 type Store struct {
-	mu         sync.Mutex
-	sessions   map[string]*Session
-	ttl        time.Duration
-	max        int
-	maxBeams   int
-	maxGz      int64
-	now        func() time.Time
-	onComplete func(*Session, *Beam)
-	onEvict    func(string)
+	mu          sync.Mutex
+	sessions    map[string]*Session
+	ttl         time.Duration
+	max         int
+	maxBeams    int
+	maxGz       int64
+	now         func() time.Time
+	onComplete  func(*Session, *Beam)
+	onEvict     func(string)
+	onBeamEvict func(sid, bid string)
 }
 
 // NewStore creates a store with the given TTL and session concurrency limit.
@@ -59,6 +60,15 @@ func (st *Store) SetEvictHook(fn func(string)) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.onEvict = fn
+}
+
+// SetBeamEvictHook installs the function run, in its own goroutine, when a beam
+// is removed or auto-evicted — to reclaim its on-disk directory. Set it before
+// creating sessions.
+func (st *Store) SetBeamEvictHook(fn func(sid, bid string)) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.onBeamEvict = fn
 }
 
 // CreateParams are the options a session is created with (ADR 0017). The zero
@@ -108,6 +118,7 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 		beams:        map[uint32]*Beam{},
 		subs:         map[*Subscriber]struct{}{},
 		onComplete:   st.onComplete,
+		onBeamEvict:  st.onBeamEvict,
 		clients:      map[string]*Client{},
 		byAddr:       map[string]*Client{},
 		usedNames:    map[string]bool{},

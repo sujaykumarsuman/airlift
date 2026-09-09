@@ -90,6 +90,11 @@ directly (out of scope; see non-goals).
     meta.json}`, staged and renamed into place; downloads stream from those
     files, the in-memory copies freed; a persist failure keeps the beam READY
     from memory, a FAILED beam writes nothing; cleanup on delete/sweep. (ADR 0016)
+15. Open multi-user access: a client per address (`X-Airlift-Client`), four auth
+    tiers (public/token/client/admin), open creation with clamped options, a
+    salted-SHA-256 password join, per-address/session rate limits (429 +
+    `Retry-After`), address eviction, and operator beam removal + auto-evict of
+    the oldest terminal beam at the cap. (ADR 0017)
 
 ## Non-goals
 
@@ -100,8 +105,9 @@ directly (out of scope; see non-goals).
 
 (The prompt-001 non-goals "Hosted / VPS deployment" and "Multi-user" are
 overturned by prompt 002: the tower is a hosted, multi-user service. Hosting
-transport landed in ADR 0012; the open multi-user session model lands in
-ADR 0013.)
+transport landed in ADR 0012; the multi-beam place in ADR 0015; the open
+multi-user access layer in ADR 0017. The session lifecycle and admin surface,
+which prompt 002 calls ADR 0013, are still to come.)
 
 ## Conventions
 
