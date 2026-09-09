@@ -45,17 +45,21 @@ type ClientSnapshot struct {
 // RegisterClient returns the client bound to addr, creating it on first sight
 // with a unique name. A repeat registration keeps the existing client (the
 // proposed name is ignored) and may only UPGRADE it to session admin, never
-// downgrade. The caller must reject an evicted address before calling.
-func (s *Session) RegisterClient(addr, proposed string, admin bool) *Client {
+// downgrade. It refuses (ok=false) an evicted address — the check is atomic with
+// the insert, so a concurrent eviction cannot re-admit the address.
+func (s *Session) RegisterClient(addr, proposed string, admin bool) (*Client, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.evicted[addr] {
+		return nil, false
+	}
 	if c, ok := s.byAddr[addr]; ok {
 		if admin {
 			c.SessionAdmin = true
 		}
 		c.lastActive = s.now()
 		s.notifyLocked()
-		return c
+		return c, true
 	}
 	c := &Client{
 		ID:           s.mintClientIDLocked(),
@@ -70,7 +74,15 @@ func (s *Session) RegisterClient(addr, proposed string, admin bool) *Client {
 	s.clientOrder = append(s.clientOrder, c.ID)
 	s.usedNames[c.Name] = true
 	s.notifyLocked()
-	return c
+	return c, true
+}
+
+// ClientIsAdmin reports whether c is a session admin, read under the lock (the
+// flag can be upgraded concurrently by a joiners-admin join).
+func (s *Session) ClientIsAdmin(c *Client) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return c.SessionAdmin
 }
 
 func (s *Session) mintClientIDLocked() string {

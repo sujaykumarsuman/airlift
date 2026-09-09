@@ -224,7 +224,7 @@ func (srv *Server) client(h clientHandler) http.HandlerFunc {
 // sessionAdmin is the client tier plus the session-admin flag.
 func (srv *Server) sessionAdmin(h clientHandler) http.HandlerFunc {
 	return srv.client(func(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
-		if !c.SessionAdmin {
+		if !s.ClientIsAdmin(c) {
 			writeError(w, http.StatusForbidden, "session admin only")
 			return
 		}

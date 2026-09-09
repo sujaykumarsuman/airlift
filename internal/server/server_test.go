@@ -622,6 +622,14 @@ func TestJoinersAdmin(t *testing.T) {
 	if resp, _ := h.doXFF(t, "PATCH", "/api/sessions/"+c.SID, c.Token, j.ClientID, "9.9.9.9", []byte(`{"password":"q"}`)); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("joiner-admin patch: %s", resp.Status)
 	}
+	// A token/QR joiner (registering with the token) is also an admin here.
+	resp, body = h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/clients", c.Token, "", "7.7.7.7", []byte(`{}`))
+	var reg struct {
+		SessionAdmin bool `json:"session_admin"`
+	}
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &reg) != nil || !reg.SessionAdmin {
+		t.Fatalf("token joiner should be a session admin under joiners_admin: %s %s", resp.Status, body)
+	}
 }
 
 func TestCreateOptionClamps(t *testing.T) {

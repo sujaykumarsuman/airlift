@@ -331,18 +331,18 @@ func TestHeldSurvivesOtherManifest(t *testing.T) {
 func TestClientRegistryAndEviction(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	s, _ := st.Create()
-	a := s.RegisterClient("10.0.0.1", "alice", true)
+	a, _ := s.RegisterClient("10.0.0.1", "alice", true)
 	if a.Name != "alice" || !a.SessionAdmin {
 		t.Fatalf("first client %+v", a)
 	}
 	// Same address returns the same client; a proposed name is ignored; admin
 	// upgrades but never downgrades.
-	again := s.RegisterClient("10.0.0.1", "bob", false)
+	again, _ := s.RegisterClient("10.0.0.1", "bob", false)
 	if again != a || again.Name != "alice" || !again.SessionAdmin {
 		t.Fatalf("re-register %+v", again)
 	}
 	// A different address is a different client; a duplicate name is suffixed.
-	b := s.RegisterClient("10.0.0.2", "alice", false)
+	b, _ := s.RegisterClient("10.0.0.2", "alice", false)
 	if b == a || b.Name != "alice 2" {
 		t.Fatalf("second client %+v", b)
 	}

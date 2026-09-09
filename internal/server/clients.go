@@ -55,7 +55,11 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	c := s.RegisterClient(addr, "", true) // the creator is the first session admin
+	c, ok := s.RegisterClient(addr, "", true) // the creator is the first session admin
+	if !ok {
+		writeError(w, http.StatusForbidden, "evicted")
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"sid":        s.ID,
 		"token":      s.Token,
@@ -137,12 +141,17 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		writeError(w, http.StatusBadRequest, "unknown role")
 		return
 	}
-	c := s.RegisterClient(addr, req.Name, false)
+	// A token/QR joiner is a session admin iff the session was created that way.
+	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin())
+	if !ok {
+		writeError(w, http.StatusForbidden, "evicted")
+		return
+	}
 	s.Touch()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"client_id":     c.ID,
 		"name":          c.Name,
-		"session_admin": c.SessionAdmin,
+		"session_admin": s.ClientIsAdmin(c),
 		"roles":         []string{},
 	})
 }
@@ -186,7 +195,11 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		writeError(w, http.StatusUnauthorized, "wrong password")
 		return
 	}
-	c := s.RegisterClient(addr, req.Name, s.JoinersAdmin())
+	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin())
+	if !ok {
+		writeError(w, http.StatusForbidden, "evicted")
+		return
+	}
 	s.Touch()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":     s.Token,
