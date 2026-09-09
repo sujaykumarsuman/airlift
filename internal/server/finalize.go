@@ -13,9 +13,10 @@ import (
 const maxSummaryPaths = 50
 
 // finalize runs once a beam has every chunk: the hash chain, the bundle stage
-// and the in-memory downloads. It ends the beam in READY or FAILED, independent
-// of every other beam in the place. (Per-beam on-disk persistence under
-// data_dir lands in a later step.)
+// and the downloads. It ends the beam in READY or FAILED, independent of every
+// other beam in the place. On READY it writes the verified output under data_dir
+// (ADR 0016) and serves downloads from those files, freeing the in-memory copies;
+// a persist failure keeps the beam READY, served from memory, saved_path unset.
 func (srv *Server) finalize(s *session.Session, b *session.Beam) {
 	m, chunks, ok := s.BeamChunks(b)
 	if !ok {
@@ -36,9 +37,10 @@ func (srv *Server) finalize(s *session.Session, b *session.Beam) {
 	}
 	data := res.Data
 	name := safeName(m.Name)
-	out.Downloads["raw"] = session.Download{Name: name, ContentType: "application/octet-stream", Data: data}
+	out.Downloads["raw"] = session.Download{Name: name, ContentType: "application/octet-stream", Src: session.MemBlob(data)}
 
 	var files []bundle.File
+	var zipBytes []byte
 	if bundle.IsBundle(data) {
 		bun, err := bundle.Parse(data)
 		if err != nil {
@@ -69,15 +71,53 @@ func (srv *Server) finalize(s *session.Session, b *session.Beam) {
 		switch len(files) {
 		case 0:
 		case 1:
-			out.Downloads["file"] = session.Download{Name: path.Base(files[0].Path), ContentType: "application/octet-stream", Data: files[0].Data}
+			out.Downloads["file"] = session.Download{Name: path.Base(files[0].Path), ContentType: "application/octet-stream", Src: session.MemBlob(files[0].Data)}
 		default:
 			z, err := bundle.Zip(files)
 			if err != nil {
 				out.Err = "bundle: zip: " + err.Error()
+				srv.opts.Logf("session %s beam %s FAILED: %s", s.ID, bid, out.Err)
 				s.FinishBeam(b, out)
 				return
 			}
-			out.Downloads["zip"] = session.Download{Name: stem(name) + ".zip", ContentType: "application/zip", Data: z}
+			zipBytes = z
+			out.Downloads["zip"] = session.Download{Name: stem(name) + ".zip", ContentType: "application/zip", Src: session.MemBlob(z)}
+		}
+	}
+
+	// One finish instant for the snapshot and meta.json.
+	finished := s.Now()
+	out.FinishedAt = finished
+	if srv.opts.DataDir != "" {
+		meta := beamMeta{
+			SID:           s.ID,
+			BID:           bid,
+			SenderSession: b.Sender,
+			Name:          m.Name,
+			State:         session.StateReady,
+			GzSize:        m.GzSize,
+			OrigSize:      m.OrigSize,
+			GzSHA256:      res.GzSHA.Actual,
+			OrigSHA256:    res.OrigSHA.Actual,
+			Verdicts:      out.Verdicts,
+			Bundle:        out.Bundle,
+			Downloads:     downloadsList(out.Downloads),
+			StartedAt:     s.BeamStartedAt(b),
+			FinishedAt:    finished,
+		}
+		if dir, disk, err := srv.persistBeam(s.ID, bid, name, data, files, zipBytes, meta); err != nil {
+			srv.opts.Logf("session %s beam %s: persist failed, serving from memory: %v", s.ID, bid, err)
+		} else if s.Closed() {
+			// The session was deleted or swept while we were writing, so its
+			// evict-hook cleanup may have run before our files landed. close()
+			// sets the closed flag before that cleanup, so a closed session seen
+			// here means our directory would be orphaned; reclaim it ourselves.
+			srv.removeSessionDir(s.ID)
+		} else {
+			for k, d := range disk {
+				out.Downloads[k] = d // swap MemBlob → fileBlob; the in-memory copy is now unreachable
+			}
+			out.SavedPath = dir
 		}
 	}
 

@@ -86,6 +86,10 @@ directly (out of scope; see non-goals).
     prefix and the router stays rooted; verified output is always written under
     `data_dir` (no `--dest`, no `--bind`); `X-Forwarded-For` is trusted only
     from `trusted_proxies`, read right-to-left. (ADR 0012)
+14. Per beam on READY, `<data_dir>/<sid>/<bid>/{raw/<name>, tree/, <stem>.zip,
+    meta.json}`, staged and renamed into place; downloads stream from those
+    files, the in-memory copies freed; a persist failure keeps the beam READY
+    from memory, a FAILED beam writes nothing; cleanup on delete/sweep. (ADR 0016)
 
 ## Non-goals
 

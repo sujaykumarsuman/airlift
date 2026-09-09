@@ -34,10 +34,11 @@ var (
 )
 
 type harness struct {
-	ts    *httptest.Server
-	store *session.Store
-	srv   *Server
-	joins []string
+	ts      *httptest.Server
+	store   *session.Store
+	srv     *Server
+	joins   []string
+	dataDir string
 }
 
 func start(t *testing.T, tweak func(*Options)) *harness {
@@ -45,6 +46,7 @@ func start(t *testing.T, tweak func(*Options)) *harness {
 	h := &harness{store: session.NewStore(time.Hour, 32)}
 	opts := Options{
 		Store:    h.store,
+		DataDir:  t.TempDir(), // every e2e download test exercises disk-serving; a tweak may override
 		OnCreate: func(_ *session.Session, join string) { h.joins = append(h.joins, join) },
 		Logf:     t.Logf,
 	}
@@ -52,6 +54,7 @@ func start(t *testing.T, tweak func(*Options)) *harness {
 		tweak(&opts)
 		h.store = opts.Store
 	}
+	h.dataDir = opts.DataDir
 	h.srv = New(opts)
 	h.ts = httptest.NewServer(h.srv.Handler())
 	if opts.PublicBase == "" {
@@ -378,6 +381,13 @@ func TestCorruptedChunkFails(t *testing.T) {
 	if resp, _ := h.download(t, c, b.BID, "raw"); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("download from FAILED: %s", resp.Status)
 	}
+	// A FAILED beam writes nothing: no <sid> dir, no saved_path.
+	if _, err := os.Stat(filepath.Join(h.dataDir, c.SID)); !os.IsNotExist(err) {
+		t.Fatalf("FAILED beam left a session dir: %v", err)
+	}
+	if b.SavedPath != nil {
+		t.Fatalf("FAILED beam has saved_path %v", *b.SavedPath)
+	}
 }
 
 func TestBundleWithBadFileFails(t *testing.T) {
@@ -398,6 +408,9 @@ func TestBundleWithBadFileFails(t *testing.T) {
 	}
 	if !b.Verdicts.GzSHA.OK || !b.Verdicts.OrigSHA.OK || len(b.Downloads) != 0 {
 		t.Fatalf("%+v", b)
+	}
+	if _, err := os.Stat(filepath.Join(h.dataDir, c.SID)); !os.IsNotExist(err) {
+		t.Fatalf("FAILED bundle left a session dir: %v", err)
 	}
 }
 
@@ -702,6 +715,17 @@ func TestTwoBeamsInOnePlace(t *testing.T) {
 	if resp, _ := h.download(t, c, "0000ffff", "raw"); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown beam: %s", resp.Status)
 	}
+	// One <sid> dir holds two distinct <bid> dirs, each with its own raw file.
+	for name, in := range map[string][]byte{"alpha.txt": single, "bravo.bin": noise} {
+		bid := byName[name].BID
+		got, err := os.ReadFile(filepath.Join(h.dataDir, c.SID, bid, "raw", name))
+		if err != nil || !bytes.Equal(got, in) {
+			t.Fatalf("beam %s raw file: %v", bid, err)
+		}
+		if m := readMeta(t, h.dataDir, c.SID, bid); m.SenderSession != byName[name].SenderSession {
+			t.Fatalf("meta sender_session %d != %d", m.SenderSession, byName[name].SenderSession)
+		}
+	}
 }
 
 // relayWork runs `relays` concurrent scanners with independent loss and
@@ -895,5 +919,266 @@ func TestClientAddrTrustedProxy(t *testing.T) {
 		if got := srv.clientAddr(mk(tc.remote, tc.xff)); got != tc.want {
 			t.Errorf("%s: clientAddr = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// readMeta reads and decodes a beam's meta.json.
+func readMeta(t *testing.T, dataDir, sid, bid string) beamMeta {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dataDir, sid, bid, "meta.json"))
+	if err != nil {
+		t.Fatalf("meta.json: %v", err)
+	}
+	var m beamMeta
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("meta.json decode: %v", err)
+	}
+	return m
+}
+
+// TestBeamPersistedToDisk drives the multi-file bundle to READY and checks the
+// per-beam tree written under data_dir: raw file, unpacked tree with modes,
+// zip, and a meta.json that agrees with the snapshot.
+func TestBeamPersistedToDisk(t *testing.T) {
+	h := start(t, nil)
+	d := loadVectors(t)
+	c := h.create(t)
+	if rep := h.replay(t, c, d, replay.Options{Drop: 0.2, Passes: 3, Seed: 1}); rep.State != session.StateReady {
+		t.Fatalf("not READY: %+v", rep)
+	}
+	b := h.oneBeam(t, c)
+	dir := filepath.Join(h.dataDir, c.SID, b.BID)
+	if b.SavedPath == nil || *b.SavedPath != dir {
+		t.Fatalf("saved_path %v, want %s", b.SavedPath, dir)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("beam dir: %v", err)
+	}
+
+	input, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
+	rawPath := filepath.Join(dir, "raw", b.Name)
+	if got, err := os.ReadFile(rawPath); err != nil || !bytes.Equal(got, input) {
+		t.Fatalf("raw file: %v", err)
+	}
+	if fi, _ := os.Stat(rawPath); fi.Mode().Perm() != 0o644 {
+		t.Fatalf("raw file mode %v", fi.Mode())
+	}
+	// The unpacked tree equals the fixture, executable bit preserved.
+	gotTree := readTree(t, filepath.Join(dir, "tree"))
+	sameTree(t, gotTree, readTree(t, filepath.Join(fixtures, "multi", "tree")), "on-disk tree")
+	if fi, err := os.Stat(filepath.Join(dir, "tree", "bin", "run.sh")); err != nil || fi.Mode()&0o111 == 0 {
+		t.Fatalf("tree lost the executable bit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stem(b.Name)+".zip")); err != nil {
+		t.Fatalf("zip on disk: %v", err)
+	}
+
+	m := readMeta(t, h.dataDir, c.SID, b.BID)
+	if m.State != session.StateReady || m.SID != c.SID || m.BID != b.BID || m.SenderSession != b.SenderSession {
+		t.Fatalf("meta identity %+v", m)
+	}
+	if strings.Join(m.Downloads, ",") != "raw,zip" {
+		t.Fatalf("meta downloads %v", m.Downloads)
+	}
+	if m.GzSHA256 != b.Verdicts.GzSHA.Actual || m.OrigSHA256 != b.Verdicts.OrigSHA.Actual {
+		t.Fatalf("meta hashes %+v", m)
+	}
+	if m.GzSize != d.Manifest.GzSize || m.OrigSize != d.Manifest.OrigSize {
+		t.Fatalf("meta sizes %d/%d", m.GzSize, m.OrigSize)
+	}
+	if m.FinishedAt.Before(m.StartedAt) || b.FinishedAt == nil || !m.FinishedAt.Equal(*b.FinishedAt) {
+		t.Fatalf("meta timing started=%v finished=%v snap=%v", m.StartedAt, m.FinishedAt, b.FinishedAt)
+	}
+}
+
+// TestDownloadServedFromDisk proves the handler streams from the file, not a
+// retained []byte: overwrite the file, and the next download returns the new
+// bytes with the download headers intact.
+func TestDownloadServedFromDisk(t *testing.T) {
+	h := start(t, nil)
+	c := h.create(t)
+	if rep := h.replay(t, c, loadVectors(t), replay.Options{}); rep.State != session.StateReady {
+		t.Fatalf("%+v", rep)
+	}
+	b := h.oneBeam(t, c)
+	rawPath := filepath.Join(h.dataDir, c.SID, b.BID, "raw", b.Name)
+	if err := os.WriteFile(rawPath, []byte("OVERWRITTEN"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, got := h.download(t, c, b.BID, "raw")
+	if string(got) != "OVERWRITTEN" {
+		t.Fatalf("served %q, not from disk", got)
+	}
+	if resp.Header.Get("Cache-Control") != "no-store" || resp.Header.Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("headers %v", resp.Header)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, b.Name) {
+		t.Fatalf("content-disposition %q", cd)
+	}
+}
+
+// TestSingleFileBundleOnDisk: a one-file bundle writes the tree (no zip) and the
+// `file` download streams the bare file from it.
+func TestSingleFileBundleOnDisk(t *testing.T) {
+	h := start(t, nil)
+	input, _ := os.ReadFile(filepath.Join(fixtures, "single", "bundle-text.txt"))
+	d, err := beam.Encode(input, "single.txt", 200, 7, beam.ModeSequential, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := h.create(t)
+	if rep := h.replay(t, c, d, replay.Options{Passes: 1}); rep.State != session.StateReady {
+		t.Fatalf("%+v", rep)
+	}
+	b := h.oneBeam(t, c)
+	dir := filepath.Join(h.dataDir, c.SID, b.BID)
+	if fi, err := os.Stat(filepath.Join(dir, "tree")); err != nil || !fi.IsDir() {
+		t.Fatalf("tree dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stem("single.txt")+".zip")); !os.IsNotExist(err) {
+		t.Fatalf("single-file bundle should not write a zip: %v", err)
+	}
+	if m := readMeta(t, h.dataDir, c.SID, b.BID); strings.Join(m.Downloads, ",") != "raw,file" {
+		t.Fatalf("meta downloads %v", m.Downloads)
+	}
+	if _, body := h.download(t, c, b.BID, "file"); string(body) != "hello, airlift\n" {
+		t.Fatalf("file download %q", body)
+	}
+}
+
+// TestNonBundleOnDisk: a raw (non-repobundle) payload writes only raw/ and
+// meta.json, with no tree or zip and a null bundle summary.
+func TestNonBundleOnDisk(t *testing.T) {
+	h := start(t, nil)
+	data := make([]byte, 3000)
+	rand.New(rand.NewSource(1)).Read(data)
+	d, _ := beam.Encode(data, "noise", 600, 9, beam.ModeSequential, 0)
+	c := h.create(t)
+	if rep := h.replay(t, c, d, replay.Options{Shuffle: true, Seed: 2}); rep.State != session.StateReady {
+		t.Fatalf("%+v", rep)
+	}
+	b := h.oneBeam(t, c)
+	dir := filepath.Join(h.dataDir, c.SID, b.BID)
+	if _, err := os.Stat(filepath.Join(dir, "raw", "noise")); err != nil {
+		t.Fatalf("raw file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tree")); !os.IsNotExist(err) {
+		t.Fatalf("non-bundle wrote a tree: %v", err)
+	}
+	m := readMeta(t, h.dataDir, c.SID, b.BID)
+	if m.Bundle != nil || strings.Join(m.Downloads, ",") != "raw" {
+		t.Fatalf("meta %+v", m)
+	}
+}
+
+// TestPersistContainsEscape calls persistBeam directly with a bad tree entry to
+// prove the write layer's re-applied path sanitiser contains it even if a bad
+// entry bypassed bundle.Parse.
+func TestPersistContainsEscape(t *testing.T) {
+	dd := t.TempDir()
+	srv := New(Options{Store: session.NewStore(time.Hour, 4), DataDir: dd, Logf: t.Logf})
+	_, disk, err := srv.persistBeam("00000001", "0000000a", "x", []byte("x"),
+		[]bundle.File{{Path: "../evil", Data: []byte("bad"), Mode: 0o644, OK: true}}, nil, beamMeta{})
+	if err == nil || disk != nil {
+		t.Fatalf("path escape not refused: err=%v disk=%v", err, disk)
+	}
+	for _, p := range []string{
+		filepath.Join(dd, "evil"),
+		filepath.Join(dd, "00000001", "evil"),
+		filepath.Join(dd, "00000001", "0000000a"),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("escape or partial dir left at %s: %v", p, err)
+		}
+	}
+}
+
+// TestPersistFailureFallsBackToMemory: when the on-disk write fails, the beam
+// still reaches READY and is served from memory with a null saved_path.
+func TestPersistFailureFallsBackToMemory(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "notadir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil { // a file where a dir must go
+		t.Fatal(err)
+	}
+	h := start(t, func(o *Options) { o.DataDir = blocker })
+	c := h.create(t)
+	if rep := h.replay(t, c, loadVectors(t), replay.Options{}); rep.State != session.StateReady {
+		t.Fatalf("persist failure should not fail the beam: %+v", rep)
+	}
+	b := h.oneBeam(t, c)
+	if b.SavedPath != nil {
+		t.Fatalf("saved_path set despite persist failure: %v", *b.SavedPath)
+	}
+	input, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
+	if _, got := h.download(t, c, b.BID, "raw"); !bytes.Equal(got, input) {
+		t.Fatal("raw not served from memory after persist failure")
+	}
+}
+
+// TestDeleteRemovesSessionData: deleting a session reclaims its on-disk tree.
+func TestDeleteRemovesSessionData(t *testing.T) {
+	h := start(t, nil)
+	c := h.create(t)
+	if rep := h.replay(t, c, loadVectors(t), replay.Options{}); rep.State != session.StateReady {
+		t.Fatalf("%+v", rep)
+	}
+	dir := filepath.Join(h.dataDir, c.SID)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("no session dir before delete: %v", err)
+	}
+	if resp, _ := h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: %s", resp.Status)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("session dir survived delete: %v", err)
+	}
+}
+
+// TestPersistReclaimedWhenSessionEvicted: a beam that completes AFTER its
+// session was evicted must not orphan its files. We evict the session, then feed
+// frames to completion on the still-live session object (its completion hook
+// still fires), and the beam's own post-persist reclaim removes the directory.
+func TestPersistReclaimedWhenSessionEvicted(t *testing.T) {
+	h := start(t, nil)
+	c := h.create(t)
+	s, ok := h.store.Get(c.SID)
+	if !ok {
+		t.Fatal("no session")
+	}
+	h.store.Delete(c.SID) // evict before the beam completes; cleanup finds no dir yet
+	d := loadVectors(t)
+	s.Ingest(d.Frames) // completes on the still-live object → finalize persists, then reclaims
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if st, _ := s.BeamState(d.SenderSession); st == session.StateReady {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("beam did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(h.dataDir, c.SID)); !os.IsNotExist(err) {
+		t.Fatalf("evicted session's data not reclaimed after a late persist: %v", err)
+	}
+}
+
+// TestSweepRemovesSessionData: sweeping an expired session reclaims its data
+// (exercises the evict hook off the store, not only DELETE).
+func TestSweepRemovesSessionData(t *testing.T) {
+	h := start(t, func(o *Options) { o.Store = session.NewStore(150*time.Millisecond, 32) })
+	c := h.create(t)
+	if rep := h.replay(t, c, loadVectors(t), replay.Options{}); rep.State != session.StateReady {
+		t.Fatalf("%+v", rep)
+	}
+	dir := filepath.Join(h.dataDir, c.SID)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("no session dir before sweep: %v", err)
+	}
+	if ids := h.store.Sweep(time.Now().Add(time.Hour)); len(ids) != 1 {
+		t.Fatalf("swept %v", ids)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("session dir survived sweep: %v", err)
 	}
 }

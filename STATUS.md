@@ -27,8 +27,18 @@
   relay no longer latches `done`, the scan page tracks an active beam, the
   dashboard lists beam cards. `WAITING_MANIFEST` removed. API.md/PROTOCOL.md/
   CLAUDE.md updated; two-beam end-to-end test added. Go + web gates green.
-- **Next**: on-disk (6.4), clients/password/limits (6.5), lifecycle (6.6), web
-  lifecycle UI (6.7).
+- **6.4 per-beam on-disk + downloads-from-disk** (done, ADR 0016): on READY a
+  beam is written to `<data_dir>/<sid>/<bid>/{raw/<name>, tree/, <stem>.zip,
+  meta.json}`, staged in a sibling temp dir and renamed into place;
+  `internal/server/persist.go` does the write, finalize composes it after verify.
+  Downloads stream from disk via `http.ServeContent` (`Range`/`Content-Length`),
+  the in-memory copies freed; `session.Download` gained a `Blob` seam
+  (`MemBlob`/`fileBlob`). A persist failure keeps the beam READY served from
+  memory (`saved_path` null); a FAILED beam writes nothing. Session dirs are
+  reclaimed on delete/sweep via a new store `SetEvictHook`. Design + adversarial
+  review by workflow; Go gates green under `-race`. `meta.json` not `beam.json`
+  (ADR 0010). The session-level `session.json` (clients, lifecycle) is 6.6.
+- **Next**: clients/password/limits (6.5), lifecycle (6.6), web lifecycle UI (6.7).
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
@@ -56,7 +66,7 @@
 
 ## Pending — the rest of Phase 6, then admin and the VPS
 
-- Phase 6 remaining: 6.3–6.7 (below). Phase 7 admin surface; Phase 8 the VPS.
+- Phase 6 remaining: 6.5–6.7 (below). Phase 7 admin surface; Phase 8 the VPS.
 - Hardware, still outstanding from Phase 3/4 (now over the hosted, HTTP tower):
   Mac + Android, scan the join QR, scan `beam.html` off the monitor, compare the
   zip download with the source; then a 1 MB bundle in fountain mode at ≥ 8 fps,
@@ -64,11 +74,12 @@
 
 ## Next
 
-- 6.4 per-beam on-disk + downloads-from-disk + `session.json`, 6.5 open creation
-  + clients + password + rate limits (incl. per-session `max_age` override,
-  airlift-admin only; beam removal + auto-evict oldest terminal at cap), 6.6
-  lifecycle (status + three clocks + terminate/extend/review/reopen), 6.7 web
-  lifecycle UI. ADR 0013.
+- 6.5 open creation + clients + password + rate limits (incl. per-session
+  `max_age` override, airlift-admin only; beam removal + auto-evict oldest
+  terminal at cap), 6.6 lifecycle (status + three clocks +
+  terminate/extend/review/reopen; the session-level `session.json` with clients
+  and lifecycle events; directory cleanup tied to `TERMINATED`/`REJECTED`), 6.7
+  web lifecycle UI. ADR 0013.
 
 ## Open questions
 

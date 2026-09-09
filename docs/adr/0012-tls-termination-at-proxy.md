@@ -49,7 +49,7 @@ removed; the phone-first-run CA guidance goes with them.
   client-spoofable and is never believed on its own; trusting it would let any
   client forge an identity and defeat eviction and the per-address rate limits.
 - **`--dest` is gone**; verified output is written under `data_dir` always (the
-  per-beam layout is ADR 0013). `data_dir` is emptied on start behind a guard
+  per-beam layout is ADR 0016). `data_dir` is emptied on start behind a guard
   that refuses the filesystem root, the user's home or an ancestor of it, and
   the airlift home, and refuses to erase any directory airlift did not create
   (an `.airlift-data` sentinel).

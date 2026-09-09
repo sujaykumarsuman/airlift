@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -57,22 +59,43 @@ type BundleSummary struct {
 	Paths      []string `json:"paths"`
 }
 
+// Blob opens the bytes behind a Download; the caller closes the reader. It lets
+// a download be backed by memory (before the on-disk write, or the fallback when
+// it fails) or by a file under data_dir, without the session knowing which.
+type Blob interface {
+	Open() (io.ReadSeekCloser, error)
+}
+
+// MemBlob serves bytes held in memory.
+func MemBlob(b []byte) Blob { return memBlob{b} }
+
+type memBlob struct{ b []byte }
+
+func (m memBlob) Open() (io.ReadSeekCloser, error) { return nopSeekCloser{bytes.NewReader(m.b)}, nil }
+
+type nopSeekCloser struct{ *bytes.Reader }
+
+func (nopSeekCloser) Close() error { return nil }
+
 // Download is one servable result, keyed by the `as` query value.
 type Download struct {
 	Name        string
 	ContentType string
-	Data        []byte
+	Src         Blob // memory- or disk-backed; nil is never served
 }
 
 // Outcome is what the verification stage hands back via FinishBeam. A non-empty
-// Err means FAILED. SavedPath is the on-disk location once the per-beam write
-// lands (ADR 0013); unset until then.
+// Err means FAILED. SavedPath is the beam's on-disk directory once the per-beam
+// write lands (ADR 0016); unset when it has not been written (not yet, a FAILED
+// beam, or a persist failure served from memory). FinishedAt, when set, is the
+// verification-end instant shared by the snapshot and meta.json.
 type Outcome struct {
-	Verdicts  Verdicts
-	Bundle    *BundleSummary
-	Downloads map[string]Download
-	SavedPath string
-	Err       string
+	Verdicts   Verdicts
+	Bundle     *BundleSummary
+	Downloads  map[string]Download
+	SavedPath  string
+	FinishedAt time.Time
+	Err        string
 }
 
 // heldKey identifies a frame held before its beam's MANIFEST arrives.
@@ -489,13 +512,28 @@ func (s *Session) FinishBeam(b *Beam, o Outcome) {
 	}
 	b.outcome = o
 	b.chunks = nil
+	// A carried finish instant keeps the snapshot and the on-disk meta.json in
+	// exact agreement; callers that do not persist leave it zero.
 	b.finishedAt = s.now()
+	if !o.FinishedAt.IsZero() {
+		b.finishedAt = o.FinishedAt
+	}
 	if o.Err != "" {
 		b.state = StateFailed
 	} else {
 		b.state = StateReady
 	}
 	s.notifyLocked()
+}
+
+// Now returns the session's clock (injectable in tests).
+func (s *Session) Now() time.Time { return s.now() }
+
+// BeamStartedAt is when the beam's MANIFEST arrived.
+func (s *Session) BeamStartedAt(b *Beam) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return b.startedAt
 }
 
 var downloadOrder = []string{"raw", "file", "zip"}

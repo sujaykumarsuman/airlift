@@ -42,7 +42,7 @@ type Options struct {
 	PublicBase     string         // full public_url incl. any path prefix, no trailing slash; used for join URLs
 	BasePath       string         // path prefix ("" or "/airlift") for <base href> and /api/info
 	Web            fs.FS          // built web/dist; nil or incomplete means placeholders
-	DataDir        string         // directory verified results are written under (per beam; wired in a later step)
+	DataDir        string         // directory verified results are written under (per beam; ADR 0016)
 	TrustedProxies []netip.Prefix // peers whose X-Forwarded-For is believed (decision 8)
 	AdminEnabled   bool           // whether an admin_token is configured
 	Version        string         // build version for /api/info
@@ -72,6 +72,7 @@ func New(opts Options) *Server {
 	}
 	srv := &Server{opts: opts, mux: http.NewServeMux()}
 	opts.Store.SetCompleteHook(srv.finalize)
+	opts.Store.SetEvictHook(srv.removeSessionDir)
 	srv.routes()
 	return srv
 }
@@ -285,17 +286,24 @@ func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.S
 		}
 		return
 	}
+	rc, err := d.Src.Open()
+	if err != nil {
+		srv.opts.Logf("session %s beam %08x: download %q unavailable: %v", s.ID, uint32(sender), as, err)
+		writeError(w, http.StatusInternalServerError, "download unavailable")
+		return
+	}
+	defer rc.Close()
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": d.Name})
 	if disposition == "" {
 		disposition = "attachment"
 	}
 	h := w.Header()
-	h.Set("Content-Type", d.ContentType)
+	h.Set("Content-Type", d.ContentType) // set before ServeContent so it is respected
 	h.Set("Content-Disposition", disposition)
-	h.Set("Content-Length", strconv.Itoa(len(d.Data)))
 	h.Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	w.Write(d.Data)
+	// Zero modtime: no Last-Modified/304 negotiation (we are no-store); ServeContent
+	// sets Content-Length and Accept-Ranges and honours Range.
+	http.ServeContent(w, r, d.Name, time.Time{}, rc)
 }
 
 // info advertises the version, public URL, base path, admin state and caps. It

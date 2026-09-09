@@ -23,6 +23,7 @@ type Store struct {
 	maxGz      int64
 	now        func() time.Time
 	onComplete func(*Session, *Beam)
+	onEvict    func(string)
 }
 
 // NewStore creates a store with the given TTL and session concurrency limit.
@@ -49,6 +50,15 @@ func (st *Store) SetCompleteHook(fn func(*Session, *Beam)) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.onComplete = fn
+}
+
+// SetEvictHook installs the function run, off the store lock, when a session is
+// deleted or swept — the one place per-session on-disk data is reclaimed. Set it
+// before creating sessions.
+func (st *Store) SetEvictHook(fn func(string)) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.onEvict = fn
 }
 
 // Create mints a session with a random id and 128-bit token.
@@ -92,14 +102,18 @@ func (st *Store) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
-// Delete removes a session and wakes its subscribers.
+// Delete removes a session, wakes its subscribers and reclaims its on-disk data.
 func (st *Store) Delete(id string) bool {
 	st.mu.Lock()
 	s, ok := st.sessions[id]
 	delete(st.sessions, id)
+	hook := st.onEvict
 	st.mu.Unlock()
 	if ok {
 		s.close()
+		if hook != nil {
+			hook(id)
+		}
 	}
 	return ok
 }
@@ -111,7 +125,8 @@ func (st *Store) Len() int {
 	return len(st.sessions)
 }
 
-// Sweep deletes sessions expired at now and returns their ids.
+// Sweep deletes sessions expired at now, reclaims their on-disk data and returns
+// their ids.
 func (st *Store) Sweep(now time.Time) []string {
 	st.mu.Lock()
 	var expired []*Session
@@ -121,11 +136,15 @@ func (st *Store) Sweep(now time.Time) []string {
 			delete(st.sessions, id)
 		}
 	}
+	hook := st.onEvict
 	st.mu.Unlock()
 	ids := make([]string, 0, len(expired))
 	for _, s := range expired {
 		s.close()
 		ids = append(ids, s.ID)
+		if hook != nil {
+			hook(s.ID)
+		}
 	}
 	return ids
 }

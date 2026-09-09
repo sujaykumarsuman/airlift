@@ -107,7 +107,7 @@ Each entry of `beams` is:
 | `verdicts` | object | `{gz_sha, orig_sha, bundle}`; each `null` until its stage ran, then `{ok, expected, actual}` |
 | `bundle` | object or null | `{files, total_bytes, paths}` for a verified repobundle; `paths` holds the first 50 |
 | `downloads` | string[] | subset of `raw`, `file`, `zip`; empty unless `READY` |
-| `saved_path` | string or null | on-disk path once written under `data_dir` (per beam, ADR 0013); null until then |
+| `saved_path` | string or null | the beam's directory under `data_dir` once written (ADR 0016); null before it verifies, for a FAILED beam, or when the on-disk write failed and it is served from memory |
 | `error` | string or null | the failure reason in `FAILED` |
 | `started_at` | RFC 3339 or null | when the beam's MANIFEST arrived |
 | `finished_at` | RFC 3339 or null | when the beam's verification ended, either way |
@@ -167,13 +167,33 @@ Per ADR 0006:
 - `zip` — the unpacked tree, named `<stem>.zip`, when the bundle has more
   than one file. Entry paths and modes are preserved; timestamps are fixed.
 
-Responses carry `Content-Disposition: attachment` and `Cache-Control: no-store`.
+Once a beam is written to disk (ADR 0016) its downloads stream from the backing
+file via `http.ServeContent`, so responses carry `Content-Length` and honour
+`Range`; a persist failure serves the same bytes from memory. Either way they
+carry `Content-Disposition: attachment`, the content type, and
+`Cache-Control: no-store`, and the token stays in the header.
 
 ## On disk
 
-Verified output is written under `data_dir` (per beam; layout in ADR 0013).
-`data_dir` is emptied on start behind a guard, and every entry passes the path
-sanitiser. (Downloads are served from memory until the per-beam write lands.)
+On READY a beam's verified output is written under `<data_dir>/<sid>/<bid>/`
+(ADR 0016):
+
+```
+raw/<name>        the byte-identical input (always)
+tree/…            the unpacked repobundle tree, modes preserved (a bundle)
+<stem>.zip        the zip of the tree (a bundle of more than one file)
+meta.json         sid, bid, sender_session, name, state, sizes, hashes,
+                  verdicts, bundle summary, downloads, started_at, finished_at
+```
+
+The three download kinds are served from these files and the in-memory copies
+freed; `saved_path` is the beam directory. Writes are staged in a sibling temp
+directory and published with a single rename, so a half-written beam is never
+visible. A persist failure keeps the beam READY and serves from memory with
+`saved_path` null; a FAILED beam writes nothing. `data_dir` is emptied on start
+behind a guard, every entry passes the one path sanitiser, and a session's
+directory is removed when the session is deleted or swept. (Persistence does not
+survive a tower restart — a non-goal.)
 
 ## Static
 

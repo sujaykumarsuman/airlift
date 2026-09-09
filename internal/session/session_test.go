@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -13,6 +14,21 @@ import (
 
 	"github.com/sujaykumarsuman/airlift/internal/proto"
 )
+
+// readBlob drains a Download's Src to a string.
+func readBlob(t *testing.T, src Blob) string {
+	t.Helper()
+	rc, err := src.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
 
 type dump struct {
 	SenderSession uint32   `json:"sender_session"`
@@ -189,7 +205,7 @@ func TestIngestOneBeamCompletes(t *testing.T) {
 	saved := "/tmp/x"
 	s.FinishBeam(b, Outcome{
 		Verdicts:  Verdicts{GzSHA: &Verdict{OK: true}, OrigSHA: &Verdict{OK: true}},
-		Downloads: map[string]Download{"zip": {Name: "a.zip"}, "raw": {Name: "a.txt", Data: []byte("x")}},
+		Downloads: map[string]Download{"zip": {Name: "a.zip"}, "raw": {Name: "a.txt", Src: MemBlob([]byte("x"))}},
 		SavedPath: saved,
 	})
 	bs = s.Snapshot().Beams[0]
@@ -202,7 +218,7 @@ func TestIngestOneBeamCompletes(t *testing.T) {
 	if bs.Have != bs.Total || bs.Bitmap == "" {
 		t.Fatal("bitmap after chunks released")
 	}
-	if dl, ok := s.BeamDownload(d.SenderSession, "raw"); !ok || string(dl.Data) != "x" {
+	if dl, ok := s.BeamDownload(d.SenderSession, "raw"); !ok || readBlob(t, dl.Src) != "x" {
 		t.Fatal("BeamDownload raw")
 	}
 	if _, ok := s.BeamDownload(d.SenderSession, "file"); ok {
