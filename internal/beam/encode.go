@@ -15,9 +15,9 @@ import (
 // DefaultChunk is the sender's default payload size in bytes.
 const DefaultChunk = 600
 
-// Dump is the {sender_session, manifest, frames[, fountain]} JSON that
-// `airlift frames` and `airlift beam --dump` write and that `airlift replay`
-// and `airlift decode` read (docs/PROTOCOL.md). frames holds each frame once,
+// Dump is the {sender_session, manifest, frames[, fountain]} structure
+// (docs/PROTOCOL.md): the internal fixture format the frozen testdata/vectors/
+// files use and that internal/replay consumes. frames holds each frame once,
 // in the order [M, D0 … D(N-1)] or [M, F0 … F(K-1)]; the loop schedule is the
 // consumer's business.
 type Dump struct {
@@ -32,6 +32,36 @@ type Dump struct {
 type FountainInfo struct {
 	Packets int     `json:"packets"`
 	Indices [][]int `json:"indices"`
+}
+
+// Mode selects the frame layout. It is an internal choice, not a user flag:
+// beam runs ModeAuto, which picks fountain once the payload is large enough
+// that loss and stragglers dominate a sequential loop.
+type Mode int
+
+// Frame-layout modes.
+const (
+	ModeAuto Mode = iota
+	ModeSequential
+	ModeFountain
+)
+
+// FountainThreshold is the chunk count at or above which ModeAuto uses
+// fountain. Below it, a sequential loop fills its few gaps in a pass or two and
+// keeps the page small; at or above it the last-chunk problem and the
+// multi-scanner speed-up make fountain's packet overhead worth it.
+const FountainThreshold = 24
+
+// fountain reports whether mode uses fountain for a payload of total chunks.
+func (m Mode) fountain(total int) bool {
+	switch m {
+	case ModeFountain:
+		return true
+	case ModeSequential:
+		return false
+	default:
+		return total >= FountainThreshold
+	}
 }
 
 // NewSession mints a sender session id. With a seed it is deterministic, so
@@ -50,9 +80,9 @@ func NewSession(seed *int64) uint32 {
 }
 
 // Encode is the shared pipeline: gzip the input, chunk the blob, and build the
-// manifest frame followed by either N DATA frames or K FOUNTAIN packets. With
-// fountain set, packets ≤ 0 selects proto.DefaultPackets(N).
-func Encode(data []byte, name string, chunk int, sender uint32, fountain bool, packets int) (*Dump, error) {
+// manifest frame followed by either N DATA frames or K FOUNTAIN packets, per
+// mode. In fountain layout, packets ≤ 0 selects proto.DefaultPackets(N).
+func Encode(data []byte, name string, chunk int, sender uint32, mode Mode, packets int) (*Dump, error) {
 	if chunk < 1 || chunk > 0xFFFF {
 		return nil, fmt.Errorf("chunk must be 1..65535, got %d", chunk)
 	}
@@ -81,7 +111,7 @@ func Encode(data []byte, name string, chunk int, sender uint32, fountain bool, p
 		Manifest:      m,
 		Frames:        []string{proto.Frame{Type: proto.TypeManifest, Session: sender, Total: uint16(total), Payload: payload}.Text()},
 	}
-	if fountain {
+	if mode.fountain(total) {
 		k := packets
 		if k <= 0 {
 			k = proto.DefaultPackets(total)

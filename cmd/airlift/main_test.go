@@ -2,90 +2,124 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
-
-	"github.com/sujaykumarsuman/airlift/internal/proto"
-	"github.com/sujaykumarsuman/airlift/internal/server"
-	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
-var vectors = filepath.Join("..", "..", "testdata", "vectors", "vectors.json")
+// beam always runs with --no-open in tests so it never launches a browser.
 
-func TestReplayExitCriterion(t *testing.T) {
-	dest := t.TempDir()
-	var out, errb bytes.Buffer
-	code := run([]string{"replay", vectors, "--dest", dest, "--drop", "0.2", "--rate", "0"}, &out, &errb)
+func TestBeamFolder(t *testing.T) {
+	tree := filepath.Join("..", "..", "testdata", "bundles", "multi", "tree")
+	out := filepath.Join(t.TempDir(), "page.html")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"beam", tree, "--out", out, "--no-open"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("exit %d\n%s\n%s", code, out.String(), errb.String())
+		t.Fatalf("exit %d\n%s", code, stderr.String())
 	}
-	for _, want := range []string{"state READY", "OK  gz_sha", "OK  orig_sha", "OK  bundle", "bundle    7 files", "downloads raw, zip", "dest      " + filepath.Join(dest, "bundle-base64")} {
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("output lacks %q:\n%s", want, out.String())
-		}
+	html, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
 	}
-	input, _ := os.ReadFile(filepath.Join("..", "..", "testdata", "bundles", "multi", "bundle-base64.txt"))
-	if got, err := os.ReadFile(filepath.Join(dest, "bundle-base64.txt")); err != nil || !bytes.Equal(got, input) {
-		t.Fatalf("dest raw: %v", err)
+	// The beam is named after the folder and is self-contained.
+	if !strings.Contains(string(html), "airlift beam · tree") {
+		t.Fatalf("title missing the folder name:\n%s", first(stdout.String(), 400))
 	}
-	if _, err := os.Stat(filepath.Join(dest, "bundle-base64", "nested dir", "file with spaces.txt")); err != nil {
-		t.Fatalf("dest tree: %v", err)
+	if strings.Contains(string(html), "://") || strings.Contains(string(html), "src=") {
+		t.Fatal("beam has an external reference")
 	}
-}
-
-func TestReplayFailsOnCorruption(t *testing.T) {
-	raw, _ := os.ReadFile(vectors)
-	var d struct {
-		SenderSession uint32          `json:"sender_session"`
-		Manifest      json.RawMessage `json:"manifest"`
-		Frames        []string        `json:"frames"`
-	}
-	json.Unmarshal(raw, &d)
-	fr, _ := proto.ParseText(d.Frames[2])
-	fr.Payload[5] ^= 0x40
-	d.Frames[2] = fr.Text()
-	tampered := filepath.Join(t.TempDir(), "tampered.json")
-	out, _ := json.Marshal(d)
-	os.WriteFile(tampered, out, 0o644)
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"replay", tampered, "--rate", "0", "--drop", "0"}, &stdout, &stderr); code != 1 {
-		t.Fatalf("exit %d\n%s", code, stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "state FAILED") || !strings.Contains(stdout.String(), "BAD gz_sha") {
-		t.Fatalf("output:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "airlift beam  tree → "+out) {
+		t.Fatalf("summary:\n%s", stdout.String())
 	}
 }
 
-func TestReplayEncodesRawFiles(t *testing.T) {
+func TestBeamSingleFilePassesThrough(t *testing.T) {
+	work := t.TempDir()
+	src := filepath.Join(work, "hello.txt")
+	os.WriteFile(src, []byte("hello, airlift\n"), 0o644)
+	out := filepath.Join(work, "beam.html")
 	var stdout, stderr bytes.Buffer
-	// go.mod is not a frames dump and not a repobundle, so replay encodes it on
-	// the fly and the tower offers only the raw download.
-	code := run([]string{"replay", filepath.Join("..", "..", "go.mod"), "--rate", "0", "--shuffle"}, &stdout, &stderr)
-	if code != 0 || !strings.Contains(stdout.String(), "encoded on the fly") || !strings.Contains(stdout.String(), "downloads raw\n") {
-		t.Fatalf("exit %d\n%s\n%s", code, stdout.String(), stderr.String())
+	if code := run([]string{"beam", src, "--out", out, "--no-open"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "airlift beam  hello.txt → ") {
+		t.Fatalf("single file should be named after itself:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "mode     sequential") {
+		t.Fatalf("a tiny file should stay sequential:\n%s", stdout.String())
+	}
+}
+
+func TestBeamMultipleFilesNeedName(t *testing.T) {
+	work := t.TempDir()
+	a := filepath.Join(work, "a.txt")
+	b := filepath.Join(work, "b.txt")
+	os.WriteFile(a, []byte("aaaa"), 0o644)
+	os.WriteFile(b, []byte("bbbb"), 0o644)
+	out := filepath.Join(work, "beam.html")
+
+	// Without a name (and no terminal to prompt on) it is refused.
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"beam", a, b, "--out", out, "--no-open"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("multiple files without --name should fail:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "name") {
+		t.Fatalf("error should mention the name:\n%s", stderr.String())
+	}
+	// With a name they bundle.
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"beam", a, b, "--name", "pair", "--out", out, "--no-open"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "airlift beam  pair → ") {
+		t.Fatalf("summary:\n%s", stdout.String())
+	}
+}
+
+func TestBeamFilesFromCarriesName(t *testing.T) {
+	work := t.TempDir()
+	a := filepath.Join(work, "a.txt")
+	b := filepath.Join(work, "b.txt")
+	os.WriteFile(a, []byte("aaaa"), 0o644)
+	os.WriteFile(b, []byte("bbbb"), 0o644)
+	list := filepath.Join(work, "files.txt")
+	os.WriteFile(list, []byte("name: fromlist\n# a comment\n"+a+"\n"+b+"\n"), 0o644)
+	out := filepath.Join(work, "beam.html")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"beam", "--files-from", list, "--out", out, "--no-open"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "airlift beam  fromlist → ") {
+		t.Fatalf("the list's name: line should set the beam name:\n%s", stdout.String())
+	}
+}
+
+func TestBeamVersionTarget(t *testing.T) {
+	work := t.TempDir()
+	src := filepath.Join(work, "f.txt")
+	os.WriteFile(src, bytes.Repeat([]byte("x"), 2000), 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"beam", src, "--version-target", "20", "--out", filepath.Join(work, "b.html"), "--no-open"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d\n%s", code, stderr.String())
+	}
+	// version 20 at ECC M → 628-byte chunks (README table).
+	if !strings.Contains(stdout.String(), "× 628 bytes") {
+		t.Fatalf("version-target chunk:\n%s", stdout.String())
 	}
 }
 
 func TestBadInvocations(t *testing.T) {
 	cases := [][]string{
 		{},
-		{"--nope"},
 		{"nope-command"},
-		{"replay", filepath.Join(t.TempDir(), "missing")},
-		{"replay"}, // no FILE
-		{"tower", "--cert", "only.pem"},
+		{"beam"}, // no input
+		{"beam", filepath.Join(t.TempDir(), "missing"), "--no-open"},
+		{"beam", ".", "--ecc", "Z", "--no-open"},
+		{"tower", "--cert", "only.pem"}, // cert without key
 		{"tower", "--bind", "not-an-ip"},
-		{"beam"},                    // neither --in nor --root
-		{"frames"},                  // no --in
-		{"decode", "--frames", "x"}, // no --out
 	}
 	for _, args := range cases {
 		var stdout, stderr bytes.Buffer
@@ -118,48 +152,6 @@ func TestTerminalQR(t *testing.T) {
 	}
 }
 
-func TestReplayIntoRunningTower(t *testing.T) {
-	store := session.NewStore(time.Hour, 4)
-	srv := server.New(server.Options{Store: store, Dest: t.TempDir(), Logf: t.Logf})
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-	resp, err := http.Post(ts.URL+"/api/sessions", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var c struct {
-		SID   string `json:"sid"`
-		Token string `json:"token"`
-	}
-	json.NewDecoder(resp.Body).Decode(&c)
-	resp.Body.Close()
-	join := ts.URL + "/s/" + c.SID + "#t=" + c.Token
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"replay", vectors, "--into", join, "--rate", "0", "--drop", "0.3", "--ca-dir", t.TempDir()}, &stdout, &stderr)
-	if code != 0 || !strings.Contains(stdout.String(), "state READY") {
-		t.Fatalf("exit %d\n%s\n%s", code, stdout.String(), stderr.String())
-	}
-	req, _ := http.NewRequest("GET", ts.URL+"/api/sessions/"+c.SID, nil)
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	resp, _ = http.DefaultClient.Do(req)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(body), `"state":"READY"`) || !strings.Contains(string(body), `"downloads":["raw","zip"]`) {
-		t.Fatalf("tower session: %s", body)
-	}
-	for _, bad := range []string{"nope", "https://h:1/x/y#t=z", "https://h:1/s/#t=z", "https://h:1/s/abc", "ftp://h/s/abc#t=z"} {
-		if _, _, _, err := parseJoinURL(bad); err == nil {
-			t.Errorf("%q accepted", bad)
-		}
-	}
-	if base, sid, tok, err := parseJoinURL("https://10.0.0.5:8443/s/abc123#t=T0k_en-"); err != nil || base != "https://10.0.0.5:8443" || sid != "abc123" || tok != "T0k_en-" {
-		t.Fatalf("parse: %s %s %s %v", base, sid, tok, err)
-	}
-	if code := run([]string{"replay", "--into", join}, &stdout, &stderr); code != 2 {
-		t.Fatalf("replay --into without a FILE: exit %d", code)
-	}
-}
-
 func TestQuietTLSFiltersHandshakeNoise(t *testing.T) {
 	var out bytes.Buffer
 	w := quietTLS{&out}
@@ -170,67 +162,9 @@ func TestQuietTLSFiltersHandshakeNoise(t *testing.T) {
 	}
 }
 
-func TestReplayFountainVectors(t *testing.T) {
-	dest := t.TempDir()
-	var out, errb bytes.Buffer
-	fountain := filepath.Join("..", "..", "testdata", "vectors", "vectors-fountain.json")
-	code := run([]string{"replay", fountain, "--dest", dest, "--drop", "0.3", "--shuffle", "--rate", "0"}, &out, &errb)
-	if code != 0 || !strings.Contains(out.String(), "state READY") {
-		t.Fatalf("exit %d\n%s\n%s", code, out.String(), errb.String())
+func first(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
 	}
-	if !strings.Contains(out.String(), "replay pass 1:") || strings.Contains(out.String(), "replay pass 3:") {
-		t.Fatalf("fountain should not need three passes at 30%% loss:\n%s", out.String())
-	}
-}
-
-// TestPackFramesReplayEndToEnd drives the whole binary: pack a tree, dump its
-// frames, replay them into a loopback tower with loss, and confirm the restored
-// tree on disk equals the source.
-func TestPackFramesReplayEndToEnd(t *testing.T) {
-	src := filepath.Join("..", "..", "testdata", "bundles", "multi", "tree")
-	work := t.TempDir()
-	bundlePath := filepath.Join(work, "bundle.txt")
-	framesPath := filepath.Join(work, "frames.json")
-	dest := t.TempDir()
-
-	if code := run([]string{"pack", "--root", src, "--format", "base64", "--out", bundlePath}, io.Discard, io.Discard); code != 0 {
-		t.Fatal("pack failed")
-	}
-	if code := run([]string{"frames", "--in", bundlePath, "--out", framesPath, "--seed", "3"}, io.Discard, io.Discard); code != 0 {
-		t.Fatal("frames failed")
-	}
-	var out bytes.Buffer
-	code := run([]string{"replay", framesPath, "--dest", dest, "--rate", "0", "--drop", "0.25", "--shuffle"}, &out, io.Discard)
-	if code != 0 || !strings.Contains(out.String(), "state READY") {
-		t.Fatalf("replay exit %d\n%s", code, out.String())
-	}
-	// bundle.txt unpacks to the stem directory "bundle/"; it must equal the source.
-	want := readWorkTree(t, src)
-	got := readWorkTree(t, filepath.Join(dest, "bundle"))
-	if len(got) != len(want) {
-		t.Fatalf("restored %d files, want %d", len(got), len(want))
-	}
-	for p, w := range want {
-		if !bytes.Equal(got[p], w) {
-			t.Fatalf("%s differs or missing", p)
-		}
-	}
-}
-
-func readWorkTree(t *testing.T, root string) map[string][]byte {
-	t.Helper()
-	out := map[string][]byte{}
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		data, err := os.ReadFile(p)
-		rel, _ := filepath.Rel(root, p)
-		out[filepath.ToSlash(rel)] = data
-		return err
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out
+	return s
 }

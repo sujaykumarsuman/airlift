@@ -1,8 +1,8 @@
 // Package beam is the encode side of airlift: the shared pipeline that turns a
 // byte blob into a manifest and a list of frames (gzip → chunk → frame →
-// base45, sequential or fountain), the QR rendering and self-contained HTML
-// player that `airlift beam` emits, the frames dump that `airlift frames`
-// writes, and the reference decode that `airlift decode` runs. `airlift beam`,
-// `airlift frames` and `internal/replay` share the one encoder here. See
-// docs/PROTOCOL.md.
+// base45, sequential or fountain, chosen by ModeAuto), the QR rendering and
+// self-contained HTML player that `airlift beam` emits (Build ties them
+// together), and the reference Decode. `airlift beam` and `internal/replay`
+// share the one encoder here; the Dump type is the internal fixture format the
+// frozen vectors use. See docs/PROTOCOL.md.
 package beam

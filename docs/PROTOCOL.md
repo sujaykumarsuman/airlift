@@ -100,20 +100,19 @@ receiver trims it back using `gz_size`.
    indices, repeats rejected.
 
 The sender emits packets with seeds `0 … K−1`, `K` defaulting to
-`N + max(48, ⌈3·√N·ln N⌉)` (`--fountain-packets` overrides). Any
-`≈ 1.2 N` distinct packets decode a large transfer; small N needs more,
-which the default's surplus term covers.
+`N + max(48, ⌈3·√N·ln N⌉)`. Any `≈ 1.2 N` distinct packets decode a large
+transfer; small N needs more, which the default's surplus term covers.
 
 ## Loop schedule
 
 The player cycles frames at `--fps` (default 8):
 
-- **Sequential** (default): `[M, D0 … D(N-1)]` repeating, with `M`
+- **Sequential** (small payloads): `[M, D0 … D(N-1)]` repeating, with `M`
   re-inserted after every 20 data frames (`--manifest-every`) so a scanner
   that joins mid-loop learns `N` promptly.
-- **Fountain** (`--fountain`): `[M, F0 … F(K−1)]` repeating, same `M`
-  cadence. Missed packets cost nothing beyond themselves: any sufficient
-  set of distinct packets decodes.
+- **Fountain** (chosen automatically once N is large enough): `[M, F0 … F(K−1)]`
+  repeating, same `M` cadence. Missed packets cost nothing beyond themselves:
+  any sufficient set of distinct packets decodes.
 
 One pass is `N + ⌈N / 20⌉` frames, so `(N + ⌈N/20⌉) / fps` seconds; real runs
 need more than one pass because frames are missed.
@@ -124,7 +123,7 @@ and keys for pause, step, fps and fullscreen.
 
 ## Reassembly and verification chain
 
-On the tower (ADR 0005), and identically in `airlift decode`:
+On the tower (ADR 0005), and identically in the offline `internal/beam.Decode`:
 
 1. Frames arrive as base45 strings; decode → parse → CRC check → dedup by
    `(session, type, seq)`.
@@ -149,8 +148,9 @@ On the tower (ADR 0005), and identically in `airlift decode`:
 
 ## Frames dump
 
-`airlift frames` (and `airlift beam --dump`) writes the JSON that
-cross-implementation tests and `airlift replay` consume:
+The frames dump is the internal fixture format the frozen `testdata/vectors/`
+files use and that `internal/replay` consumes to drive a tower without a
+camera. It is not a user-facing artifact. Shape:
 
 ```json
 {
@@ -161,7 +161,7 @@ cross-implementation tests and `airlift replay` consume:
 ```
 
 `frames` holds each frame exactly once, in the order `[M, D0 … D(N-1)]` (or
-`[M, F0 … F(K-1)]` for `--fountain`); the loop schedule is the consumer's
+`[M, F0 … F(K-1)]` in fountain layout); the loop schedule is the consumer's
 business. `manifest` is the MANIFEST payload parsed, so a consumer can check
 its own parser against it. A fountain dump adds
 `"fountain": {"packets": K, "indices": [[…], …]}`, the index set of every

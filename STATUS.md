@@ -1,24 +1,28 @@
 # STATUS
 
-## Phase 5 — One `airlift` binary: built and verified
+## Phase 5 — One `airlift` binary, two commands: built and verified
 
-- `cmd/airlift` with `pack`, `unpack`, `beam`, `frames`, `decode`, `tower`,
-  `replay`. The Python sender and `tools/repobundle.py` are retired (ADR 0010);
-  `internal/bundle.Pack` reproduces the four committed bundles byte for byte,
-  `internal/beam` holds the shared encoder, QR rendering (`rsc.io/qr/coding`,
-  ADR 0011) and the embedded player, and `internal/replay` uses that encoder.
-- `beam` takes `--in FILE` or `--root DIR [PATHS...]` (packs first); `--dump`
-  writes the frames dump; `--version-target` agrees with the README table.
-  `tower` and `replay` keep their Phase 1–4 behaviour (TLS, `--dest`).
-- Fixtures moved to `testdata/vectors/`; the gate, CI and release workflow drop
-  Python and build `airlift`; `docs/BUNDLE.md` added; README and CLAUDE.md
-  rewritten for one binary; `docs/PROTOCOL.md`/`API.md` references updated.
-- Verified: the four bundles reproduced byte for byte; `unpack` and a Go
-  `pack → frames → replay → READY` round-trip the multi tree; the beam is
-  structurally sound with no external references; `frames --fountain` over the
-  multi bundle yields the frozen index sets and decodes back. Exit criterion:
-  `beam --root testdata/bundles/multi/tree --fountain --dump beam.json` then
-  `replay beam.json --drop 0.3 --shuffle` reaches READY in one pass.
+- `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender
+  and `tools/repobundle.py` are retired; `internal/bundle.Pack` reproduces the
+  four committed bundles byte for byte, `internal/beam` holds the shared
+  encoder + `Build`, QR rendering (`rsc.io/qr/coding`, ADR 0011) and the
+  embedded player, and `internal/replay` (camera-free dev loop) uses it.
+  Bundling, the frame codec, decode and replay are internal, not commands.
+- `beam PATH…` bundles a folder (git-aware) or several files, sends a single
+  file as-is, always carries a name (folder/file name, `--name`, a `name:` line
+  in `--files-from`, or a prompt), auto-selects sequential vs fountain by size
+  (no flag), writes a self-contained page and opens it in the browser
+  (`--no-open` to suppress). `--version-target` agrees with the README table.
+- `tower` keeps its Phase 1–4 behaviour (local-CA TLS, `--dest`, LAN bind);
+  `~/.airlift` config and preflight are Phase 6.
+- Fixtures under `testdata/vectors/`; the gate, CI and release drop Python and
+  build `airlift`; `docs/BUNDLE.md` added, ADRs 0010/0011, README/CLAUDE/
+  PROTOCOL/API updated; the old `docs/BUILD-PLAN.md` retired.
+- Verified: the four bundles reproduced byte for byte; a Go bundle → beam
+  (auto fountain) → replay through loss → READY restores the multi tree on
+  disk; the beam is structurally sound with no external references; `beam`
+  fountain over the multi bundle yields the frozen index sets and decodes back;
+  `beam .` and multi-file naming exercised through the CLI.
 
 ## Pending — the hosted tower and the hardware runs
 
@@ -32,12 +36,20 @@
 
 ## Next
 
-- Phase 6: config file, overrides, env and flags; remove TLS/LAN/`--dest`; open
-  multi-user sessions, clients per address, the lifecycle and on-disk data;
-  `public_url` with `<base href>`; the web changes. ADRs 0012, 0013.
+- Phase 6: `~/.airlift` config (read/create) + preflight for `tower`, overrides,
+  env and flags; remove TLS/LAN/`--dest`; open multi-user sessions, clients per
+  address, the lifecycle and on-disk data; `public_url` with `<base href>`; the
+  web changes. ADRs 0012, 0013.
+- **Multiple beams per session** (operator request): a live session should
+  accept and list several named beams. The tower today binds one sender session
+  per tower session (the first MANIFEST), so this needs the Phase 6 session
+  model — a session holding N payloads keyed by beam name, each with its own
+  reassembly and download. Design it there.
 
 ## Open questions
 
-- None new. Whether Go's gzip ever crosses a chunk boundary on some toolchain
-  and changes N for the multi fixture is guarded by the fountain vector test,
-  which fails loudly if the packet count diverges.
+- Fountain auto-threshold is `FountainThreshold = 24` chunks; tune once real
+  phone runs show where sequential stops being snappy enough.
+- Whether Go's gzip ever crosses a chunk boundary on some toolchain and changes
+  N for the multi fixture is guarded by the fountain vector test, which fails
+  loudly if the packet count diverges.

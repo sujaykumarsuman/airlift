@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/beam"
+	"github.com/sujaykumarsuman/airlift/internal/bundle"
 	"github.com/sujaykumarsuman/airlift/internal/proto"
 	"github.com/sujaykumarsuman/airlift/internal/replay"
 	"github.com/sujaykumarsuman/airlift/internal/session"
@@ -163,6 +164,37 @@ func sameTree(t *testing.T, got, want map[string][]byte, what string) {
 	}
 }
 
+// TestEndToEndGoPackBeam drives the whole Go pipeline the `airlift beam`
+// command uses: bundle a tree, encode it (auto layout → fountain at this size),
+// relay it into a real tower through loss, and confirm the unpacked tree on
+// disk equals the source.
+func TestEndToEndGoPackBeam(t *testing.T) {
+	dest := t.TempDir()
+	h := start(t, dest, nil)
+	var buf bytes.Buffer
+	if _, err := bundle.Pack(&buf, filepath.Join(fixtures, "multi", "tree"), "base64", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	d, err := beam.Encode(buf.Bytes(), "multi", 600, 0x51EED, beam.ModeAuto, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Fountain == nil {
+		t.Fatalf("a %d-chunk payload should auto-select fountain", d.Manifest.Total())
+	}
+	c := h.create(t)
+	rep := h.replay(t, c, d, replay.Options{Drop: 0.25, Shuffle: true, Passes: 8, Seed: 4})
+	if rep.State != session.StateReady {
+		t.Fatalf("not READY: %+v\n%s", rep, rep.Snapshot)
+	}
+	snap := h.snapshot(t, c)
+	if snap.Name != "multi" || strings.Join(snap.Downloads, ",") != "raw,zip" {
+		t.Fatalf("snapshot %+v", snap)
+	}
+	// name "multi" has no extension, so the tree lands at <dest>/multi.tree.
+	sameTree(t, readTree(t, filepath.Join(dest, "multi.tree")), readTree(t, filepath.Join(fixtures, "multi", "tree")), "go-beam")
+}
+
 func TestEndToEndReplayWithDrop(t *testing.T) {
 	dest := t.TempDir()
 	h := start(t, dest, nil)
@@ -266,7 +298,7 @@ func TestSingleFileBundle(t *testing.T) {
 	dest := t.TempDir()
 	h := start(t, dest, nil)
 	input, _ := os.ReadFile(filepath.Join(fixtures, "single", "bundle-text.txt"))
-	d, err := beam.Encode(input, "single.txt", 200, 7, false, 0)
+	d, err := beam.Encode(input, "single.txt", 200, 7, beam.ModeSequential, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +328,7 @@ func TestRawFileIsNotABundle(t *testing.T) {
 	h := start(t, dest, nil)
 	data := make([]byte, 3000)
 	rand.New(rand.NewSource(1)).Read(data)
-	d, _ := beam.Encode(data, "noise", 600, 9, false, 0)
+	d, _ := beam.Encode(data, "noise", 600, 9, beam.ModeSequential, 0)
 	c := h.create(t)
 	if rep := h.replay(t, c, d, replay.Options{Shuffle: true, Seed: 2}); rep.State != session.StateReady {
 		t.Fatalf("%+v", rep)
@@ -344,7 +376,7 @@ func TestBundleWithBadFileFails(t *testing.T) {
 	h := start(t, t.TempDir(), nil)
 	text, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-text.txt"))
 	tampered := bytes.Replace(text, []byte("Notes on the multi fixture"), []byte("notes on the multi fixture"), 1)
-	d, _ := beam.Encode(tampered, "tampered.txt", 600, 3, false, 0)
+	d, _ := beam.Encode(tampered, "tampered.txt", 600, 3, beam.ModeSequential, 0)
 	c := h.create(t)
 	if rep := h.replay(t, c, d, replay.Options{}); rep.State != session.StateFailed {
 		t.Fatalf("%+v", rep)

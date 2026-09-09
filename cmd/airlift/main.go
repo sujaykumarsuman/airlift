@@ -1,20 +1,21 @@
 // Command airlift is the single binary for optical file transfer out of an
-// air-gapped machine. It packs a folder or files into a repobundle, renders a
-// file or a tree as an animated QR loop (the beam), dumps and decodes frames,
-// hosts the tower that reassembles and verifies what scanners relay, and
-// replays a dump into a session for development. One static binary runs inside
-// the air gap; the same binary runs the tower on the operator's laptop.
+// air-gapped machine. Two user-facing subcommands:
 //
-// Subcommands: pack, unpack, beam, frames, decode, tower, replay. See the
-// project README and docs/.
+//	beam    bundle a folder/file(s) into a named beam and open its QR page
+//	tower   host the airlift server that scanners relay to
+//
+// Bundling, the frame codec, QR rendering, reassembly and the dev replay all
+// live in internal packages; the binary exposes only what a transfer needs.
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -23,13 +24,8 @@ const usage = `airlift — optical file transfer out of an air-gapped machine.
 usage: airlift <command> [flags]
 
 commands:
-  pack     pack a folder or files into a repobundle text file
-  unpack   restore files from a repobundle, checking every sha256
-  beam     write a self-contained HTML QR player for a file or a tree
-  frames   dump {sender_session, manifest, frames} as JSON
-  decode   reassemble a file from a frames dump
-  tower    host a session, decode relayed frames, verify and serve
-  replay   feed a frames dump into a tower session (dev loop, no camera)
+  beam    bundle a folder or file(s) into a named beam (an offline QR page)
+  tower   host a session, decode relayed frames, verify and serve
 
 Run "airlift <command> -h" for a command's flags.
 `
@@ -43,20 +39,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "pack":
-		return cmdPack(rest, stdout, stderr)
-	case "unpack":
-		return cmdUnpack(rest, stdout, stderr)
 	case "beam":
 		return cmdBeam(rest, stdout, stderr)
-	case "frames":
-		return cmdFrames(rest, stdout, stderr)
-	case "decode":
-		return cmdDecode(rest, stdout, stderr)
 	case "tower":
 		return cmdTower(rest, stdout, stderr)
-	case "replay":
-		return cmdReplay(rest, stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -83,30 +69,46 @@ func parsePermuted(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// writeDump writes a frames dump as indented JSON with a trailing newline.
-func writeDump(path string, d any) error {
-	b, err := json.MarshalIndent(d, "", " ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
-}
-
-// readFileList reads one path per line, dropping blanks and # comments.
-func readFileList(path string) ([]string, error) {
+// readFileList reads a --files-from list: one path per line, dropping blanks
+// and # comments. A leading `name: X` line sets the beam name and is returned
+// separately.
+func readFileList(path string) (paths []string, name string, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	var out []string
 	for _, ln := range strings.Split(string(data), "\n") {
 		s := strings.TrimSpace(ln)
 		if s == "" || strings.HasPrefix(strings.TrimLeft(ln, " \t"), "#") {
 			continue
 		}
-		out = append(out, s)
+		if rest, ok := strings.CutPrefix(s, "name:"); ok {
+			name = strings.TrimSpace(rest)
+			continue
+		}
+		paths = append(paths, s)
 	}
-	return out, nil
+	return paths, name, nil
+}
+
+// openBrowser opens path in the platform's default handler. Failure is not
+// fatal — the caller reports it and leaves the file in place.
+func openBrowser(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	var name string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		name, args = "open", []string{abs}
+	case "windows":
+		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", abs}
+	default:
+		name, args = "xdg-open", []string{abs}
+	}
+	return exec.Command(name, args...).Start()
 }
 
 // human formats a byte count for the beam summary.

@@ -1,5 +1,5 @@
 # airlift — build, test and package the single `airlift` binary. `make` never
-# runs the application. See docs/BUILD-PLAN.md and prompts/002-go-cli-and-hosting.md.
+# runs the application. See prompts/002-go-cli-and-hosting.md.
 BIN       := bin
 AIRLIFT   := airlift
 MODULE    := github.com/sujaykumarsuman/airlift

@@ -28,7 +28,7 @@ func Load(path string) (dump *Dump, encoded bool, err error) {
 		return &d, false, nil
 	}
 	sum := sha256.Sum256(raw)
-	d2, err := Encode(raw, filepath.Base(path), DefaultChunk, binary.BigEndian.Uint32(sum[:4]), false, 0)
+	d2, err := Encode(raw, filepath.Base(path), DefaultChunk, binary.BigEndian.Uint32(sum[:4]), ModeSequential, 0)
 	return d2, true, err
 }
 

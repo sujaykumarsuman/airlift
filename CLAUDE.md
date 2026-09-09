@@ -4,15 +4,15 @@ Optical file transfer out of an air-gapped machine. A sender renders a file as
 an animated QR loop on a monitor; a phone browser scans the loop and relays
 decoded frames to a server on the operator's laptop, which reassembles,
 verifies, unpacks and serves the result. Primary payload is a `repobundle`
-text file (`docs/BUNDLE.md`, produced by `airlift pack`). One Go binary,
+text file (`docs/BUNDLE.md`, produced by `airlift beam`). One Go binary,
 `airlift`, does all of it (ADR 0010). Personal tooling; device agnostic; no
 ecosystem features (AirDrop, Quick Share, Continuity) anywhere in the main
 path.
 
-Canonical documents: `docs/BUILD-PLAN.md` (phases), `docs/PROTOCOL.md` (wire
-format), `docs/BUNDLE.md` (repobundle format), `docs/API.md` (HTTP API),
-`docs/adr/` (locked decisions), `STATUS.md` (where we are). The originating
-prompts are `prompts/001-init.md` and `prompts/002-go-cli-and-hosting.md`.
+Canonical documents: `prompts/002-go-cli-and-hosting.md` (the current plan and
+phases), `docs/PROTOCOL.md` (wire format), `docs/BUNDLE.md` (repobundle
+format), `docs/API.md` (HTTP API), `docs/adr/` (locked decisions), `STATUS.md`
+(where we are). `prompts/001-init.md` is the original plan, kept for history.
 
 ## Roles (canonical — do not let these blur)
 
@@ -39,18 +39,22 @@ directly (out of scope; see non-goals).
 ## Components
 
 - `cmd/airlift/` — Go, single static binary `airlift`. Module at repo root.
-  Subcommands `pack`, `unpack`, `beam`, `frames`, `decode`, `tower`, `replay`
-  (`sessions`, `fetch` land with the admin phase). The beam side runs inside
-  the air gap; `tower` runs on the operator's laptop. Owns sessions, protocol
-  decode, reassembly, verification, bundle unpack, downloads, TLS. Serves the
-  embedded web UI.
-- `internal/beam` — the shared encoder (gzip → chunk → frame, sequential and
-  fountain), QR rendering (`rsc.io/qr/coding`, ADR 0011) and the embedded HTML
-  player; `beam`, `frames` and `internal/replay` share it. `Decode` is the
-  offline reassembly for `airlift decode`.
+  Two user-facing subcommands only (ADR 0010): `beam` (bundle a folder/file(s)
+  into a named QR page and open it — runs inside the air gap) and `tower` (host
+  the server on the operator's laptop). Everything else is an internal process,
+  not a command. `tower` owns sessions, protocol decode, reassembly,
+  verification, bundle unpack, downloads, TLS; it serves the embedded web UI.
+- `internal/beam` — the shared encoder (gzip → chunk → frame, sequential or
+  fountain, `ModeAuto` picking per size), QR rendering (`rsc.io/qr/coding`,
+  ADR 0011), the embedded HTML player, `Build` (the whole beam pipeline) and
+  `Decode` (offline reassembly, used by tests). `beam` and `internal/replay`
+  share it.
 - `internal/bundle` — repobundle `Pack`/`Parse`, tree/zip writers, the one
   path sanitiser. `Pack` is a byte-for-byte port of the retired
   `tools/repobundle.py` (`docs/BUNDLE.md`).
+- `internal/replay` — the simulated scanner (loop, loss, reordering, batched
+  POSTs) that drives a tower without a camera; internal, for the dev loop and
+  the end-to-end tests.
 - `web/` — vanilla TypeScript + Vite, entries `scan` (phone) and `tower`
   (dashboard). No framework. Embedded into the Go binary via `embed.go`.
 
@@ -98,15 +102,16 @@ directly (out of scope; see non-goals).
   `/assets/`, never a CDN) and `qrcode` (join QR). Nothing else without an ADR.
 - Browsers talk to the API with `fetch` only: SSE through a streaming fetch
   and downloads through blobs, because the token travels in a header.
-- `airlift replay FILE --into JOIN_URL` feeds a session on a running tower; it
-  is how the dashboard is exercised without a camera. `airlift replay FILE`
-  alone runs a private loopback tower, which CI relies on.
-- Shared fixtures: `testdata/bundles/` (trees plus the bundles `airlift pack`
-  reproduces from them, the byte-for-byte contract of ADR 0010) and
-  `testdata/vectors/vectors*.json` (frames dumps for the multi base64 bundle,
-  sequential and `--fountain`). The vectors are frozen from the original Python
-  sender and are never regenerated from Go; the bundles are regenerated only
-  when a tree changes (see `testdata/bundles/README.md`).
+- The dashboard is exercised without a camera by `internal/replay` inside
+  `go test` (bundle → beam → replay through loss → READY → the tree restored);
+  there is no `replay` command. `beam`'s fountain choice is automatic (ADR
+  0010), so there is no `--fountain` flag.
+- Shared fixtures: `testdata/bundles/` (trees plus the bundles
+  `internal/bundle.Pack` reproduces from them, the byte-for-byte contract of
+  ADR 0010) and `testdata/vectors/vectors*.json` (frames dumps for the multi
+  base64 bundle, sequential and fountain layouts). The vectors are frozen from
+  the original Python sender and are never regenerated from Go; the bundles are
+  regenerated only when a tree changes (see `testdata/bundles/README.md`).
 - The fountain packet construction is a cross-language contract (ADR 0009):
   it lives in `internal/proto/fountain.go`, keeps its arithmetic free of fused
   multiply-add, and is checked seed-by-seed against the frozen vectors.

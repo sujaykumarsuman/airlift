@@ -52,7 +52,7 @@ func TestLoadDumpAndRaw(t *testing.T) {
 func TestEncodeRoundTripsThroughSession(t *testing.T) {
 	data := make([]byte, 5000)
 	rand.New(rand.NewSource(5)).Read(data)
-	d, err := beam.Encode(data, "noise.bin", 300, 0xCAFEBABE, false, 0)
+	d, err := beam.Encode(data, "noise.bin", 300, 0xCAFEBABE, beam.ModeSequential, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,15 +72,15 @@ func TestEncodeRoundTripsThroughSession(t *testing.T) {
 	if res.Err != nil || !bytes.Equal(res.Data, data) {
 		t.Fatalf("chain: %v", res.Err)
 	}
-	if _, err := beam.Encode(data, "x", 0, 1, false, 0); err == nil {
+	if _, err := beam.Encode(data, "x", 0, 1, beam.ModeSequential, 0); err == nil {
 		t.Fatal("chunk 0 accepted")
 	}
 	noise := make([]byte, 70000)
 	rand.New(rand.NewSource(1)).Read(noise)
-	if _, err := beam.Encode(noise, "x", 1, 1, false, 0); err == nil {
+	if _, err := beam.Encode(noise, "x", 1, 1, beam.ModeSequential, 0); err == nil {
 		t.Fatal("too many chunks accepted")
 	}
-	empty, err := beam.Encode(nil, "empty", 600, 1, false, 0)
+	empty, err := beam.Encode(nil, "empty", 600, 1, beam.ModeSequential, 0)
 	if err != nil || len(empty.Frames) != 2 {
 		t.Fatalf("empty: %v %d", err, len(empty.Frames))
 	}

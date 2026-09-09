@@ -3,6 +3,7 @@ package beam
 import (
 	"bytes"
 	"encoding/json"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,8 +34,9 @@ func TestChunkForVersionMatchesREADME(t *testing.T) {
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	data := bytes.Repeat([]byte("airlift optical transfer "), 400) // ~10 KB, compresses well
-	for _, fountain := range []bool{false, true} {
-		d, err := Encode(data, "sample.txt", 300, 0xABCD1234, fountain, 0)
+	for _, mode := range []Mode{ModeSequential, ModeFountain} {
+		fountain := mode == ModeFountain
+		d, err := Encode(data, "sample.txt", 300, 0xABCD1234, mode, 0)
 		if err != nil {
 			t.Fatalf("encode fountain=%v: %v", fountain, err)
 		}
@@ -56,7 +58,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		}
 	}
 	// A missing frame leaves the sequential decode incomplete with a reason.
-	d, _ := Encode(bytes.Repeat([]byte("x"), 5000), "x", 200, 1, false, 0)
+	d, _ := Encode(bytes.Repeat([]byte("x"), 5000), "x", 200, 1, ModeSequential, 0)
 	r := Decode(d.Frames[:len(d.Frames)-1])
 	if r.OK() || len(r.Missing) == 0 {
 		t.Fatalf("truncated decode: ok=%v missing=%v", r.OK(), r.Missing)
@@ -69,42 +71,36 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 // TestBeamStructural checks the emitted page: one SVG path per frame, the loop
 // order the schedule dictates, and no external references (it must be offline).
 func TestBeamStructural(t *testing.T) {
-	d, err := Encode(bytes.Repeat([]byte("payload "), 500), "tree.bundle.txt", 400, 7, false, 0)
+	res, err := Build(bytes.Repeat([]byte("payload "), 500), "myrepo", Options{Chunk: 400, Seed: ptr(7)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	version, size, paths, err := RenderQR(d.Frames, "M")
-	if err != nil {
-		t.Fatal(err)
+	html, d := res.HTML, res.Dump
+	if len(res.Order) == 0 || res.Version == 0 {
+		t.Fatalf("empty build result %+v", res)
 	}
-	if len(paths) != len(d.Frames) {
-		t.Fatalf("%d paths for %d frames", len(paths), len(d.Frames))
-	}
-	if size != 17+4*version+2*QuietZone {
-		t.Fatalf("size %d, version %d", size, version)
-	}
-	order := Schedule(len(d.Frames)-1, 20)
-	html := PlayerHTML("tree.bundle.txt", d.SenderSession, len(d.Frames)-1, order, paths, size, 8, false)
-
 	frames := extractArray(t, html, "FRAMES")
 	if len(frames) != len(d.Frames) {
 		t.Fatalf("player FRAMES has %d entries, want %d", len(frames), len(d.Frames))
 	}
 	var gotOrder []int
 	decodeArray(t, html, "ORDER", &gotOrder)
-	if len(gotOrder) != len(order) {
-		t.Fatalf("player ORDER has %d entries, want %d", len(gotOrder), len(order))
+	if len(gotOrder) != len(res.Order) {
+		t.Fatalf("player ORDER has %d entries, want %d", len(gotOrder), len(res.Order))
 	}
-	for i := range order {
-		if gotOrder[i] != order[i] {
-			t.Fatalf("order[%d]=%d, want %d", i, gotOrder[i], order[i])
+	for i := range res.Order {
+		if gotOrder[i] != res.Order[i] {
+			t.Fatalf("order[%d]=%d, want %d", i, gotOrder[i], res.Order[i])
 		}
 	}
 	if gotOrder[0] != 0 || gotOrder[1] != 1 {
 		t.Fatalf("loop must open with the manifest then chunk 1: %v", gotOrder[:2])
 	}
-	if !strings.Contains(html, "viewBox=\"0 0 "+strconv.Itoa(size)+" "+strconv.Itoa(size)+"\"") {
+	if !strings.Contains(html, "viewBox=\"0 0 "+strconv.Itoa(res.SizeModules)+" "+strconv.Itoa(res.SizeModules)+"\"") {
 		t.Fatal("viewBox missing or wrong size")
+	}
+	if !strings.Contains(html, "airlift beam · myrepo") {
+		t.Fatal("beam name missing from the page title")
 	}
 	for _, ref := range []string{"://", "src=", "<link", "http-equiv", "https:", "//cdn"} {
 		if strings.Contains(html, ref) {
@@ -113,15 +109,36 @@ func TestBeamStructural(t *testing.T) {
 	}
 }
 
-// TestFramesFountainMatchesVectors is the cross-implementation contract for
-// `airlift frames --fountain` over the multi bundle: the index sets match the
-// frozen Python vectors, and the dump decodes back to the bundle.
+// TestAutoModePicksLayout pins the ModeAuto threshold: tiny payloads stay
+// sequential, larger ones become fountain, without a user flag.
+func TestAutoModePicksLayout(t *testing.T) {
+	small, err := Encode([]byte("tiny"), "small", 600, 1, ModeAuto, 0)
+	if err != nil || small.Fountain != nil {
+		t.Fatalf("small payload should be sequential: %+v", small.Fountain)
+	}
+	// A payload of at least FountainThreshold incompressible chunks goes fountain.
+	big := make([]byte, (FountainThreshold+2)*600)
+	rand.New(rand.NewSource(9)).Read(big) // random bytes barely compress, so N stays high
+	d, err := Encode(big, "big", 600, 1, ModeAuto, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Manifest.Total() < FountainThreshold || d.Fountain == nil {
+		t.Fatalf("payload of %d chunks should be fountain (threshold %d)", d.Manifest.Total(), FountainThreshold)
+	}
+}
+
+func ptr(n int64) *int64 { return &n }
+
+// TestFramesFountainMatchesVectors is the cross-implementation contract for the
+// fountain layout over the multi bundle: the index sets match the frozen Python
+// vectors, and the dump decodes back to the bundle.
 func TestFramesFountainMatchesVectors(t *testing.T) {
 	input, err := os.ReadFile(filepath.Join("..", "..", "testdata", "bundles", "multi", "bundle-base64.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := Encode(input, "bundle-base64.txt", 600, 0xFEEDFACE, true, 0)
+	d, err := Encode(input, "bundle-base64.txt", 600, 0xFEEDFACE, ModeFountain, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

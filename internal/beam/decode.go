@@ -10,7 +10,7 @@ import (
 
 // DecodeResult is what Decode found: the recovered plaintext and manifest when
 // it succeeded, and the frame tallies and reason otherwise. It is the offline
-// counterpart of the tower's ingestion, for `airlift decode`.
+// counterpart of the tower's ingestion, used by the tests.
 type DecodeResult struct {
 	Session    uint32
 	HasSession bool

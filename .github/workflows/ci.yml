@@ -36,9 +36,8 @@ jobs:
       - run: npm --prefix web ci && npm --prefix web run build
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
+      # go test covers the end to end: bundle → beam (auto fountain) → replay
+      # through loss → READY → the unpacked tree equals the source
+      # (internal/server, internal/replay), plus the byte-for-byte bundle and
+      # frozen-vector contracts.
       - run: go test -race ./...
-      - name: end to end, sequential with 20% loss
-        run: go run ./cmd/airlift replay testdata/vectors/vectors.json --dest /tmp/seq --drop 0.2 --rate 0
-      - name: end to end, fountain with 30% loss and reordering
-        run: go run ./cmd/airlift replay testdata/vectors/vectors-fountain.json --dest /tmp/fountain --drop 0.3 --shuffle --rate 0
-      - run: diff -r /tmp/fountain/bundle-base64 testdata/bundles/multi/tree

@@ -1,11 +1,12 @@
 # Repobundle format
 
-A repobundle is one text file that carries a folder — the primary payload
-airlift moves across the air gap in a single copy-paste. `airlift pack` writes
-one; `airlift unpack`, and the tower's bundle stage after verification, read
-one. The format is a byte-for-byte port of the retired `tools/repobundle.py`
-(ADR 0010); the four fixtures under `testdata/bundles/` pin it, and
-`internal/bundle` is the reference implementation.
+A repobundle is one text file that carries a folder — the payload airlift moves
+across the air gap. `airlift beam` bundles a folder or several files into one
+(internally); the tower's bundle stage reads one back after verification and the
+dashboard serves the restored tree. The format is a byte-for-byte port of the
+retired `tools/repobundle.py` (ADR 0010); the four fixtures under
+`testdata/bundles/` pin it, and `internal/bundle` is the reference
+implementation (`Pack` and `Parse`).
 
 ## Layout
 
@@ -37,31 +38,30 @@ one. The format is a byte-for-byte port of the retired `tools/repobundle.py`
 decoder skips any line before the terminator that is neither an entry header
 nor the end marker.
 
-## What `pack` includes
+## What packing includes
+
+`Pack` (which `airlift beam` runs on a folder or several files) selects:
 
 - The file list is what git would track or keep: `git ls-files -z` plus
   `git ls-files -z --others --exclude-standard` (so tracked ignore files are
   included and ignored files are not), de-duplicated and sorted. Outside a git
   repository, or without git, it falls back to a plain directory walk that
-  skips `.git`, also sorted. Explicit `PATHS` (and `--files-from`) override the
-  list and keep their given order.
-- Symlinks, directories and other non-regular files are skipped, as is the
-  output file itself.
+  skips `.git`, also sorted. Explicit file paths keep their given order.
+- Symlinks, directories and other non-regular files are skipped.
 - **text** is human-readable and copy-paste-friendly but skips binary files (a
   file with a NUL byte or invalid UTF-8) and refuses one whose content has a
-  line starting with a boundary marker — re-run with `--format base64`.
-- **base64** survives whitespace and line-ending mangling and carries binaries;
-  it is the format for the actual optical transfer.
+  line starting with a boundary marker — beam with `--format base64`.
+- **base64** (the beam default) survives whitespace and line-ending mangling
+  and carries binaries.
 
-## What `unpack` guarantees
+## What unpacking guarantees
 
-Every entry is checked: the payload must have the declared length and sha256,
-and the path must be safe (relative, no `..`, no absolute or drive-letter
-prefix; `\` is treated as a separator). Only verified entries are written,
-each with its recorded mode, under `--dest`. A failed entry is reported `BAD`
-and not written, and the command exits non-zero. `--dry-run` verifies and
-writes nothing. This is stricter than the original script, which wrote
-corrupt content and warned; airlift never writes an entry it could not verify.
-
-The tower runs the same parse and the same path sanitiser for zip entries and
-for `--dest`, so a malicious bundle cannot escape the destination.
+`Parse` checks every entry: the payload must have the declared length and
+sha256, and the path must be safe (relative, no `..`, no absolute or
+drive-letter prefix; `\` is treated as a separator). The tower runs this after
+the transfer verifies, then `WriteTree` writes only verified entries, each with
+its recorded mode, and the same path sanitiser guards the zip entries and the
+on-disk tree — so a malicious bundle cannot escape its destination. An entry
+that fails is never written; airlift never materialises content it could not
+verify (stricter than the original script, which wrote corrupt content and
+warned).

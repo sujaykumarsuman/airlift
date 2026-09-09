@@ -6,89 +6,56 @@ A machine inside the air gap renders a file as an animated QR loop on its
 monitor (the *beam*). A phone on the operator's LAN scans the loop and relays
 decoded frames to the *tower*, and the tower reassembles the file, verifies it
 hash by hash, unpacks it if it is a [`repobundle`](docs/BUNDLE.md), and serves
-the result to a dashboard and to disk. One static Go binary, `airlift`, does
-all of it — the beam inside the air gap, the tower on the laptop.
+the result to a dashboard for download. One static Go binary, `airlift`, with
+two commands: `beam` inside the air gap, `tower` on the laptop.
 
-Status: **Phase 5 (one binary)**. The Python sender is retired; `airlift`
-packs, beams, hosts and replays. Everything is built and verified end to end
-without a camera, fountain mode included; the runs on real hardware and the
-hosted, multi-user tower are what remain. See [`STATUS.md`](STATUS.md) and
-[`prompts/002-go-cli-and-hosting.md`](prompts/002-go-cli-and-hosting.md).
+Status: **active development** toward a hosted, multi-user tower (see
+[`prompts/002-go-cli-and-hosting.md`](prompts/002-go-cli-and-hosting.md) and
+[`STATUS.md`](STATUS.md)). Today the tower is single-session with a local TLS
+CA; sessions, lifecycle and the hosted shape are the next phases.
 
-## The whole workflow
+## The two commands
 
-On the air-gapped machine, with just the `airlift` binary, in the repository
-to move:
-
-```bash
-airlift beam --root . --fountain --out beam.html
+```
+airlift beam PATH [PATH...]   bundle a folder/file(s) into a named QR page and open it
+airlift tower                 host the server that scanners relay to
 ```
 
-That packs the tree into a base64 repobundle, writes it next to the page, and
-renders `beam.html`. Open it in any browser, make it full-screen.
-
-On the laptop:
-
-```bash
-airlift tower --dest ~/airlift-in
-```
-
-Open the dashboard it prints, create a session, scan the join code with the
-phone, then point the phone at `beam.html` on the air-gapped monitor. The
-dashboard reaches `READY` when every hash matches; the unpacked tree is under
-`~/airlift-in/<name>/` and downloadable as a zip. Without a phone, a laptop
-with a webcam can run the scan page itself; see the zero-hop variant below.
-
-## The binary
-
-One command, `airlift`, with subcommands:
-
-| Subcommand | What it does |
-| --- | --- |
-| `pack` | pack a folder or files into a repobundle text file |
-| `unpack` | restore files from a repobundle, checking every sha256 |
-| `beam` | write a self-contained HTML QR player for a file or a tree |
-| `frames` | dump `{sender_session, manifest, frames}` as JSON |
-| `decode` | reassemble a file from a frames dump |
-| `tower` | host a session, decode relayed frames, verify and serve |
-| `replay` | feed a frames dump into a tower session (dev loop, no camera) |
-
-`pack`, `beam`, `frames` and `decode` need no network and run inside the air
-gap. The web UI (`scan`, `tower`) is TypeScript, embedded into the binary and
-served by the tower. Design: [`docs/PROTOCOL.md`](docs/PROTOCOL.md),
-[`docs/BUNDLE.md`](docs/BUNDLE.md), [`docs/API.md`](docs/API.md),
-[`docs/adr/`](docs/adr/).
+Bundling, the frame codec, QR rendering, reassembly and the camera-free dev
+loop are all internal — the binary exposes only what a transfer needs.
+Receiving-side downloads happen in the tower's dashboard, not on the command
+line.
 
 ## Beam (inside the air gap)
 
-`airlift beam` takes either a single file (`--in FILE`) or a tree
-(`--root DIR [PATHS...]`, packed to a base64 bundle first, written next to the
-page unless `--no-bundle`):
-
 ```bash
-airlift beam --in repo-bundle.txt --out beam.html
+airlift beam .
 ```
 
-Open `beam.html`, make it full-screen, and point the phone at it. `beam`
-prints the chunk count, the QR version, the compression ratio and the seconds
-per pass. Tuning: `--chunk` (payload bytes per frame, default 600, at most
-2242 at ECC M), `--ecc L|M|Q|H`, `--fps`, `--manifest-every`, `--seed`.
-Keys in the player: space pause · ←/→ step · +/- fps · f fullscreen.
+That bundles the current folder (git-aware, so `.gitignore` is respected),
+writes a self-contained `<name>.html`, and opens it in your browser. Make it
+full-screen and point the phone at it.
 
-`airlift frames` dumps the frames as JSON and `airlift decode` rebuilds the
-file from such a dump, no camera involved. `airlift pack` and `airlift unpack`
-are the bundle stage on their own.
+- **A folder** is bundled and named after the folder.
+- **One file** is sent as-is, named after the file.
+- **Several files** are bundled and need a name: `--name NAME`, a `name:` line
+  in a `--files-from LIST`, or you are prompted for one.
 
-### Sequential or fountain
+Every beam has a name, which the tower shows and which lets one session carry
+several beams. `beam` prints the chunk count, QR version, compression ratio and
+loop timing. Tuning flags: `--chunk` (payload bytes per frame, default 600, at
+most 2242 at ECC M), `--ecc L|M|Q|H`, `--fps`, `--manifest-every`, `--name`,
+`--format text|base64`, `--out FILE`, `--no-open`, `--seed`. Keys in the
+player: space pause · ←/→ step · +/- fps · f fullscreen.
 
-The default beam shows the chunks in order and repeats; a missed frame costs
-another pass of the loop, so long transfers spend most of their time waiting
-for stragglers. `--fountain` shows LT-coded packets instead: any roughly
-1.2 N distinct packets rebuild the file, so loss only delays completion by the
-frames lost, and a second phone on the same session halves the time. Fountain
-beams carry about `N + 3·√N·ln N` packets, so the HTML is larger and, for
-small files, a pass is longer than the file warrants; use it for anything over
-a few hundred chunks.
+### Robust by default
+
+Small payloads ship the chunks in order and repeat. Larger ones automatically
+switch to an LT fountain code: any ~1.2×N distinct frames rebuild the file, so
+loss only delays completion by the frames lost (a plain sequential loop waits a
+whole pass for every straggler), and a second phone on the same session roughly
+halves the time. There is no flag — `beam` picks the layout from the payload
+size and prints which it used.
 
 ### Tuning
 
@@ -113,14 +80,6 @@ smaller version or move the phone closer. Larger modules matter more than more
 of them. `--ecc L` gains ~15 % capacity at the cost of glare tolerance;
 `--ecc Q` or `H` the reverse.
 
-### Zero-hop variant
-
-Android 14+ can act as a USB webcam (Settings → Connected devices → USB →
-Webcam). Plug the phone into the laptop, run `airlift tower`, open the
-dashboard *and* the scan link on the laptop itself, and pick the phone in the
-scan page's camera selector; the same works with any external camera. Nothing
-crosses the LAN.
-
 ### On the phone
 
 Add the scan page to the home screen when the browser offers it: it installs
@@ -135,19 +94,21 @@ make airlift
 ```
 
 ```bash
-./bin/airlift tower --dest ~/airlift-in
+./bin/airlift tower
 ```
 
 It binds the LAN address on port 8443, prints the dashboard URL and, for every
 session, the join link with a terminal QR code for the phone. Flags: `--bind`,
 `--port`, `--cert`/`--key` for mkcert users, `--ttl`, `--ca-dir`, and
-`--session` to open a session at start for headless use.
+`--session` to open a session at start for headless use. (Config from
+`~/.airlift`, preflight checks and the hosted, HTTP-behind-a-proxy shape arrive
+in the next phase.)
 
 Open the dashboard on the laptop, press **Create session**, and point the
 phone's camera app at the QR code it shows. The phone opens the scan page,
 asks for the camera, and relays what it decodes; the dashboard fills in live
-and, once every hash matches, offers the downloads and names the `--dest` path
-it wrote.
+and, once every hash matches, offers the downloads (raw file, or the unpacked
+tree as a zip) named after the beam.
 
 ### First run on a phone
 
@@ -168,27 +129,16 @@ so the phone trusts nothing yet:
 Android shows a persistent "network may be monitored" notice while a user CA
 is installed; that is all it means, and removing the certificate ends it. If
 you already use [mkcert](https://github.com/FiloSottile/mkcert), run the tower
-with `--cert`/`--key` instead and skip the above.
+with `--cert`/`--key` instead and skip the above. (The hosted tower of the next
+phase terminates real TLS at a reverse proxy and drops the local CA entirely.)
 
-(The hosted, HTTP-behind-a-proxy tower of prompt 002 replaces this local CA in
-a later phase.)
+### Zero-hop variant
 
-Dev loop without a camera:
-
-```bash
-./bin/airlift replay testdata/vectors/vectors.json --dest /tmp/airlift-out --drop 0.2
-```
-
-`replay` accepts a frames dump from `airlift frames`, or any file, which it
-encodes on the fly. `--rate`, `--drop`, `--shuffle`, `--passes` and `--seed`
-shape the simulated scanner.
-
-To watch it on the dashboard instead, create a session there and feed that
-session on the running tower with `--into` and its join link:
-
-```bash
-./bin/airlift replay testdata/vectors/vectors.json --into 'https://192.168.1.10:8443/s/SID#t=TOKEN'
-```
+Android 14+ can act as a USB webcam (Settings → Connected devices → USB →
+Webcam). Plug the phone into the laptop, run `airlift tower`, open the
+dashboard *and* the scan link on the laptop itself, and pick the phone in the
+scan page's camera selector; the same works with any external camera. Nothing
+crosses the LAN.
 
 ## Web UI development
 
@@ -201,11 +151,10 @@ npm --prefix web run dev
 `https://127.0.0.1:8443`). It uses a self-signed certificate so a phone on the
 LAN gets a secure context for the camera: run `npm --prefix web run dev:lan`
 to expose it and open `https://<laptop>:5173/`. On `localhost`,
-`AIRLIFT_HTTP=1` turns TLS off; localhost is a secure context regardless. The
-dashboard builds join links for its own origin in dev, so the phone talks to
-Vite, which forwards to the tower. Camera and decoder only exist on hardware;
-everything else is unit-tested, and the scan page exposes
-`window.airliftScan.inject([...frames])` to push decoded strings by hand.
+`AIRLIFT_HTTP=1` turns TLS off; localhost is a secure context regardless.
+Camera and decoder only exist on hardware; everything else is unit-tested, and
+the scan page exposes `window.airliftScan.inject([...frames])` to push decoded
+strings by hand.
 
 ## Developing
 
@@ -217,3 +166,7 @@ make lint test    # everything the pre-commit gate runs
 make airlift      # builds web/dist then bin/airlift
 make airlift-all  # cross-compiles the release binaries into bin/
 ```
+
+`go test` covers the whole pipeline end to end — bundle a tree, beam it, relay
+the frames through loss into a real tower, and check the restored tree — so no
+camera or phone is needed to exercise the transfer.

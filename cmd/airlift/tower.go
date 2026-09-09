@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -30,8 +31,9 @@ const (
 	sweepEvery   = 30 * time.Second
 )
 
-// config holds the flags for the tower and replay subcommands; each fills the
-// subset it uses.
+// config holds the tower flags. (TLS, --dest and LAN binding stay until Phase 6
+// replaces them with the ~/.airlift config and a hosted, HTTP-behind-a-proxy
+// tower.)
 type config struct {
 	dest, bind        string
 	port              int
@@ -39,11 +41,6 @@ type config struct {
 	ttl               time.Duration
 	caDir             string
 	session           bool
-	replayFile, into  string
-	rate, drop        float64
-	shuffle           bool
-	passes            int
-	seed              int64
 }
 
 func cmdTower(args []string, stdout, stderr io.Writer) int {
@@ -189,4 +186,27 @@ func runServe(ctx context.Context, c config, stdout io.Writer, logger *log.Logge
 	}
 	logger.Printf("stopped")
 	return 0
+}
+
+// printJoin shows the join link and its QR. The token is part of the link by
+// design; it goes to the operator's terminal, never to the log.
+func printJoin(w io.Writer, sid, join string) {
+	fmt.Fprintf(w, "\nsession %s\njoin    %s\n\n", sid, join)
+	code, err := terminalQR(join)
+	if err != nil {
+		fmt.Fprintf(w, "(no QR: %v)\n", err)
+		return
+	}
+	io.WriteString(w, code)
+}
+
+// quietTLS drops net/http's "TLS handshake error" lines: every phone's first
+// visit before it installs the CA produces one, and the README covers that.
+type quietTLS struct{ w io.Writer }
+
+func (q quietTLS) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	return q.w.Write(p)
 }

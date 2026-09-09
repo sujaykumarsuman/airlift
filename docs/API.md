@@ -149,9 +149,9 @@ keeps its own session in `sessionStorage` across reloads. `GET /ca.crt` serves t
 PEM with `Content-Type: application/x-x509-ca-cert` so phones offer to
 install it; with `--cert/--key` it is `404`.
 
-## Replay mode
+## Replay (internal)
 
-`airlift replay FILE` serves the same API over a private loopback listener
-without TLS, feeds `FILE` into a fresh session as a scanner would, prints the
-verdicts, and exits 0 on `READY`. `airlift replay FILE --into JOIN_URL` feeds a
-session on a running tower instead.
+`internal/replay` feeds a frames dump into a session as a scanner would — loop
+schedule, batched POSTs, configurable loss and reordering — over either a
+private loopback tower or a running one. It is not a user command; it is the
+camera-free dev loop and the end-to-end tests (bundle → beam → replay → READY).
