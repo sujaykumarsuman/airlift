@@ -129,7 +129,15 @@ func (st *Store) Create() (*Session, error) { return st.CreateWith(CreateParams{
 func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if len(st.sessions) >= st.max {
+	// Only OPEN sessions count against the concurrency cap; a TERMINATED session
+	// awaiting its terminated_ttl cleanup is not an active transfer.
+	open := 0
+	for _, s := range st.sessions {
+		if s.Status() == StatusOpen {
+			open++
+		}
+	}
+	if open >= st.max {
 		return nil, ErrTooManySessions
 	}
 	idBytes := make([]byte, 8)

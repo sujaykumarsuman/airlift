@@ -76,6 +76,13 @@ const relay = new Relay({
   },
 });
 
+/** A short message for a terminated session. */
+function terminatedNote(s: Snapshot): string {
+  return s.terminated?.reason === "terminated by session admin"
+    ? "The session was ended by an admin."
+    : "The session has ended (timed out).";
+}
+
 /** The beam the scanner is feeding now: the last one still receiving, else the
  *  most recently arrived. A place may hold several; the scan page tracks one. */
 function activeBeam(): Beam | null {
@@ -125,10 +132,17 @@ function subscribeProgress(as: "viewer" | "relay"): () => void {
     token,
     {
       onEvent: (ev) => {
-        if (ev.event === "state") {
+        if (ev.event === "state" || ev.event === "terminated") {
           // A place stays open across beams; keep relaying whatever the camera
-          // decodes so the operator can move on to the next beam.
+          // decodes so the operator can move on to the next beam. But a
+          // TERMINATED session freezes the transfer (frames now 409), so stop
+          // relaying and let the operator know.
           snap = JSON.parse(ev.data) as Snapshot;
+          if (snap.status === "TERMINATED") {
+            message = terminatedNote(snap);
+            stopCamera();
+            relay.stop();
+          }
         } else if (ev.event === "closed") {
           message = "The session was closed on the tower.";
           stopCamera();

@@ -4,7 +4,7 @@ import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Verdict } from "../shared/types";
+import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Termination, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
 import { type BeamView, failedStage, initialView, parseDeepLink, reduce, tick, type View } from "./state";
 
@@ -98,7 +98,9 @@ function attach(s: Stored): void {
     s.token,
     {
       onEvent: (ev) => {
-        if (ev.event === "state") view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
+        // A one-shot terminated event carries the TERMINATED snapshot; reduce it
+        // like a state push so the dashboard reflects the frozen session.
+        if (ev.event === "state" || ev.event === "terminated") view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
         else if (ev.event === "closed") notice = "The session was closed.";
         else if (ev.event === "evicted") notice = "You were removed from this session.";
         renderStatus();
@@ -234,12 +236,13 @@ function renderStatus(): void {
   const relays = `${s.relays} ${s.relays === 1 ? "relay" : "relays"}`;
   const iAmAdmin = !!current && s.clients.some((cl) => cl.client_id === current!.client_id && cl.session_admin);
   statusEl.innerHTML = html`
-    <div class="card place">
+    <div class="card place${s.status === "TERMINATED" ? " terminated" : ""}">
       <div class="head">
         <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
         <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
       </div>
-      ${s.beams.length === 0 ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
+      ${s.status === "TERMINATED" && s.terminated ? terminatedBanner(s.terminated) : ""}
+      ${s.beams.length === 0 && s.status === "OPEN" ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
       ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>` : ""}
     </div>
     ${view.beams.map((bv) => beamCard(bv, iAmAdmin))}
@@ -260,6 +263,12 @@ function renderStatus(): void {
   statusEl.querySelectorAll<HTMLButtonElement>("[data-remove-beam]").forEach((btn) =>
     btn.addEventListener("click", () => void removeBeam(btn.dataset.removeBeam ?? "")),
   );
+}
+
+/** The banner shown once a session is terminated (the full terminated page is 6.7). */
+function terminatedBanner(t: Termination): Raw {
+  const how = t.reason === "terminated by session admin" ? "ended by an admin" : `ended (${t.reason})`;
+  return html`<p class="warn">Session ${how}. Downloads stay until ${new Date(t.cleanup_at).toLocaleTimeString()}.</p>`;
 }
 
 /** One client in the place's people list; admins get an Evict button on others. */

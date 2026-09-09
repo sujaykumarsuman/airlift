@@ -135,6 +135,22 @@ func TestTooManySessions(t *testing.T) {
 	}
 }
 
+func TestTerminatedFreesCapSlot(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 1) // cap of one OPEN session
+	s, err := st.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(); err != ErrTooManySessions {
+		t.Fatalf("second create at cap: %v", err)
+	}
+	// A TERMINATED session (still in the store until cleanup) frees its slot.
+	s.Terminate("session admin", "done")
+	if _, err := st.Create(); err != nil {
+		t.Fatalf("create after terminate: %v", err)
+	}
+}
+
 func TestSweepTerminatesThenDeletes(t *testing.T) {
 	st, c := newStore(t, time.Hour, 32) // idle = inactive = terminated = 1h, max_age off
 	s, _ := st.Create()                 // no stream → the idle clock runs from creation

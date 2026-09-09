@@ -119,8 +119,7 @@ clamped to its cap, and a value above a cap is a `400` naming it. It registers
 the caller as the first session admin and returns `201 {sid, token, client_id,
 name, join_url, expires_at}`. `join_url` is `<public base>/s/{sid}#t={token}`;
 in serve mode the tower also prints it, with a terminal QR code, to stdout.
-`idle_ttl`/`inactive_ttl` are stored for the lifecycle clocks (a later phase);
-6.5 does not enforce them.
+`idle_ttl`/`inactive_ttl` set the session's lifecycle clocks (see Lifecycle).
 
 When a password is set the session is also joinable without a token: `POST
 /api/sessions/{sid}/join {password, name}` → `{token, client_id, name}` (a `404`
