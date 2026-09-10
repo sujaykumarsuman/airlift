@@ -131,6 +131,11 @@ func (srv *Server) routes() {
 	m.HandleFunc("GET /api/admin/config", srv.admin(srv.adminConfig))
 	m.HandleFunc("GET /api/admin/sessions", srv.admin(srv.adminList))
 	m.HandleFunc("GET /api/admin/events", srv.admin(srv.adminEvents))
+	m.HandleFunc("DELETE /api/admin/sessions/{sid}", srv.adminSess(srv.adminTerminate))
+	m.HandleFunc("POST /api/admin/sessions/{sid}/cancel-termination", srv.adminSess(srv.adminCancel))
+	m.HandleFunc("POST /api/admin/sessions/{sid}/review", srv.adminSess(srv.adminReview))
+	m.HandleFunc("DELETE /api/admin/sessions/{sid}/clients/{cid}", srv.adminSess(srv.adminEvict))
+	m.HandleFunc("GET /api/admin/sessions/{sid}/download", srv.adminSess(srv.adminDownload))
 	m.HandleFunc("GET /s/{sid}", srv.page("scan.html", scanPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
 	if srv.opts.Web != nil {
@@ -316,7 +321,7 @@ func (srv *Server) extension(w http.ResponseWriter, r *http.Request, s *session.
 		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
 		return
 	}
-	if !s.RequestExtension(c.Name, req.Reason, srv.opts.ReviewTTL) {
+	if !s.RequestExtension(c.Name, req.Reason, srv.reviewTTL()) {
 		writeError(w, http.StatusConflict, "no extension can be requested for this session")
 		return
 	}
@@ -460,11 +465,17 @@ func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.S
 		writeError(w, http.StatusBadRequest, "missing or malformed beam id")
 		return
 	}
-	s.MarkActivity(c) // a download counts as activity (a no-op once terminated)
-	as := r.URL.Query().Get("as")
-	d, ok := s.BeamDownload(uint32(sender), as)
+	s.MarkActivity(c) // a client download counts as activity (a no-op once terminated)
+	srv.serveBeam(w, r, s, uint32(sender), r.URL.Query().Get("as"))
+}
+
+// serveBeam streams a READY beam's `as` download (Range-aware). It does NOT touch
+// the activity clock, so both the client download (which marks activity first)
+// and the admin download (which must not keep a session alive) share it.
+func (srv *Server) serveBeam(w http.ResponseWriter, r *http.Request, s *session.Session, sender uint32, as string) {
+	d, ok := s.BeamDownload(sender, as)
 	if !ok {
-		st, exists := s.BeamState(uint32(sender))
+		st, exists := s.BeamState(sender)
 		switch {
 		case !exists:
 			writeError(w, http.StatusNotFound, "no such beam")
@@ -477,7 +488,7 @@ func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.S
 	}
 	rc, err := d.Src.Open()
 	if err != nil {
-		srv.opts.Logf("session %s beam %08x: download %q unavailable: %v", s.ID, uint32(sender), as, err)
+		srv.opts.Logf("session %s beam %08x: download %q unavailable: %v", s.ID, sender, as, err)
 		writeError(w, http.StatusInternalServerError, "download unavailable")
 		return
 	}
@@ -494,6 +505,11 @@ func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.S
 	// sets Content-Length and Accept-Ranges and honours Range.
 	http.ServeContent(w, r, d.Name, time.Time{}, rc)
 }
+
+// warningTTL and reviewTTL read the live lifecycle windows (7.6 sources them from
+// the hot-swappable live config; until then, from the immutable options).
+func (srv *Server) warningTTL() time.Duration { return srv.opts.WarningTTL }
+func (srv *Server) reviewTTL() time.Duration  { return srv.opts.ReviewTTL }
 
 // info advertises the version, public URL, base path, admin state and caps. It
 // is unauthenticated (the pages call it before any session exists) and never

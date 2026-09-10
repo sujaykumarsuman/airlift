@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,6 +86,94 @@ func (srv *Server) adminSessions() []adminSessionView {
 
 func (srv *Server) adminList(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": srv.adminSessions()})
+}
+
+// adminSess resolves {sid} to a live session (404 otherwise) for the mutation
+// routes, inside the admin tier.
+func (srv *Server) adminSess(h func(http.ResponseWriter, *http.Request, *session.Session)) http.HandlerFunc {
+	return srv.admin(func(w http.ResponseWriter, r *http.Request) {
+		s, ok := srv.opts.Store.Get(r.PathValue("sid"))
+		if !ok {
+			writeError(w, http.StatusNotFound, "no such session")
+			return
+		}
+		h(w, r, s)
+	})
+}
+
+// adminTerminate ends a session: with ?now it terminates immediately (skipping
+// the warning), otherwise it starts the warning_ttl countdown (TERMINATING).
+func (srv *Server) adminTerminate(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	if r.URL.Query().Has("now") {
+		if !s.Terminate("airlift admin", "terminated by airlift admin") {
+			writeError(w, http.StatusConflict, "session is not live")
+			return
+		}
+	} else if !s.StartTermination("airlift admin", srv.warningTTL()) {
+		writeError(w, http.StatusConflict, "session is not open")
+		return
+	}
+	srv.writeSessionJSON(s)
+	srv.opts.Logf("admin terminated session %s", s.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminCancel revokes a warning, returning a TERMINATING session to OPEN.
+func (srv *Server) adminCancel(w http.ResponseWriter, _ *http.Request, s *session.Session) {
+	if !s.CancelTermination() {
+		writeError(w, http.StatusConflict, "session is not terminating")
+		return
+	}
+	srv.writeSessionJSON(s)
+	srv.opts.Logf("admin cancelled the termination of session %s", s.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminReview resolves a pending extension: accept reopens the session, reject
+// moves it to REJECTED with the note.
+func (srv *Server) adminReview(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	var req struct {
+		Decision string `json:"decision"`
+		Note     string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if req.Decision != "accept" && req.Decision != "reject" {
+		writeError(w, http.StatusBadRequest, "decision must be \"accept\" or \"reject\"")
+		return
+	}
+	if !s.Review(req.Decision == "accept", req.Note) {
+		writeError(w, http.StatusConflict, "session is not pending review")
+		return
+	}
+	srv.writeSessionJSON(s)
+	srv.opts.Logf("admin %sed the extension for session %s", req.Decision, s.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminEvict bars a client's address from a session (airlift admin).
+func (srv *Server) adminEvict(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	if _, ok := s.EvictClientByID(r.PathValue("cid")); !ok {
+		writeError(w, http.StatusNotFound, "no such client")
+		return
+	}
+	srv.opts.Logf("admin evicted a client from session %s", s.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminDownload streams a READY beam for the operator, in any non-deleted status
+// (the files are kept), WITHOUT marking activity — a peek must not keep a session
+// alive.
+func (srv *Server) adminDownload(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	sender, err := strconv.ParseUint(r.URL.Query().Get("beam"), 16, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "missing or malformed beam id")
+		return
+	}
+	srv.serveBeam(w, r, s, uint32(sender), r.URL.Query().Get("as"))
 }
 
 // adminEvents streams the sessions list as SSE, pushing only when the serialised

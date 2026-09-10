@@ -1059,6 +1059,132 @@ func TestAdminEventsSSE(t *testing.T) {
 	}
 }
 
+// TestAdminMutations drives the airlift-admin lifecycle actions and checks the
+// SSE a session stream receives: warn → terminating, cancel → reopened, ?now →
+// terminated, extension → accept → reopened, plus 409 on out-of-state actions and
+// an admin evict closing the stream.
+func TestAdminMutations(t *testing.T) {
+	h := start(t, func(o *Options) {
+		o.AdminToken = "adm"
+		o.WarningTTL = time.Hour
+		o.ReviewTTL = time.Hour
+	})
+	c := h.create(t)
+	adm := func(method, path string, body []byte) *http.Response {
+		req, _ := http.NewRequest(method, h.ts.URL+path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer adm")
+		resp, err := h.ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	req, _ := http.NewRequest("GET", h.ts.URL+"/api/sessions/"+c.SID+"/events", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("X-Airlift-Client", c.ClientID)
+	resp, err := h.ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	r := bufio.NewReader(resp.Body)
+	if name, _ := readEvent(t, r); name != "state" {
+		t.Fatalf("first event %s", name)
+	}
+	until := func(status session.Status, wantName string) {
+		for {
+			name, snap := readEvent(t, r)
+			if snap.Status == status {
+				if wantName != "" && name != wantName {
+					t.Fatalf("entering %s expected %q, got %q", status, wantName, name)
+				}
+				return
+			}
+		}
+	}
+	// Warn → TERMINATING (with terminate_at).
+	if resp := adm("DELETE", "/api/admin/sessions/"+c.SID, nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("warn: %s", resp.Status)
+	}
+	if name, snap := readEvent(t, r); name != "terminating" || snap.TerminateAt == nil {
+		t.Fatalf("warn event %s %+v", name, snap)
+	}
+	// Cancel → reopened; a second cancel is 409.
+	if resp := adm("POST", "/api/admin/sessions/"+c.SID+"/cancel-termination", nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("cancel: %s", resp.Status)
+	}
+	until(session.StatusOpen, "reopened")
+	if resp := adm("POST", "/api/admin/sessions/"+c.SID+"/cancel-termination", nil); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("cancel of an open session should 409: %s", resp.Status)
+	}
+	// ?now → terminated with no warning.
+	if resp := adm("DELETE", "/api/admin/sessions/"+c.SID+"?now", nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("terminate now: %s", resp.Status)
+	}
+	until(session.StatusTerminated, "terminated")
+	// A client extension → PENDING_REVIEW; admin accept → reopened.
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/extension", c.Token, c.ClientID, []byte(`{"reason":"more"}`)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("extension: %s", resp.Status)
+	}
+	until(session.StatusPendingReview, "")
+	if resp := adm("POST", "/api/admin/sessions/"+c.SID+"/review", []byte(`{"decision":"accept"}`)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("review accept: %s", resp.Status)
+	}
+	until(session.StatusOpen, "reopened")
+	if resp := adm("POST", "/api/admin/sessions/"+c.SID+"/review", []byte(`{"decision":"accept"}`)); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("review of a non-pending session should 409: %s", resp.Status)
+	}
+	// Admin evict closes the target's stream.
+	if resp := adm("DELETE", "/api/admin/sessions/"+c.SID+"/clients/"+c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("admin evict: %s", resp.Status)
+	}
+	for {
+		if name, _ := readEvent(t, r); name == "evicted" {
+			break
+		}
+	}
+}
+
+// TestAdminReviewRejectAndDownload: a reject records the note, and the admin can
+// download a READY beam of a non-live session without keeping it alive.
+func TestAdminReviewRejectAndDownload(t *testing.T) {
+	h := start(t, func(o *Options) { o.AdminToken = "adm"; o.ReviewTTL = time.Hour })
+	c := h.create(t)
+	h.replay(t, c, loadVectors(t), replay.Options{})
+	bid := h.oneBeam(t, c).BID
+	adm := func(method, path string, body []byte) (*http.Response, []byte) {
+		req, _ := http.NewRequest(method, h.ts.URL+path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer adm")
+		resp, err := h.ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, b
+	}
+	s, _ := h.store.Get(c.SID)
+	s.Terminate("session admin", "done")
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/extension", c.Token, c.ClientID, []byte(`{"reason":"more"}`)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("extension: %s", resp.Status)
+	}
+	if resp, _ := adm("POST", "/api/admin/sessions/"+c.SID+"/review", []byte(`{"decision":"reject","note":"no thanks"}`)); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("review reject: %s", resp.Status)
+	}
+	snap := h.snapshot(t, c)
+	if snap.Status != session.StatusRejected || snap.Extension == nil || snap.Extension.Note != "no thanks" {
+		t.Fatalf("rejected snapshot: %+v", snap)
+	}
+	if resp, body := adm("GET", "/api/admin/sessions/"+c.SID+"/download?beam="+bid+"&as=raw", nil); resp.StatusCode != http.StatusOK || len(body) == 0 {
+		t.Fatalf("admin download of a rejected session: %s (%d bytes)", resp.Status, len(body))
+	}
+	// A bad decision is a 400.
+	if resp, _ := adm("POST", "/api/admin/sessions/"+c.SID+"/review", []byte(`{"decision":"maybe"}`)); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad decision should 400: %s", resp.Status)
+	}
+}
+
 // TestAdminDisabled: with no admin_token, every admin route is an invisible 404.
 func TestAdminDisabled(t *testing.T) {
 	h := start(t, nil)
