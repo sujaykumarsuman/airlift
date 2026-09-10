@@ -736,6 +736,31 @@ func TestLimiterUnit(t *testing.T) {
 	}
 }
 
+// TestLimiterSetRatesRace exercises a live rate change (a config PATCH) against
+// concurrent charges — allow() must read the rates map under the lock (run with
+// -race).
+func TestLimiterSetRatesRace(t *testing.T) {
+	l := newLimiter(nil, map[rateKind]Rate{rlFrames: {N: 100, Per: time.Second}})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 2000; j++ {
+				l.allow(rlFrames, "k")
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 2000; j++ {
+			l.SetRates(map[rateKind]Rate{rlFrames: {N: 50, Per: time.Second}, rlPing: {N: 1, Per: time.Minute}})
+		}
+	}()
+	wg.Wait()
+}
+
 // readEvent returns the next SSE event name and data.
 func readEvent(t *testing.T, r *bufio.Reader) (string, session.Snapshot) {
 	t.Helper()

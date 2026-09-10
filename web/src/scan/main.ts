@@ -132,7 +132,10 @@ function syncLifecycle(): void {
     relay.stop();
     stopPinging();
   } else if (!shouldFreeze && frozen) {
+    // Reopened (a cancel, or an accepted extension): revive the relay before the
+    // camera so decoded frames flow again, and restart the pinger.
     frozen = false;
+    relay.resume();
     startPinging();
     void startCamera();
   }

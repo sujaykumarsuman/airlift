@@ -133,11 +133,17 @@ function attach(s: Stored): void {
     ticker = setInterval(() => {
       const now = Date.now();
       const next = tick(view, now);
-      if (next !== view) {
+      const st = view.snap?.status;
+      const live = st === "OPEN" || st === "TERMINATING";
+      if (next !== view && live) {
         view = next;
         renderStatus();
       } else {
-        updateClocks(now); // tick() returns the same view once beams finish; patch the countdowns
+        // A frozen session's beams no longer progress, and its panel holds the
+        // extension form; never rebuild it on the tick (that would wipe the
+        // reason input) — only patch the countdown text nodes.
+        view = next;
+        updateClocks(now);
       }
     }, 1000);
   }

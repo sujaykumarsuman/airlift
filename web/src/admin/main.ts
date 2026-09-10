@@ -35,6 +35,7 @@ let token = "";
 let rows: AdminRow[] = [];
 let keys: ConfigKey[] = [];
 let view: AdminView = { rows: [], pending: [] };
+let reviewsKey = ""; // the pending set last rendered, so an SSE push does not rebuild a note input
 let connection: SSEStatus = "connecting";
 let notice = "";
 let authed = false;
@@ -123,6 +124,7 @@ function teardown(): void {
   authed = false;
   rows = [];
   view = { rows: [], pending: [] };
+  reviewsKey = "";
   notice = "";
 }
 
@@ -168,6 +170,11 @@ function render(): void {
 }
 
 function renderReviews(): void {
+  // Rebuild only when the pending set changes — the admin SSE pushes ~1/s while
+  // any session is active, and a rebuild would wipe a note the operator is typing.
+  const key = view.pending.map((s) => s.sid).join(",");
+  if (key === reviewsKey) return;
+  reviewsKey = key;
   if (view.pending.length === 0) {
     reviewsEl.innerHTML = "";
     return;

@@ -91,3 +91,17 @@ test("stop cancels pending sends", async () => {
   await vi.advanceTimersByTimeAsync(1000);
   expect(post).not.toHaveBeenCalled();
 });
+
+test("resume re-arms a stopped relay for a reopened session, keeping the dedup set", async () => {
+  const post = vi.fn(async (frames: string[]) => ok(frames));
+  const relay = new Relay({ post });
+  relay.push("A");
+  relay.stop();
+  expect(relay.push("B")).toBe(false); // frozen: dropped
+  relay.resume();
+  expect(relay.push("C")).toBe(true); // relaying again
+  expect(relay.push("A")).toBe(false); // still remembered across the freeze
+  await vi.advanceTimersByTimeAsync(250);
+  expect(post).toHaveBeenCalledTimes(1);
+  expect(post.mock.calls[0]?.[0]).toEqual(["A", "C"]); // the queued A plus the new C
+});

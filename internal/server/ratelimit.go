@@ -57,15 +57,16 @@ func (l *limiter) SetRates(rates map[rateKind]Rate) {
 
 // allow charges one token for (kind, key). It returns ok=true when allowed, or
 // ok=false with the wait until the next token when denied. A zero-N kind is
-// always allowed; a fresh key starts with a full bucket.
+// always allowed; a fresh key starts with a full bucket. The rates map is read
+// under the lock so a concurrent SetRates (a live config PATCH) is race-free.
 func (l *limiter) allow(kind rateKind, key string) (time.Duration, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	r := l.rates[kind]
 	if r.N <= 0 || r.Per <= 0 {
 		return 0, true
 	}
 	perToken := r.Per.Seconds() / float64(r.N)
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	now := l.now()
 	l.gcLocked(now)
 	m := l.buckets[kind]

@@ -95,6 +95,15 @@ export class Relay {
     this.timer = null;
   }
 
+  /** Re-arms a stopped relay for a reopened session (an accepted extension),
+   *  keeping the dedup set so already-relayed frames are not re-sent; any queued
+   *  remainder is flushed on the next tick. */
+  resume(): void {
+    if (!this.stopped) return;
+    this.stopped = false;
+    if (this.queue.length > 0) this.schedule(this.flushMs, false);
+  }
+
   private schedule(ms: number, replace: boolean): void {
     if (this.stopped) return;
     if (this.timer !== null) {
