@@ -752,7 +752,7 @@ func readEvent(t *testing.T, r *bufio.Reader) (string, session.Snapshot) {
 			data = strings.TrimPrefix(line, "data: ")
 		case line == "" && name != "":
 			var snap session.Snapshot
-			if name == "state" || name == "terminated" {
+			if name != "closed" && name != "evicted" { // those carry only {}
 				if err := json.Unmarshal([]byte(data), &snap); err != nil {
 					t.Fatal(err)
 				}
@@ -819,6 +819,76 @@ func TestSSE(t *testing.T) {
 	}
 	if snap := h.snapshot(t, c); snap.Status != session.StatusTerminated {
 		t.Fatalf("session should be TERMINATED, got %s", snap.Status)
+	}
+}
+
+// TestLifecycleWarningLiveCancelTerminate drives the 7.1 machine through the
+// handlers: the warning keeps the transfer live and names the stream event
+// "terminating"; cancel restores OPEN ("reopened"); terminate-now freezes it
+// ("terminated" + a 409 on frames). The states are reached via session methods
+// (the admin routes are a later slice).
+func TestLifecycleWarningLiveCancelTerminate(t *testing.T) {
+	h := start(t, nil)
+	c := h.create(t)
+	d := loadVectors(t)
+	s, ok := h.store.Get(c.SID)
+	if !ok {
+		t.Fatal("session not found")
+	}
+	req, _ := http.NewRequest("GET", h.ts.URL+"/api/sessions/"+c.SID+"/events", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("X-Airlift-Client", c.ClientID)
+	resp, err := h.ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	r := bufio.NewReader(resp.Body)
+	if name, snap := readEvent(t, r); name != "state" || snap.Status != session.StatusOpen {
+		t.Fatalf("first event %s %s", name, snap.Status)
+	}
+	// Warn: the stream is told once, carrying terminate_at.
+	if !s.StartTermination("airlift admin", time.Hour) {
+		t.Fatal("StartTermination")
+	}
+	if name, snap := readEvent(t, r); name != "terminating" || snap.Status != session.StatusTerminating || snap.TerminateAt == nil {
+		t.Fatalf("warning event %s %+v", name, snap)
+	}
+	// The transfer stays live: a frames POST and a ping both succeed.
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(`{"frames":["`+d.Frames[0]+`"]}`)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("frames during the warning should be 200: %s", resp.Status)
+	}
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/ping", c.Token, c.ClientID, nil); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("ping during the warning should be 204: %s", resp.Status)
+	}
+	// Cancel: the first snapshot back at OPEN is named "reopened".
+	if !s.CancelTermination() {
+		t.Fatal("CancelTermination")
+	}
+	for {
+		name, snap := readEvent(t, r)
+		if snap.Status == session.StatusOpen {
+			if name != "reopened" {
+				t.Fatalf("a return to OPEN should be reopened, got %s", name)
+			}
+			break
+		}
+	}
+	// Terminate now: the stream sees "terminated" and frames then 409.
+	if !s.Terminate("airlift admin", "done") {
+		t.Fatal("terminate-now")
+	}
+	for {
+		name, snap := readEvent(t, r)
+		if snap.Status == session.StatusTerminated {
+			if name != "terminated" {
+				t.Fatalf("termination should be terminated, got %s", name)
+			}
+			break
+		}
+	}
+	if resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, []byte(`{"frames":["`+d.Frames[0]+`"]}`)); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("frames after terminate should 409: %s", resp.Status)
 	}
 }
 

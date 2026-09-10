@@ -209,7 +209,7 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 // patchSession changes session settings; presently only the join password
 // (session admin). A null password field is a 400, an empty string clears it.
 func (srv *Server) patchSession(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
-	if s.Status() != session.StatusOpen {
+	if !s.Status().Live() {
 		writeError(w, http.StatusConflict, "session is not open")
 		return
 	}
@@ -252,7 +252,7 @@ func (srv *Server) evictClient(w http.ResponseWriter, r *http.Request, s *sessio
 // deleteBeam removes a beam from the place and reclaims its on-disk directory
 // (session admin).
 func (srv *Server) deleteBeam(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
-	if s.Status() != session.StatusOpen {
+	if !s.Status().Live() {
 		writeError(w, http.StatusConflict, "session is not open")
 		return
 	}

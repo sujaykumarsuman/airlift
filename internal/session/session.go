@@ -161,15 +161,19 @@ type Session struct {
 	// Lifecycle (6.6, ADR 0013). While OPEN the expiry is the earliest of three
 	// clocks (idle/inactive/max_age); a TERMINATED session freezes the transfer,
 	// keeps its files, and is deleted terminated_ttl later.
-	status        Status
-	term          *Termination     // nil while OPEN
-	events        []LifecycleEvent // the lifecycle log, written into session.json
-	lastActivity  time.Time        // moved only by real activity while OPEN
-	lastEmptyAt   time.Time        // when presence last dropped to zero (idle origin)
-	idleTTL       time.Duration    // after the last client stream leaves
-	inactiveTTL   time.Duration    // after the last activity while clients are connected
-	maxAge        time.Duration    // overall from CreatedAt; 0 disables
-	terminatedTTL time.Duration    // how long a TERMINATED session's files are kept
+	status         Status
+	term           *Termination     // nil while OPEN
+	terminateAt    time.Time        // TERMINATING: when the warning elapses → TERMINATED
+	reviewDeadline time.Time        // PENDING_REVIEW: when the review window elapses → REJECTED
+	extension      *Extension       // the pending/decided extension request; nil otherwise
+	events         []LifecycleEvent // the lifecycle log, written into session.json
+	lastActivity   time.Time        // moved only by real activity while Live()
+	lastEmptyAt    time.Time        // when presence last dropped to zero (idle origin)
+	maxAgeBase     time.Time        // max_age clock base: CreatedAt at create, now on reopen
+	idleTTL        time.Duration    // after the last client stream leaves
+	inactiveTTL    time.Duration    // after the last activity while clients are connected
+	maxAge         time.Duration    // overall from maxAgeBase; 0 disables
+	terminatedTTL  time.Duration    // how long a TERMINATED session's files are kept
 
 	maxBeams int
 	maxGz    int64 // per-beam gzip ceiling; 0 disables the check
@@ -200,28 +204,54 @@ type Session struct {
 	passHash []byte // sha256(salt || password); nil when no password
 }
 
-// Status is the session's lifecycle state. Phase 7 (ADR 0014) adds the reserved
-// TERMINATING / PENDING_REVIEW / REJECTED states; they are not declared yet.
+// Status is the session's lifecycle state (ADR 0013 declared OPEN/TERMINATED;
+// ADR 0014 adds the warning, review and rejection states).
 type Status string
 
-// Lifecycle states reachable in 6.6.
+// Lifecycle states. OPEN and TERMINATING are the transfer-live states (Live());
+// TERMINATING is a warning grace window before a session becomes TERMINATED. A
+// TERMINATED session may request one extension → PENDING_REVIEW; a review then
+// reopens it (→ OPEN) or rejects it (→ REJECTED), and TERMINATED and REJECTED are
+// both swept after terminated_ttl.
 const (
-	StatusOpen       Status = "OPEN"
-	StatusTerminated Status = "TERMINATED"
+	StatusOpen          Status = "OPEN"
+	StatusTerminating   Status = "TERMINATING"
+	StatusTerminated    Status = "TERMINATED"
+	StatusPendingReview Status = "PENDING_REVIEW"
+	StatusRejected      Status = "REJECTED"
 )
 
-// Termination records how and when a session was terminated (ADR 0013).
+// Live reports whether the session's transfer is still running — OPEN, or
+// TERMINATING during its warning grace window. Every transfer guard (Ingest,
+// MarkActivity, frames, ping, patch, beam removal) and the concurrency count go
+// through Live, so a warned-but-not-yet-terminated session keeps working and a
+// cancel is seamless.
+func (s Status) Live() bool { return s == StatusOpen || s == StatusTerminating }
+
+// Termination records how and when a session was terminated (ADR 0013/0014).
 type Termination struct {
-	By        string    `json:"by"`     // "session admin", "system"; "airlift admin" joins in Phase 7
-	Reason    string    `json:"reason"` // "terminated by session admin", "idle_ttl", "inactive_ttl", "max_age"
+	By        string    `json:"by"`     // "session admin", "airlift admin", or "system"
+	Reason    string    `json:"reason"` // "terminated by session admin", "idle_ttl", "inactive_ttl", "max_age", "extension rejected", …
 	At        time.Time `json:"at"`
 	CleanupAt time.Time `json:"cleanup_at"` // when the session and its files are deleted
+}
+
+// Extension records a client's request to keep a TERMINATED session alive, and
+// the airlift-admin decision on it. By is the requesting client's NAME, never an
+// address, so the session.json receipt carries no PII.
+type Extension struct {
+	By        string     `json:"by"`
+	Reason    string     `json:"reason"`
+	At        time.Time  `json:"at"`
+	Decision  string     `json:"decision,omitempty"` // "accept" | "reject"
+	Note      string     `json:"note,omitempty"`     // the reviewer's note
+	DecidedAt *time.Time `json:"decided_at,omitempty"`
 }
 
 // LifecycleEvent is one entry of the session's append-only lifecycle log.
 type LifecycleEvent struct {
 	At     time.Time `json:"at"`
-	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminated
+	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminating | termination_cancelled | terminated | extension_requested | reopened | rejected
 	By     string    `json:"by,omitempty"`
 	Reason string    `json:"reason,omitempty"`
 	BID    string    `json:"bid,omitempty"`
@@ -261,22 +291,29 @@ func (s *Session) deadlineLocked() (time.Time, string) {
 		consider(s.lastActivity.Add(s.inactiveTTL), "inactive_ttl")
 	}
 	if s.maxAge > 0 {
-		consider(s.CreatedAt.Add(s.maxAge), "max_age")
+		consider(s.maxAgeBase.Add(s.maxAge), "max_age")
 	}
 	return best, why
 }
 
 // bindingDeadlineLocked is the instant the snapshot reports as expires_at: the
-// OPEN deadline, or a TERMINATED session's cleanup time.
+// OPEN deadline, the TERMINATING warning deadline, the PENDING_REVIEW review
+// deadline, or a TERMINATED/REJECTED session's cleanup time.
 func (s *Session) bindingDeadlineLocked() time.Time {
-	if s.status == StatusTerminated {
+	switch s.status {
+	case StatusTerminating:
+		return s.terminateAt
+	case StatusPendingReview:
+		return s.reviewDeadline
+	case StatusTerminated, StatusRejected:
 		if s.term != nil {
 			return s.term.CleanupAt
 		}
 		return time.Time{}
+	default: // OPEN
+		d, _ := s.deadlineLocked()
+		return d
 	}
-	d, _ := s.deadlineLocked()
-	return d
 }
 
 // ExpiresAt is the instant the session next expires (its binding deadline).
@@ -317,7 +354,7 @@ func (s *Session) LifecycleLog() []LifecycleEvent {
 func (s *Session) MarkActivity(c *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.status != StatusOpen {
+	if !s.status.Live() {
 		return
 	}
 	now := s.now()
@@ -327,26 +364,137 @@ func (s *Session) MarkActivity(c *Client) {
 	}
 }
 
-// terminateLocked moves an OPEN session to TERMINATED with a reason and starts
-// its cleanup clock, waking its streams. It does NOT set the closed flag — only
-// the final cleanup delete does — so a beam finishing in the terminated window
-// still persists and ADR 0016's orphan-reclaim reasoning holds.
+// terminateLocked moves a live session (OPEN or TERMINATING) to TERMINATED with a
+// reason and starts its cleanup clock, waking its streams. It does NOT set the
+// closed flag — only the final cleanup delete does — so a beam finishing in the
+// terminated window still persists and ADR 0016's orphan-reclaim reasoning holds.
 func (s *Session) terminateLocked(now time.Time, by, reason string) bool {
-	if s.status != StatusOpen {
+	if !s.status.Live() {
 		return false
 	}
 	s.status = StatusTerminated
+	s.terminateAt = time.Time{}
 	s.term = &Termination{By: by, Reason: reason, At: now, CleanupAt: now.Add(s.terminatedTTL)}
 	s.events = append(s.events, LifecycleEvent{At: now, Event: "terminated", By: by, Reason: reason})
 	s.notifyLocked()
 	return true
 }
 
-// Terminate soft-terminates the session; returns false if it was not OPEN.
+// Terminate soft-terminates the session now; returns false if it was not live.
 func (s *Session) Terminate(by, reason string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.terminateLocked(s.now(), by, reason)
+}
+
+// StartTermination begins the airlift-admin warning countdown (ADR 0014):
+// OPEN → TERMINATING with terminateAt = now + warningTTL, the transfer staying
+// live so a cancel is seamless. A non-positive warningTTL collapses to an
+// immediate terminate-now. Returns false if the session was not OPEN.
+func (s *Session) StartTermination(by string, warningTTL time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if warningTTL <= 0 {
+		return s.terminateLocked(now, by, "terminated by "+by)
+	}
+	if s.status != StatusOpen {
+		return false
+	}
+	s.status = StatusTerminating
+	s.terminateAt = now.Add(warningTTL)
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "terminating", By: by})
+	s.notifyLocked()
+	return true
+}
+
+// CancelTermination revokes a warning, TERMINATING → OPEN, resuming the ordinary
+// clocks from now. Returns false if the session was not TERMINATING.
+func (s *Session) CancelTermination() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != StatusTerminating {
+		return false
+	}
+	now := s.now()
+	s.status = StatusOpen
+	s.terminateAt = time.Time{}
+	s.lastActivity = now
+	if len(s.subs) == 0 {
+		s.lastEmptyAt = now
+	}
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "termination_cancelled"})
+	s.notifyLocked()
+	return true
+}
+
+// RequestExtension records a client's request to keep a TERMINATED session alive,
+// moving it to PENDING_REVIEW and stopping the cleanup clock in favour of a
+// review clock (reviewDeadline = now + reviewTTL). Exactly one request is allowed;
+// `by` is the requesting client's name. Returns false unless the session is
+// TERMINATED with no prior request.
+func (s *Session) RequestExtension(by, reason string, reviewTTL time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != StatusTerminated || s.extension != nil {
+		return false
+	}
+	now := s.now()
+	s.status = StatusPendingReview
+	s.reviewDeadline = now.Add(reviewTTL)
+	s.extension = &Extension{By: by, Reason: reason, At: now}
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "extension_requested", By: by, Reason: reason})
+	s.notifyLocked()
+	return true
+}
+
+// rejectLocked records a rejected extension: PENDING_REVIEW → REJECTED with a
+// fresh cleanup clock, so the session and its files are swept terminated_ttl
+// later. `by` is "airlift admin" (a review) or "system" (the review window
+// elapsing). It does not set the closed flag.
+func (s *Session) rejectLocked(now time.Time, by, note string) {
+	s.status = StatusRejected
+	s.term = &Termination{By: by, Reason: "extension rejected", At: now, CleanupAt: now.Add(s.terminatedTTL)}
+	s.reviewDeadline = time.Time{}
+	if s.extension != nil {
+		s.extension.Decision = "reject"
+		s.extension.Note = note
+		s.extension.DecidedAt = &now
+	}
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "rejected", By: by, Reason: note})
+	s.notifyLocked()
+}
+
+// Review resolves a PENDING_REVIEW session (airlift admin, ADR 0014): accept
+// reopens it (→ OPEN, term cleared, every clock restarted from now, the beams and
+// their files intact) or reject moves it to REJECTED with the note. Returns false
+// if the session was not PENDING_REVIEW.
+func (s *Session) Review(accept bool, note string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status != StatusPendingReview {
+		return false
+	}
+	now := s.now()
+	if !accept {
+		s.rejectLocked(now, "airlift admin", note)
+		return true
+	}
+	s.status = StatusOpen
+	s.term = nil
+	s.terminateAt = time.Time{}
+	s.reviewDeadline = time.Time{}
+	s.maxAgeBase = now
+	s.lastActivity = now
+	s.lastEmptyAt = now
+	if s.extension != nil {
+		s.extension.Decision = "accept"
+		s.extension.Note = note
+		s.extension.DecidedAt = &now
+	}
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "reopened", By: "airlift admin"})
+	s.notifyLocked()
+	return true
 }
 
 // sweepResult tells the store what the sweep should do with a session.
@@ -368,7 +516,17 @@ func (s *Session) sweepStep(now time.Time) sweepResult {
 			s.terminateLocked(now, "system", why)
 			return sweepTerminated
 		}
-	case StatusTerminated:
+	case StatusTerminating:
+		if !s.terminateAt.IsZero() && !now.Before(s.terminateAt) {
+			s.terminateLocked(now, "airlift admin", "terminated by airlift admin")
+			return sweepTerminated
+		}
+	case StatusPendingReview:
+		if !s.reviewDeadline.IsZero() && !now.Before(s.reviewDeadline) {
+			s.rejectLocked(now, "system", "review window elapsed")
+			return sweepTerminated // now REJECTED; the store writes session.json
+		}
+	case StatusTerminated, StatusRejected:
 		if s.term != nil && !now.Before(s.term.CleanupAt) {
 			return sweepExpired
 		}
@@ -510,7 +668,7 @@ type IngestResult struct {
 // before their MANIFEST. Every beam decodes, verifies and completes on its own.
 func (s *Session) Ingest(texts []string) IngestResult {
 	s.mu.Lock()
-	if s.status != StatusOpen { // a TERMINATED session's transfer is frozen
+	if !s.status.Live() { // a terminated/reviewing session's transfer is frozen
 		s.mu.Unlock()
 		return IngestResult{}
 	}
@@ -823,13 +981,15 @@ func (s *Session) BeamDownload(sender uint32, as string) (Download, bool) {
 // (docs/API.md): the beams in arrival order, each with its own progress and
 // verdicts.
 type Snapshot struct {
-	SID        string           `json:"sid"`
-	Status     Status           `json:"status"`
-	Relays     int              `json:"relays"`
-	Beams      []BeamSnapshot   `json:"beams"`
-	Clients    []ClientSnapshot `json:"clients"`
-	Terminated *Termination     `json:"terminated"` // nil while OPEN
-	ExpiresAt  time.Time        `json:"expires_at"` // the earliest applicable deadline
+	SID         string           `json:"sid"`
+	Status      Status           `json:"status"`
+	Relays      int              `json:"relays"`
+	Beams       []BeamSnapshot   `json:"beams"`
+	Clients     []ClientSnapshot `json:"clients"`
+	Terminated  *Termination     `json:"terminated"`   // nil while OPEN/TERMINATING
+	TerminateAt *time.Time       `json:"terminate_at"` // set only while TERMINATING (the warning deadline)
+	Extension   *Extension       `json:"extension"`    // the pending/decided extension request; nil otherwise
+	ExpiresAt   time.Time        `json:"expires_at"`   // the earliest applicable deadline
 }
 
 // BeamSnapshot is one beam's state within a place.
@@ -860,6 +1020,14 @@ func (s *Session) Snapshot() Snapshot {
 	if s.term != nil {
 		t := *s.term
 		snap.Terminated = &t
+	}
+	if s.status == StatusTerminating && !s.terminateAt.IsZero() {
+		t := s.terminateAt
+		snap.TerminateAt = &t
+	}
+	if s.extension != nil {
+		e := *s.extension
+		snap.Extension = &e
 	}
 	// One pass over the streams: count relays and fold each client's open
 	// streams into its connected flag and role set.

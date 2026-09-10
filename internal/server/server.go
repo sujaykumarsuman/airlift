@@ -260,7 +260,7 @@ func (srv *Server) deleteSession(w http.ResponseWriter, _ *http.Request, s *sess
 
 // ping counts as activity, resetting the inactive clock (client tier, rate_ping).
 func (srv *Server) ping(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
-	if s.Status() != session.StatusOpen {
+	if !s.Status().Live() {
 		writeError(w, http.StatusConflict, "session is not open")
 		return
 	}
@@ -273,7 +273,7 @@ func (srv *Server) ping(w http.ResponseWriter, r *http.Request, s *session.Sessi
 }
 
 func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
-	if s.Status() != session.StatusOpen {
+	if !s.Status().Live() {
 		writeError(w, http.StatusConflict, "session is not open")
 		return
 	}
@@ -332,7 +332,7 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	sentTerminated := false
+	var prev session.Status
 	send := func() bool {
 		if sub.Evicted() {
 			fmt.Fprint(w, "event: evicted\ndata: {}\n\n")
@@ -349,12 +349,26 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 		if err != nil {
 			return false
 		}
-		// Announce the move to TERMINATED once (with the full snapshot), then
-		// keep pushing state until the cleanup delete fires event: closed.
+		// Name the event on the entering edge of a status change so a page can
+		// react (banner, countdown, reopen); every other push is a plain "state".
+		// The snapshot's status is authoritative — the name is only a hint — and
+		// the SSE client re-renders on any name, stopping only on closed/evicted.
 		name := "state"
-		if snap.Status == session.StatusTerminated && !sentTerminated {
-			name, sentTerminated = "terminated", true
+		if snap.Status != prev {
+			switch snap.Status {
+			case session.StatusTerminating:
+				name = "terminating"
+			case session.StatusTerminated:
+				name = "terminated"
+			case session.StatusRejected:
+				name = "rejected"
+			case session.StatusOpen:
+				if prev != "" { // a return to OPEN (cancel or accept), not the first send
+					name = "reopened"
+				}
+			}
 		}
+		prev = snap.Status
 		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data); err != nil {
 			return false
 		}

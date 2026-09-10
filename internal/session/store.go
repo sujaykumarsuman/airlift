@@ -129,11 +129,12 @@ func (st *Store) Create() (*Session, error) { return st.CreateWith(CreateParams{
 func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	// Only OPEN sessions count against the concurrency cap; a TERMINATED session
-	// awaiting its terminated_ttl cleanup is not an active transfer.
+	// Only live sessions (OPEN or TERMINATING) count against the concurrency cap;
+	// a TERMINATED/PENDING_REVIEW/REJECTED session awaiting cleanup is not an
+	// active transfer.
 	open := 0
 	for _, s := range st.sessions {
-		if s.Status() == StatusOpen {
+		if s.Status().Live() {
 			open++
 		}
 	}
@@ -161,9 +162,10 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 		status:        StatusOpen,
 		lastActivity:  now,
 		lastEmptyAt:   now, // presence starts at zero, so the idle clock runs from creation
+		maxAgeBase:    now, // max_age counts from creation until a reopen rebases it
 		idleTTL:       orDur(p.IdleTTL, st.idleTTL),
 		inactiveTTL:   orDur(p.InactiveTTL, st.inactiveTTL),
-		maxAge:        st.maxAge, // the per-session max_age override is Phase 7
+		maxAge:        st.maxAge, // the per-session max_age override is a later 7.x slice
 		terminatedTTL: st.terminatedTTL,
 		events:        []LifecycleEvent{{At: now, Event: "created"}},
 		maxBeams:      st.maxBeams,
