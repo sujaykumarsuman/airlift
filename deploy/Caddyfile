@@ -1,8 +1,22 @@
-# airlift — TLS termination + reverse proxy to the tower (installed to
-# /etc/caddy/Caddyfile). Caddy provisions and renews the certificate from
-# Let's Encrypt automatically, once {{DOMAIN}}'s A record points at this host.
-# `make vps-bootstrap DOMAIN=...` substitutes {{DOMAIN}}.
+# airlift + the projects hub (installed to /etc/caddy/Caddyfile). Caddy provisions
+# and renews the Let's Encrypt certificate for {{DOMAIN}} automatically. Each
+# project mounts under a path prefix; the prefix is stripped before proxying so
+# the app's router stays rooted (ADR 0012). `make vps-bootstrap` substitutes the
+# {{DOMAIN}} and {{PREFIX}} placeholders.
 {{DOMAIN}} {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:8443
+
+	# airlift under {{PREFIX}}
+	@airlift_bare path {{PREFIX}}
+	redir @airlift_bare {{PREFIX}}/ 308
+	handle_path {{PREFIX}}/* {
+		reverse_proxy 127.0.0.1:8443
+	}
+
+	# the projects hub (replace /var/www/projects/index.html with your own)
+	handle {
+		root * /var/www/projects
+		try_files {path} /index.html
+		file_server
+	}
 }

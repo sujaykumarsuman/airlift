@@ -6,9 +6,12 @@ MODULE    := github.com/sujaykumarsuman/airlift
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
 # Deployment (Phase 8, docs/HOSTING.md). VPS is an ssh host alias; DOMAIN is the
-# public hostname whose A record points at the VPS.
-VPS       ?= airlift-vps
-DOMAIN    ?= projects.sujaykumar.dev
+# public hostname whose A record points at the VPS; PREFIX is the path airlift is
+# mounted under (Caddy strips it, ADR 0012); PUBLIC_URL is what the tower advertises.
+VPS        ?= airlift-vps
+DOMAIN     ?= projects.sujaykumar.dev
+PREFIX     ?= /airlift
+PUBLIC_URL ?= https://$(DOMAIN)$(PREFIX)
 
 .PHONY: all web airlift airlift-all airlift-linux go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy
 
@@ -55,10 +58,11 @@ airlift-linux: web
 # an 0600 config with an admin token, install Caddy. Idempotent.
 vps-bootstrap:
 	scp deploy/airlift.service $(VPS):/etc/systemd/system/airlift.service
-	sed 's/{{DOMAIN}}/$(DOMAIN)/g' deploy/Caddyfile | ssh $(VPS) 'cat > /etc/caddy/Caddyfile'
+	sed -e 's/{{DOMAIN}}/$(DOMAIN)/g' -e 's|{{PREFIX}}|$(PREFIX)|g' deploy/Caddyfile | ssh $(VPS) 'cat > /etc/caddy/Caddyfile'
+	scp deploy/landing/index.html $(VPS):/tmp/airlift-landing.html
 	scp deploy/bootstrap.sh $(VPS):/tmp/airlift-bootstrap.sh
-	ssh $(VPS) 'bash /tmp/airlift-bootstrap.sh $(DOMAIN) && rm -f /tmp/airlift-bootstrap.sh'
-	ssh $(VPS) 'systemctl reload caddy || systemctl restart caddy'
+	ssh $(VPS) 'bash /tmp/airlift-bootstrap.sh "$(PUBLIC_URL)" && rm -f /tmp/airlift-bootstrap.sh'
+	ssh $(VPS) 'systemctl restart airlift; systemctl reload caddy || systemctl restart caddy'
 
 # Build the Linux binary and roll it out with a zero-downtime rename + restart.
 deploy: airlift-linux

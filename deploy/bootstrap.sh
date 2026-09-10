@@ -1,28 +1,41 @@
 #!/usr/bin/env bash
-# airlift VPS bootstrap — idempotent. Creates the service user + state dir, an
-# 0600 config with a generated admin_token (kept on re-runs), and installs Caddy.
-# The systemd unit and Caddyfile are placed by `make vps-bootstrap`. Usage:
-#   bootstrap.sh <public-hostname>
+# airlift VPS bootstrap — idempotent. Usage: bootstrap.sh <public_url>
+#   e.g. bootstrap.sh https://projects.sujaykumar.dev/airlift
+# Creates the service user + state dir, ensures an 0600 config with that
+# public_url and a generated admin_token (preserved on re-runs), seeds the
+# projects hub page if absent, and installs Caddy. The systemd unit, Caddyfile
+# and hub source are placed by `make vps-bootstrap`.
 set -euo pipefail
-DOMAIN="${1:?usage: bootstrap.sh <public-hostname>}"
+PUBLIC_URL="${1:?usage: bootstrap.sh <public_url>}"
 
 id airlift &>/dev/null || useradd --system --home-dir /var/lib/airlift --shell /usr/sbin/nologin airlift
 mkdir -p /var/lib/airlift/.airlift
 
 CFG=/var/lib/airlift/.airlift/config
-if [ ! -f "$CFG" ]; then
+if [ -f "$CFG" ]; then
+  grep -q '^public_url' "$CFG" \
+    && sed -i "s|^public_url = .*|public_url = $PUBLIC_URL|" "$CFG" \
+    || echo "public_url = $PUBLIC_URL" >> "$CFG"
+  echo "updated public_url; kept the existing admin_token"
+else
   cat > "$CFG" <<EOF
 # airlift tower configuration (managed on the VPS; holds the admin token).
-public_url = https://$DOMAIN
+public_url = $PUBLIC_URL
 admin_token = $(openssl rand -hex 24)
 EOF
   echo "wrote $CFG with a fresh admin_token"
-else
-  echo "keeping the existing $CFG (admin_token preserved)"
 fi
 chmod 600 "$CFG"
 chown -R airlift:airlift /var/lib/airlift
 chmod 750 /var/lib/airlift
+
+# projects hub — seed a placeholder only; never clobber a customised page
+mkdir -p /var/www/projects
+if [ ! -f /var/www/projects/index.html ] && [ -f /tmp/airlift-landing.html ]; then
+  mv /tmp/airlift-landing.html /var/www/projects/index.html
+  echo "seeded the projects hub placeholder"
+fi
+rm -f /tmp/airlift-landing.html
 
 if ! command -v caddy &>/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
@@ -35,4 +48,4 @@ fi
 
 systemctl daemon-reload
 systemctl enable caddy airlift >/dev/null 2>&1 || true
-echo "bootstrap complete for https://$DOMAIN — run 'make deploy' to push the binary"
+echo "bootstrap complete: airlift at $PUBLIC_URL"

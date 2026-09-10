@@ -3,7 +3,11 @@
 The tower runs as a plain-HTTP service on `127.0.0.1:8443`, with **Caddy** in
 front terminating TLS and reverse-proxying to it (ADR 0012). Caddy obtains and
 renews the certificate from Let's Encrypt automatically. This is the Phase 8
-deployment; the live host is `projects.sujaykumar.dev`.
+deployment; the live host is `projects.sujaykumar.dev`, a **projects hub** where
+each project lives under a path prefix — airlift is at
+**`https://projects.sujaykumar.dev/airlift`** (admin at `…/airlift/admin`). Caddy
+strips the `/airlift` prefix before proxying, so the tower's router stays rooted;
+`public_url` carries the prefix and the tower injects `<base href="/airlift/">`.
 
 ## What runs where
 
@@ -11,14 +15,26 @@ deployment; the live host is `projects.sujaykumar.dev`.
 | --- | --- | --- |
 | `airlift` binary | `/usr/local/bin/airlift` | static Linux/amd64, web UI embedded |
 | tower service | `systemd` unit `airlift.service` | runs as the unprivileged `airlift` user, `AIRLIFT_HOME=/var/lib/airlift/.airlift` |
-| config | `/var/lib/airlift/.airlift/config` | mode `0600`, owned by `airlift`; holds `admin_token` |
+| config | `/var/lib/airlift/.airlift/config` | mode `0600`, owned by `airlift`; holds `admin_token`; `public_url` carries the `/airlift` prefix |
 | session data | `/var/lib/airlift/.airlift/data/` | emptied on every start (memory-only sessions, ADR 0005) |
-| TLS + proxy | `caddy.service`, `/etc/caddy/Caddyfile` | listens on `80`/`443`, proxies to `127.0.0.1:8443` |
+| TLS + proxy | `caddy.service`, `/etc/caddy/Caddyfile` | listens on `80`/`443`; strips `/airlift` → `127.0.0.1:8443`; serves the hub at `/` |
+| projects hub | `/var/www/projects/index.html` | the landing page at `/`; a placeholder you can replace |
 | certificates | Caddy's data dir | auto-provisioned/renewed from Let's Encrypt |
 
 The tower sees the real client address because Caddy (on `127.0.0.1`, in the
 default `trusted_proxies`) forwards it in `X-Forwarded-For`, which the tower reads
 right-to-left (ADR 0012).
+
+## Adding another project
+
+Mount it under its own prefix in `/etc/caddy/Caddyfile` (next to airlift's block)
+and link it from `/var/www/projects/index.html`:
+
+```
+handle_path /careerdock/* {
+	reverse_proxy 127.0.0.1:9000   # that project's local port
+}
+```
 
 ## First deploy
 
@@ -27,18 +43,20 @@ Prerequisites: an ssh host alias for the VPS (e.g. `airlift-vps` in
 the VPS. Then, from the repo:
 
 ```
-make vps-bootstrap VPS=airlift-vps DOMAIN=projects.sujaykumar.dev
+make vps-bootstrap VPS=airlift-vps DOMAIN=projects.sujaykumar.dev PREFIX=/airlift
 make deploy        VPS=airlift-vps
 ```
 
-`vps-bootstrap` (idempotent) installs the systemd unit and the Caddyfile, creates
-the `airlift` user and an `0600` config with a freshly generated `admin_token`,
-and installs Caddy. `deploy` builds the Linux binary and rolls it out with a
-rename + `systemctl restart` (no downtime for the binary swap). Caddy issues the
-certificate as soon as the A record resolves; verify with
-`curl https://<domain>/api/info`.
+`vps-bootstrap` (idempotent) installs the systemd unit and the Caddyfile (with
+`{{DOMAIN}}`/`{{PREFIX}}` substituted), creates the `airlift` user and an `0600`
+config with `public_url=https://<domain><prefix>` and a freshly generated
+`admin_token`, seeds the hub page if absent, and installs Caddy. `deploy` builds
+the Linux binary and rolls it out with a rename + `systemctl restart` (no downtime
+for the binary swap). Caddy issues the certificate as soon as the A record
+resolves; verify with `curl https://<domain><prefix>/api/info`.
 
-`VPS` and `DOMAIN` default to the live host in the `Makefile`.
+`VPS`, `DOMAIN`, `PREFIX` and `PUBLIC_URL` (= `https://$(DOMAIN)$(PREFIX)`) default
+to the live host in the `Makefile`.
 
 ## Updating
 
