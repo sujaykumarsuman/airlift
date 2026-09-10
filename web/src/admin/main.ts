@@ -8,16 +8,18 @@ import {
   ApiError,
   fetchAdminDownload,
   getAdminConfig,
+  patchAdminConfig,
 } from "../shared/api";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { cleanupCountdown, expiryCountdown, terminateCountdown } from "../shared/lifecycle";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { AdminRow, ClientSummary } from "../shared/types";
+import type { AdminRow, ClientSummary, ConfigKey } from "../shared/types";
 import { downloadableBeams, reduceAdmin, rowLabel, type AdminView } from "./state";
 
 const loginEl = $<HTMLElement>("#login");
 const reviewsEl = $<HTMLElement>("#reviews");
 const sessionsEl = $<HTMLElement>("#sessions");
+const settingsEl = $<HTMLElement>("#settings");
 const signOutBtn = $<HTMLButtonElement>("#sign-out");
 
 const ADMIN_KEY = "airlift.admin";
@@ -31,6 +33,7 @@ function storage(): Storage | null {
 
 let token = "";
 let rows: AdminRow[] = [];
+let keys: ConfigKey[] = [];
 let view: AdminView = { rows: [], pending: [] };
 let connection: SSEStatus = "connecting";
 let notice = "";
@@ -54,7 +57,7 @@ async function boot(): Promise<void> {
 // operator back to the login form with a reason.
 async function tryAuth(): Promise<void> {
   try {
-    await getAdminConfig(token);
+    keys = (await getAdminConfig(token)).keys; // the probe doubles as the settings load
     authed = true;
     try {
       storage()?.setItem(ADMIN_KEY, token);
@@ -107,6 +110,7 @@ function start(): void {
   });
   if (ticker === null) ticker = setInterval(patchClocks, 1000);
   render();
+  renderSettings();
 }
 
 function teardown(): void {
@@ -137,6 +141,7 @@ function renderLogin(message = ""): void {
   signOutBtn.hidden = true;
   reviewsEl.innerHTML = "";
   sessionsEl.innerHTML = "";
+  settingsEl.innerHTML = "";
   loginEl.innerHTML = html`<div class="card">
     <h2>Admin sign in</h2>
     <p class="muted">Enter the tower's admin token to manage every session.</p>
@@ -318,6 +323,67 @@ function patchClocks(): void {
   for (const s of view.rows) {
     const el = sessionsEl.querySelector<HTMLElement>(`#ck-${s.sid}`);
     if (el) el.textContent = clockText(s);
+  }
+}
+
+// ---- settings (live config; ADR 0014) ----
+
+function renderSettings(): void {
+  if (!authed) {
+    settingsEl.innerHTML = "";
+    return;
+  }
+  settingsEl.innerHTML = html`<div class="card">
+    <h2>Settings</h2>
+    <p class="muted">
+      Live keys apply at once and persist to the tower's <code>overrides</code> file; restart-only keys are shown for
+      reference. A key pinned by a flag or env var keeps that source until the pin is removed.
+    </p>
+    <form id="settings-form">
+      <table class="settings">
+        <tbody>
+          ${keys.map((k) => settingRow(k))}
+        </tbody>
+      </table>
+      <p><button class="btn primary" type="submit">Save changes</button> <span id="settings-status" class="muted"></span></p>
+    </form>
+  </div>`.html;
+  $<HTMLFormElement>("#settings-form", settingsEl).addEventListener("submit", (e) => void onSaveSettings(e));
+}
+
+function settingRow(k: ConfigKey): Raw {
+  return html`<tr>
+    <th>${k.name}</th>
+    <td>
+      ${k.live
+        ? html`<input data-key="${k.name}" value="${k.value}" autocomplete="off" />`
+        : html`<code>${k.value || "—"}</code> <span class="badge">restart-only</span>`}
+    </td>
+    <td class="muted src">${k.source}</td>
+  </tr>`;
+}
+
+async function onSaveSettings(e: Event): Promise<void> {
+  e.preventDefault();
+  const changes: Record<string, string> = {};
+  settingsEl.querySelectorAll<HTMLInputElement>("input[data-key]").forEach((inp) => {
+    const name = inp.dataset.key!;
+    const original = keys.find((x) => x.name === name);
+    const v = inp.value.trim();
+    if (original && v !== original.value) changes[name] = v;
+  });
+  const status = $<HTMLElement>("#settings-status", settingsEl);
+  if (Object.keys(changes).length === 0) {
+    status.textContent = "No changes.";
+    return;
+  }
+  status.textContent = "Saving…";
+  try {
+    keys = (await patchAdminConfig(token, changes)).keys;
+    renderSettings();
+    $<HTMLElement>("#settings-status", settingsEl).textContent = "Saved.";
+  } catch (err) {
+    status.textContent = `Save failed: ${msg(err)}`;
   }
 }
 

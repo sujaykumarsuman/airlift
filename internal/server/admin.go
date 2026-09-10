@@ -57,6 +57,60 @@ func (srv *Server) adminConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"keys": cfg.Effective()})
 }
 
+// applyLive swaps in a reloaded config without a restart (ADR 0014): the hot-path
+// subset, the admin dump, the rate budgets and the store's cap/limits/clocks.
+// The cap, rates, max_body and the warning/review windows apply to the next
+// request; the per-session clocks and beam ceilings bind NEW sessions (the store
+// copies them at creation), so existing sessions keep what they were created with.
+func (srv *Server) applyLive(cfg *config.Config) {
+	srv.live.Store(&liveCfg{
+		MaxBody:    cfg.MaxBody,
+		Caps:       Caps{MaxGzBytes: cfg.MaxGzBytes, IdleTTL: cfg.IdleTTL, InactiveTTL: cfg.InactiveTTL, MaxAge: cfg.MaxAge, Sessions: cfg.Sessions},
+		WarningTTL: cfg.WarningTTL,
+		ReviewTTL:  cfg.ReviewTTL,
+	})
+	srv.cfgMu.Lock()
+	srv.cfg = cfg
+	srv.cfgMu.Unlock()
+	srv.lim.SetRates(map[rateKind]Rate{
+		rlCreate:    Rate(cfg.RateCreate),
+		rlJoin:      Rate(cfg.RateJoin),
+		rlFrames:    Rate(cfg.RateFrames),
+		rlPing:      Rate(cfg.RatePing),
+		rlExtension: Rate(cfg.RateExtension),
+		rlAdmin:     Rate(cfg.RateAdmin),
+	})
+	srv.opts.Store.SetMax(cfg.Sessions)
+	srv.opts.Store.SetLimits(cfg.MaxBeams, cfg.MaxGzBytes)
+	srv.opts.Store.SetLifecycle(cfg.IdleTTL, cfg.InactiveTTL, cfg.MaxAge, cfg.TerminatedTTL)
+}
+
+// adminPatchConfig writes live-key changes to the overrides file — validated,
+// restart-only/unknown rejected (400) — and applies them at runtime, returning
+// the fresh dump so the page sees each key's winning source.
+func (srv *Server) adminPatchConfig(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
+	var req struct {
+		Changes map[string]string `json:"changes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if len(req.Changes) == 0 {
+		writeError(w, http.StatusBadRequest, "no changes")
+		return
+	}
+	cfg, err := config.WriteOverrides(srv.opts.ConfigParams, req.Changes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	srv.applyLive(cfg)
+	srv.opts.Logf("admin updated %d config key(s)", len(req.Changes))
+	writeJSON(w, http.StatusOK, map[string]any{"keys": cfg.Effective()})
+}
+
 // adminSessionView is one row of the admin sessions list: the whole snapshot plus
 // the operator-only label and per-client addresses.
 type adminSessionView struct {
@@ -132,7 +186,7 @@ func (srv *Server) adminCancel(w http.ResponseWriter, _ *http.Request, s *sessio
 // adminReview resolves a pending extension: accept reopens the session, reject
 // moves it to REJECTED with the note.
 func (srv *Server) adminReview(w http.ResponseWriter, r *http.Request, s *session.Session) {
-	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
 		Decision string `json:"decision"`
 		Note     string `json:"note"`

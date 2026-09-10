@@ -47,6 +47,14 @@ func newLimiter(now func() time.Time, rates map[rateKind]Rate) *limiter {
 	return &limiter{now: now, rates: rates, buckets: map[rateKind]map[string]*bucket{}, lastGC: now()}
 }
 
+// SetRates replaces the rate budgets (a live admin change; ADR 0014). Existing
+// buckets keep their tokens and are recapped to the new N on the next charge.
+func (l *limiter) SetRates(rates map[rateKind]Rate) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rates = rates
+}
+
 // allow charges one token for (kind, key). It returns ok=true when allowed, or
 // ok=false with the wait until the next token when denied. A zero-N kind is
 // always allowed; a fresh key starts with a full bucket.

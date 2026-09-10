@@ -1185,6 +1185,67 @@ func TestAdminReviewRejectAndDownload(t *testing.T) {
 	}
 }
 
+// TestAdminOverrides: a live-key PATCH persists to the 0600 overrides file, takes
+// effect at runtime, survives a restart, and a restart-only key is refused.
+func TestAdminOverrides(t *testing.T) {
+	home := t.TempDir()
+	params := config.Params{Home: home}
+	cfg, err := config.Load(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := start(t, func(o *Options) {
+		o.AdminToken = "adm"
+		o.Config = cfg
+		o.ConfigParams = params
+		o.Store = session.NewStore(cfg.InactiveTTL, cfg.Sessions)
+	})
+	patch := func(body string) (*http.Response, []byte) {
+		req, _ := http.NewRequest("PATCH", h.ts.URL+"/api/admin/config", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer adm")
+		resp, err := h.ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, b
+	}
+	// A live PATCH of sessions=1 is accepted and its source is now "overrides".
+	if resp, body := patch(`{"changes":{"sessions":"1"}}`); resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"overrides"`) {
+		t.Fatalf("patch sessions: %s %s", resp.Status, body)
+	}
+	// It took effect live: the cap is now 1, so the second create is refused.
+	h.create(t)
+	if resp, _ := h.createOpts(t, "{}"); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("the lowered cap did not take effect live: %s", resp.Status)
+	}
+	// The overrides file is 0600, carries the change, and never holds a secret.
+	ovr := filepath.Join(home, "overrides")
+	fi, err := os.Stat(ovr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("overrides mode %#o, want 0600", fi.Mode().Perm())
+	}
+	if data, _ := os.ReadFile(ovr); !strings.Contains(string(data), "sessions = 1") || strings.Contains(string(data), "admin_token") {
+		t.Fatalf("overrides content: %s", data)
+	}
+	// It survives a restart: a fresh Load with the same params reads the override.
+	cfg2, err := config.Load(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, src, _ := cfg2.Get("sessions"); v != "1" || src.String() != "overrides" {
+		t.Fatalf("override not persisted across a restart: %q from %s", v, src)
+	}
+	// A restart-only key is refused with a 400.
+	if resp, _ := patch(`{"changes":{"listen":"127.0.0.1:9000"}}`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a restart-only PATCH should 400: %s", resp.Status)
+	}
+}
+
 // TestAdminDisabled: with no admin_token, every admin route is an invisible 404.
 func TestAdminDisabled(t *testing.T) {
 	h := start(t, nil)

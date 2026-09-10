@@ -98,6 +98,11 @@ ul.paths { margin: 0.25rem 0 0.75rem; padding-left: 1.25rem; columns: 2; }
 .clients li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .clients li.off .who { color: var(--muted); }
 .clients .tags { color: var(--muted); font-size: 0.9em; }
+.settings { border-collapse: collapse; width: 100%; }
+.settings th { text-align: left; padding: 0.3rem 0.6rem 0.3rem 0; white-space: nowrap; font-weight: 600; vertical-align: top; }
+.settings td { padding: 0.3rem 0.4rem; vertical-align: top; }
+.settings td.src { color: var(--muted); font-size: 0.9em; }
+.settings input { font: inherit; padding: 0.3rem 0.5rem; border-radius: 6px; border: 1px solid var(--line); width: 12rem; max-width: 100%; }
 
 /* ---- scan ---- */
 .scan { background: #000; color: #fff; overflow: hidden; height: 100dvh; }

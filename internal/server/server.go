@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/config"
@@ -67,6 +68,15 @@ type Options struct {
 	Logf           func(format string, args ...any)
 }
 
+// liveCfg holds the config subset the request hot paths read, swapped atomically
+// by a live PATCH (ADR 0014) so a change takes effect without a restart.
+type liveCfg struct {
+	MaxBody    int64
+	Caps       Caps
+	WarningTTL time.Duration
+	ReviewTTL  time.Duration
+}
+
 // Server is the tower's HTTP surface.
 type Server struct {
 	opts   Options
@@ -74,9 +84,15 @@ type Server struct {
 	lim    *limiter
 	metaMu sync.Mutex // serialises session.json writes
 
-	cfgMu sync.Mutex     // guards cfg (a live PATCH swaps it; ADR 0014)
-	cfg   *config.Config // the current effective config for the admin dump
+	live  atomic.Pointer[liveCfg] // the hot-path config subset (a PATCH hot-swaps it)
+	cfgMu sync.Mutex              // guards cfg (a live PATCH swaps it; ADR 0014)
+	cfg   *config.Config          // the current effective config for the admin dump
 }
+
+func (srv *Server) maxBody() int64            { return srv.live.Load().MaxBody }
+func (srv *Server) caps() Caps                { return srv.live.Load().Caps }
+func (srv *Server) warningTTL() time.Duration { return srv.live.Load().WarningTTL }
+func (srv *Server) reviewTTL() time.Duration  { return srv.live.Load().ReviewTTL }
 
 // New wires the routes and installs the completion hook on the store.
 func New(opts Options) *Server {
@@ -90,6 +106,7 @@ func New(opts Options) *Server {
 		opts.Logf = func(string, ...any) {}
 	}
 	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config}
+	srv.live.Store(&liveCfg{MaxBody: opts.MaxBody, Caps: opts.Caps, WarningTTL: opts.WarningTTL, ReviewTTL: opts.ReviewTTL})
 	srv.lim = newLimiter(opts.Now, map[rateKind]Rate{
 		rlCreate:    opts.RateCreate,
 		rlJoin:      opts.RateJoin,
@@ -129,6 +146,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("DELETE /api/sessions/{sid}/beams/{bid}", srv.sessionAdmin(srv.deleteBeam))
 	m.HandleFunc("GET /api/info", srv.info)
 	m.HandleFunc("GET /api/admin/config", srv.admin(srv.adminConfig))
+	m.HandleFunc("PATCH /api/admin/config", srv.admin(srv.adminPatchConfig))
 	m.HandleFunc("GET /api/admin/sessions", srv.admin(srv.adminList))
 	m.HandleFunc("GET /api/admin/events", srv.admin(srv.adminEvents))
 	m.HandleFunc("DELETE /api/admin/sessions/{sid}", srv.adminSess(srv.adminTerminate))
@@ -309,7 +327,7 @@ func (srv *Server) extension(w http.ResponseWriter, r *http.Request, s *session.
 		retryAfter(w, d)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
 		Reason string `json:"reason"`
 	}
@@ -340,14 +358,14 @@ func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Ses
 		retryAfter(w, d)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
 		Frames []string `json:"frames"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) || strings.Contains(err.Error(), "request body too large") {
-			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body exceeds %d bytes", srv.opts.MaxBody))
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body exceeds %d bytes", srv.maxBody()))
 			return
 		}
 		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
@@ -507,16 +525,11 @@ func (srv *Server) serveBeam(w http.ResponseWriter, r *http.Request, s *session.
 	http.ServeContent(w, r, d.Name, time.Time{}, rc)
 }
 
-// warningTTL and reviewTTL read the live lifecycle windows (7.6 sources them from
-// the hot-swappable live config; until then, from the immutable options).
-func (srv *Server) warningTTL() time.Duration { return srv.opts.WarningTTL }
-func (srv *Server) reviewTTL() time.Duration  { return srv.opts.ReviewTTL }
-
 // info advertises the version, public URL, base path, admin state and caps. It
 // is unauthenticated (the pages call it before any session exists) and never
 // logged.
 func (srv *Server) info(w http.ResponseWriter, _ *http.Request) {
-	c := srv.opts.Caps
+	c := srv.caps()
 	secs := func(d time.Duration) int64 { return int64(d / time.Second) }
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":       srv.opts.Version,

@@ -73,6 +73,16 @@ func (st *Store) SetNow(fn func() time.Time) {
 	}
 }
 
+// SetMax updates the session concurrency cap (a live admin change; ADR 0014). A
+// zero or negative value is ignored.
+func (st *Store) SetMax(max int) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if max > 0 {
+		st.max = max
+	}
+}
+
 // SetLimits sets the per-place beam cap and per-beam gzip ceiling new sessions
 // inherit (maxGz 0 disables the check). Set it before creating sessions.
 func (st *Store) SetLimits(maxBeams int, maxGz int64) {
