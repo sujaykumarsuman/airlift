@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sujaykumarsuman/airlift/internal/config"
 	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
@@ -57,6 +58,10 @@ type Options struct {
 	RateFrames     Rate           // per-address frames budget
 	RatePing       Rate           // per-address ping budget
 	RateExtension  Rate           // per-address and per-session extension-request budget
+	AdminToken     string         // the /api/admin/* bearer; "" disables the admin surface (404)
+	RateAdmin      Rate           // per-address budget charged on a failed admin-token compare
+	Config         *config.Config // the resolved config, for GET/PATCH /api/admin/config
+	ConfigParams   config.Params  // the load sources, so a PATCH reloads from the same layers
 	Now            func() time.Time
 	OnCreate       func(s *session.Session, joinURL string)
 	Logf           func(format string, args ...any)
@@ -68,6 +73,9 @@ type Server struct {
 	mux    *http.ServeMux
 	lim    *limiter
 	metaMu sync.Mutex // serialises session.json writes
+
+	cfgMu sync.Mutex     // guards cfg (a live PATCH swaps it; ADR 0014)
+	cfg   *config.Config // the current effective config for the admin dump
 }
 
 // New wires the routes and installs the completion hook on the store.
@@ -81,13 +89,14 @@ func New(opts Options) *Server {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	srv := &Server{opts: opts, mux: http.NewServeMux()}
+	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config}
 	srv.lim = newLimiter(opts.Now, map[rateKind]Rate{
 		rlCreate:    opts.RateCreate,
 		rlJoin:      opts.RateJoin,
 		rlFrames:    opts.RateFrames,
 		rlPing:      opts.RatePing,
 		rlExtension: opts.RateExtension,
+		rlAdmin:     opts.RateAdmin,
 	})
 	if opts.Now != nil {
 		opts.Store.SetNow(opts.Now)
@@ -119,6 +128,9 @@ func (srv *Server) routes() {
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
 	m.HandleFunc("DELETE /api/sessions/{sid}/beams/{bid}", srv.sessionAdmin(srv.deleteBeam))
 	m.HandleFunc("GET /api/info", srv.info)
+	m.HandleFunc("GET /api/admin/config", srv.admin(srv.adminConfig))
+	m.HandleFunc("GET /api/admin/sessions", srv.admin(srv.adminList))
+	m.HandleFunc("GET /api/admin/events", srv.admin(srv.adminEvents))
 	m.HandleFunc("GET /s/{sid}", srv.page("scan.html", scanPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
 	if srv.opts.Web != nil {

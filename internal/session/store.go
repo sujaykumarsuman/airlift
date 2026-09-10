@@ -197,6 +197,19 @@ func (st *Store) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
+// List returns a snapshot of the live sessions (for the admin surface). It copies
+// the pointers under the store lock, then releases it; the caller reads each
+// session under its own lock, preserving the store→session order (ADR 0014).
+func (st *Store) List() []*Session {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	out := make([]*Session, 0, len(st.sessions))
+	for _, s := range st.sessions {
+		out = append(out, s)
+	}
+	return out
+}
+
 // Delete removes a session, wakes its subscribers and reclaims its on-disk data.
 func (st *Store) Delete(id string) bool {
 	st.mu.Lock()

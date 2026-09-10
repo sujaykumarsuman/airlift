@@ -22,6 +22,7 @@ import (
 
 	"github.com/sujaykumarsuman/airlift/internal/beam"
 	"github.com/sujaykumarsuman/airlift/internal/bundle"
+	"github.com/sujaykumarsuman/airlift/internal/config"
 	"github.com/sujaykumarsuman/airlift/internal/proto"
 	"github.com/sujaykumarsuman/airlift/internal/replay"
 	"github.com/sujaykumarsuman/airlift/internal/session"
@@ -922,6 +923,149 @@ func TestExtensionRoute(t *testing.T) {
 	}
 	if snap := h.snapshot(t, c); snap.Status != session.StatusOpen {
 		t.Fatalf("reopen: %s", snap.Status)
+	}
+}
+
+// TestAdminReadAndAuth covers the admin auth tier and the read routes (ADR 0014):
+// 404 when unconfigured, 401 on a wrong token, 200 with the list (incl. client
+// addresses) and the config dump, rate_admin on repeated wrong tokens, and the
+// admin token never reaching the log.
+func TestAdminReadAndAuth(t *testing.T) {
+	cfg, err := config.Load(config.Params{Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var logs []string
+	h := start(t, func(o *Options) {
+		o.AdminToken = "adm-s3cret"
+		o.RateAdmin = Rate{N: 3, Per: time.Minute}
+		o.Config = cfg
+		o.Logf = func(format string, args ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			logs = append(logs, fmt.Sprintf(format, args...))
+		}
+	})
+	c := h.create(t)
+	get := func(path, tok string) (*http.Response, []byte) {
+		req, _ := http.NewRequest("GET", h.ts.URL+path, nil)
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := h.ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, b
+	}
+	if resp, _ := get("/api/admin/sessions", "wrong"); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong admin token should 401: %s", resp.Status)
+	}
+	resp, body := get("/api/admin/sessions", "adm-s3cret")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("valid admin token: %s %s", resp.Status, body)
+	}
+	var list struct {
+		Sessions []struct {
+			SID       string            `json:"sid"`
+			Addresses map[string]string `json:"addresses"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil || len(list.Sessions) != 1 || list.Sessions[0].SID != c.SID {
+		t.Fatalf("admin list: %v %s", err, body)
+	}
+	if len(list.Sessions[0].Addresses) == 0 {
+		t.Fatalf("admin list should carry client addresses: %s", body)
+	}
+	if resp, cbody := get("/api/admin/config", "adm-s3cret"); resp.StatusCode != http.StatusOK || !strings.Contains(string(cbody), "sessions") {
+		t.Fatalf("admin config: %s %s", resp.Status, cbody)
+	}
+	got429 := false
+	for i := 0; i < 6; i++ {
+		if resp, _ := get("/api/admin/sessions", "bad"); resp.StatusCode == http.StatusTooManyRequests {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Fatal("rate_admin never fired on repeated wrong tokens")
+	}
+	if resp, _ := get("/api/admin/sessions", "adm-s3cret"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("valid admin token throttled: %s", resp.Status)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, line := range logs {
+		if strings.Contains(line, "adm-s3cret") {
+			t.Fatalf("admin token leaked into the log: %q", line)
+		}
+	}
+}
+
+// readRawEvent returns the next SSE (name, data), skipping keepalive comments.
+func readRawEvent(t *testing.T, r *bufio.Reader) (string, string) {
+	t.Helper()
+	var name, data string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("sse read: %v", err)
+		}
+		line = strings.TrimRight(line, "\r\n")
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			name = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			data = strings.TrimPrefix(line, "data: ")
+		case line == "" && name != "":
+			return name, data
+		}
+	}
+}
+
+// TestAdminEventsSSE: the admin stream emits the list on connect and again when
+// it changes (a new session appears).
+func TestAdminEventsSSE(t *testing.T) {
+	h := start(t, func(o *Options) { o.AdminToken = "adm" })
+	h.create(t)
+	req, _ := http.NewRequest("GET", h.ts.URL+"/api/admin/events", nil)
+	req.Header.Set("Authorization", "Bearer adm")
+	resp, err := h.ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin events: %s", resp.Status)
+	}
+	r := bufio.NewReader(resp.Body)
+	name, data := readRawEvent(t, r)
+	if name != "sessions" || strings.Count(data, `"sid"`) != 1 {
+		t.Fatalf("first admin event %s %s", name, data)
+	}
+	h.create(t) // a change the stream must reflect
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_, data = readRawEvent(t, r)
+		if strings.Count(data, `"sid"`) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the new session never reached the admin SSE: %s", data)
+		}
+	}
+}
+
+// TestAdminDisabled: with no admin_token, every admin route is an invisible 404.
+func TestAdminDisabled(t *testing.T) {
+	h := start(t, nil)
+	for _, p := range []string{"/api/admin/config", "/api/admin/sessions", "/api/admin/events"} {
+		if resp, _ := h.do(t, "GET", p, "", "", nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s without admin_token should 404: %s", p, resp.Status)
+		}
 	}
 }
 

@@ -59,17 +59,18 @@ func cmdTower(args []string, stdout, stderr io.Writer) int {
 			flags[f.Name] = f.Value.String()
 		}
 	})
-	cfg, err := config.Load(config.Params{Flags: flags, ConfigFile: *configFile, CreateFile: true})
+	params := config.Params{Flags: flags, ConfigFile: *configFile, CreateFile: true}
+	cfg, err := config.Load(params)
 	if err != nil {
 		logger.Printf("error: %v", err)
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runServe(ctx, cfg, *headless, stdout, logger)
+	return runServe(ctx, cfg, params, *headless, stdout, logger)
 }
 
-func runServe(ctx context.Context, cfg *config.Config, headless bool, stdout io.Writer, logger *log.Logger) int {
+func runServe(ctx context.Context, cfg *config.Config, params config.Params, headless bool, stdout io.Writer, logger *log.Logger) int {
 	fail := func(err error) int {
 		logger.Printf("error: %v", err)
 		return 1
@@ -119,6 +120,10 @@ func runServe(ctx context.Context, cfg *config.Config, headless bool, stdout io.
 		RateFrames:    server.Rate(cfg.RateFrames),
 		RatePing:      server.Rate(cfg.RatePing),
 		RateExtension: server.Rate(cfg.RateExtension),
+		AdminToken:    cfg.AdminToken,
+		RateAdmin:     server.Rate(cfg.RateAdmin),
+		Config:        cfg,
+		ConfigParams:  params,
 		OnCreate:      func(s *session.Session, join string) { printJoin(stdout, s.ID, join) },
 		Logf:          logger.Printf,
 	})

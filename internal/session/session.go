@@ -348,6 +348,18 @@ func (s *Session) LifecycleLog() []LifecycleEvent {
 	return append([]LifecycleEvent(nil), s.events...)
 }
 
+// ClientAddresses maps each registered client id to its address, for the admin
+// surface only — the snapshot and session.json never carry an address.
+func (s *Session) ClientAddresses() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(s.clients))
+	for id, c := range s.clients {
+		out[id] = c.Addr
+	}
+	return out
+}
+
 // MarkActivity records real activity (a frames POST with progress, a download,
 // or a ping) while OPEN, resetting the inactive clock. Presence alone is not
 // activity, so a reconnecting stream does not call this.
