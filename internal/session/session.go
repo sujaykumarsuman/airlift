@@ -502,8 +502,8 @@ type sweepResult int
 
 const (
 	sweepKeep       sweepResult = iota // no change
-	sweepTerminated                    // OPEN → TERMINATED this sweep (still in the store)
-	sweepExpired                       // TERMINATED past cleanup → delete now
+	sweepTerminated                    // a clock advanced the session this sweep (→ TERMINATED or REJECTED), still in the store; the store writes session.json
+	sweepExpired                       // a TERMINATED or REJECTED session past its cleanup → delete now
 )
 
 // sweepStep advances one session's lifecycle at now, under its own lock.

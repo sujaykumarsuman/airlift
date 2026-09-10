@@ -220,9 +220,12 @@ func (st *Store) Len() int {
 	return len(st.sessions)
 }
 
-// Sweep runs the two-phase lifecycle sweep at now: an OPEN session past its
-// deadline is TERMINATED (its files kept for terminated_ttl), and a TERMINATED
-// session past its cleanup time is deleted and its on-disk data reclaimed. It
+// Sweep runs the two-phase lifecycle sweep at now. Phase one advances a session
+// whose binding clock has fired, keeping it and its files in the store: an OPEN
+// session past its deadline and a TERMINATING one past its warning become
+// TERMINATED, and a PENDING_REVIEW one past its review window becomes REJECTED —
+// each writing session.json via onTerminate. Phase two deletes a TERMINATED or
+// REJECTED session past its cleanup time and reclaims its on-disk data. It
 // returns the ids of the deleted sessions.
 func (st *Store) Sweep(now time.Time) []string {
 	st.mu.Lock()

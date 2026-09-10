@@ -366,6 +366,10 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 				if prev != "" { // a return to OPEN (cancel or accept), not the first send
 					name = "reopened"
 				}
+				// StatusPendingReview is deliberately unnamed: unlike the edges above
+				// it needs no distinct client action — the already-shown terminated
+				// overlay just re-renders its "awaiting review" content from the
+				// authoritative snapshot, so a plain "state" push suffices.
 			}
 		}
 		prev = snap.Status
