@@ -42,7 +42,8 @@ POST   /api/admin/sessions/{sid}/review  a-admin → body {decision:"accept"|"re
 DELETE /api/admin/sessions/{sid}/clients/{cid}  a-admin → evict a client
 GET    /api/admin/sessions/{sid}/download?beam=<bid>&as=…  a-admin → bytes (no activity marked)
 
-GET    /                              tower dashboard
+GET    /                              home: create a session, or join by id
+GET    /{sid}                         session dashboard (ADR 0020; 404 if {sid} is mis-shaped)
 GET    /s/{sid}                       scan page (token arrives in #t=)
 GET    /admin                         admin console (sign in with admin_token)
 ```
@@ -64,9 +65,11 @@ is client-spoofable and is never trusted on its own.
 A session is multi-user (ADR 0017). Every `/api/sessions/{sid}…` call carries
 the session token in the `Authorization: Bearer <token>` header; tokens are
 128-bit random, base64url (22 characters), minted with the session, and never
-logged. The join URL places the sid and token in the fragment
-(`/#s=<sid>&t=<token>`, the shared dashboard — ADR 0019) so they never reach server
-logs; the page reads `location.hash`.
+logged. A session id is a human `xxx-xxx-xxx` (three lowercase triples, ADR 0020),
+and each session lives at its own path `<base>/<sid>`. The token, when in the link,
+rides in the **fragment** (`…/<sid>#t=<token>`) so it never reaches server logs; a
+**password** session's link is the id alone (`…/<sid>`) and the token is obtained
+by entering the password.
 
 Beyond the token, most calls also carry a **client id** in the
 `X-Airlift-Client` header. A client is one participant, registered once per
@@ -147,9 +150,11 @@ simply has no beams yet.
 max_gz_bytes, idle_ttl}` (durations in seconds); each limit is clamped to its cap,
 and a value above a cap is a `400` naming it. It registers the caller as the first
 session admin and returns `201 {sid, token, client_id, name, join_url,
-expires_at}`. `join_url` is `<public base>/#s={sid}&t={token}` — the shared
-dashboard (ADR 0019); in serve mode the tower also prints it, with a terminal QR
-code, to stdout. `idle_ttl` sets the idle grace (see Lifecycle).
+expires_at}`. `join_url` is `<public base>/<sid>#t=<token>` for a public session,
+or `<public base>/<sid>` (id only) when a join password is set — the password
+session's token never travels in the link (ADR 0020). In serve mode the tower also
+prints it, with a terminal QR code, to stdout. `idle_ttl` sets the idle grace (see
+Lifecycle).
 
 When a password is set the session is also joinable without a token: `POST
 /api/sessions/{sid}/join {password, name}` → `{token, client_id, name}` (a `404`
@@ -173,6 +178,7 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `extension` | object or null | `{by, reason, at, decision?, note?, decided_at?}` once a client has requested more time; `by` is a client name |
 | `expires_at` | RFC 3339 | the earliest applicable deadline (see Lifecycle): the OPEN clock, the `TERMINATING` warning, the `PENDING_REVIEW` review deadline, or the cleanup time |
 | `reopenable` | bool | true when the session was suspended by inactivity and opening its link would revive it (ADR 0018); while true, access is revoked (downloads `409`) |
+| `has_password` | bool | a join password is set, so the share link is the id alone (no token) and joiners enter the password (ADR 0020) |
 
 Each entry of `beams` is:
 

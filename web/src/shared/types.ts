@@ -75,6 +75,7 @@ export interface Snapshot {
   extension: Extension | null;
   expires_at: string;
   reopenable: boolean; // suspended by inactivity — opening the link revives it (ADR 0018)
+  has_password: boolean; // a join password is set — the share link omits the token (ADR 0020)
 }
 
 /** One row of GET /api/admin/config (a setting's value, source and mutability). */

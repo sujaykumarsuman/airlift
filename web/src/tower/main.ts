@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, postExtension, postExtendMaxAge, postPing, registerClient } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, joinSession, postExtension, postExtendMaxAge, postPing, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
@@ -8,17 +8,40 @@ import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
 import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
-import { type BeamView, failedStage, initialView, parseDeepLink, reduce, tick, type View } from "./state";
+import { type BeamView, failedStage, initialView, reduce, tick, type View } from "./state";
 
 interface Stored {
   sid: string;
   token: string;
-  join_url: string;
   client_id: string;
   name: string;
+  hasPassword: boolean; // how this device got in: password join, or a token link
 }
 
-const STORAGE_KEY = "airlift.session";
+const storageKey = (sid: string): string => `airlift.session.${sid}`;
+function loadStored(sid: string): Stored | null {
+  try {
+    const raw = sessionStorage.getItem(storageKey(sid));
+    return raw ? (JSON.parse(raw) as Stored) : null;
+  } catch {
+    return null;
+  }
+}
+function saveStored(s: Stored): void {
+  try {
+    sessionStorage.setItem(storageKey(s.sid), JSON.stringify(s));
+  } catch {
+    /* private mode: the URL still carries enough to rejoin a public session */
+  }
+}
+function clearStored(sid: string): void {
+  try {
+    sessionStorage.removeItem(storageKey(sid));
+  } catch {
+    /* ignore */
+  }
+}
+
 const STATE_LABELS: Record<State, string> = {
   RECEIVING: "receiving",
   VERIFYING: "verifying",
@@ -44,56 +67,179 @@ let clocksClosed = false; // guards the one-shot re-render when the cleanup coun
 // The app root, incl. any path prefix from the injected <base href>.
 const appBase = new URL("./", document.baseURI).toString();
 
-// The shared-session link: opening it lands any client on this dashboard (ADR
-// 0019). In `vite dev` the deep-link form reaches the dev server; in prod the
-// server's join_url already points at the dashboard.
-function joinLink(s: Stored): string {
-  return import.meta.env.DEV ? new URL(`#s=${s.sid}&t=${s.token}`, appBase).toString() : s.join_url;
+// The session's own URL (ADR 0020). A public session appends its token for
+// one-tap join; a password session shares only the id (the joiner enters the
+// password).
+function joinLink(sid: string, token: string, hasPassword: boolean): string {
+  const url = new URL(sid, appBase).toString();
+  return hasPassword || !token ? url : `${url}#t=${token}`;
 }
 
-// The scanner for this session, opened on demand by the Scan button.
+// The scanner for this session, opened on demand by the Scan button (carries the
+// token — the dashboard already holds it).
 function scanLink(s: Stored): string {
   return new URL(`s/${s.sid}#t=${s.token}`, appBase).toString();
 }
 
+// The session id from the current path ("" on the home page).
+function sidFromPath(): string {
+  const base = new URL(document.baseURI).pathname; // "/airlift/" or "/"
+  const rest = location.pathname.startsWith(base) ? location.pathname.slice(base.length) : location.pathname.replace(/^\//, "");
+  return rest.replace(/\/+$/, "").trim();
+}
+
+// The token from the URL fragment, if any (#t=…).
+function tokenFromHash(): string {
+  return new URLSearchParams(location.hash.replace(/^#/, "")).get("t")?.trim() ?? "";
+}
+
 async function boot(): Promise<void> {
-  const deep = parseDeepLink(location.hash);
-  if (deep) {
-    current = { sid: deep.sid, token: deep.token, join_url: new URL(`s/${deep.sid}#t=${deep.token}`, appBase).toString(), client_id: "", name: "" };
-    history.replaceState(null, "", location.pathname);
-  } else {
-    const saved = sessionStorage.getItem(STORAGE_KEY);
-    if (saved) current = JSON.parse(saved) as Stored;
+  const sid = sidFromPath();
+  if (!sid) {
+    await renderHome(); // the home page: create, or join by id
+    return;
   }
-  if (current) {
-    try {
-      // Registering (idempotent per address) both validates the session and
-      // gives this dashboard its viewer client id.
-      const cl = await registerClient(current.sid, current.token, { role: "viewer" });
-      current.client_id = cl.client_id;
-      current.name = cl.name;
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(current));
-    } catch (err) {
-      notice = err instanceof ApiError && err.status === 404 ? "The previous session has expired." : "";
+  // A session URL `…/<sid>`. The token comes from the fragment (a public link) or
+  // from what this device stored when it last joined; a password session has
+  // neither, so it falls to the gate.
+  const frag = tokenFromHash();
+  const stored = loadStored(sid);
+  const token = frag || stored?.token || "";
+  if (frag) history.replaceState(null, "", location.pathname); // drop the token from the URL bar
+  current = { sid, token, client_id: stored?.client_id ?? "", name: stored?.name ?? "", hasPassword: stored?.hasPassword ?? false };
+  if (token) await enterWithToken();
+  else await probeGate(sid);
+}
+
+// enterWithToken registers this dashboard as a viewer using the token in hand.
+async function enterWithToken(): Promise<void> {
+  if (!current) return;
+  try {
+    const cl = await registerClient(current.sid, current.token, { role: "viewer" });
+    current.client_id = cl.client_id;
+    current.name = cl.name;
+    saveStored(current);
+    attach(current);
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+      // A stale/wrong token for this id — fall back to the gate (password or link).
+      clearStored(current.sid);
+      current.token = "";
+      await probeGate(current.sid);
+    } else {
+      notice = err instanceof ApiError && err.status === 404 ? "That session was not found (it may have expired)." : err instanceof Error ? err.message : String(err);
       current = null;
-      sessionStorage.removeItem(STORAGE_KEY);
+      await renderHome();
     }
   }
-  if (current) attach(current);
-  else await renderSession();
+}
+
+// probeGate classifies a session opened without a token: an empty-password join is
+// always rejected, but 401 means the session is password-protected (show the
+// form) while 404 means it is public/needs its link (or does not exist) — the
+// privacy split from ADR 0017.
+async function probeGate(sid: string): Promise<void> {
+  try {
+    await joinSession(sid, { password: "" });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      renderPasswordGate(sid);
+      return;
+    }
+  }
+  renderNeedLink(sid);
 }
 
 async function create(opts: CreateOptions = {}): Promise<void> {
   notice = "";
   try {
     const c = await createSession(opts);
-    current = { sid: c.sid, token: c.token, join_url: c.join_url, client_id: c.client_id, name: c.name };
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+    current = { sid: c.sid, token: c.token, client_id: c.client_id, name: c.name, hasPassword: !!opts.password };
+    saveStored(current);
+    history.pushState(null, "", new URL(c.sid, appBase).toString()); // move to …/<sid>
     attach(current);
   } catch (err) {
     notice = err instanceof Error ? err.message : String(err);
-    await renderSession();
+    await renderHome();
   }
+}
+
+// The home page: create a session, or join one by id.
+async function renderHome(): Promise<void> {
+  current = null;
+  newButton.hidden = true;
+  statusEl.innerHTML = "";
+  sessionEl.innerHTML = html`<div class="card">
+    ${notice ? html`<p class="warn">${notice}</p>` : ""}
+    <h2>Start a session</h2>
+    <form id="create-form" class="create-options">
+      <label>Join password <input id="opt-password" type="password" placeholder="none — open to anyone with the link" /></label>
+      <label class="check"><input id="opt-admin" type="checkbox" /> Joiners are session admins</label>
+      <p><button class="btn primary" type="submit">Create session</button></p>
+    </form>
+    <h2>Join a session</h2>
+    <form id="join-form" class="create-options">
+      <label>Session id <input id="join-sid" type="text" placeholder="e.g. qkf-mzt-bwp" autocomplete="off" spellcheck="false" /></label>
+      <p><button class="btn" type="submit">Join</button></p>
+    </form>
+  </div>`.html;
+  $<HTMLFormElement>("#create-form", sessionEl).addEventListener("submit", (e) => {
+    e.preventDefault();
+    void create({
+      password: $<HTMLInputElement>("#opt-password", sessionEl).value || undefined,
+      joiners_admin: $<HTMLInputElement>("#opt-admin", sessionEl).checked || undefined,
+    });
+  });
+  $<HTMLFormElement>("#join-form", sessionEl).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const sid = $<HTMLInputElement>("#join-sid", sessionEl).value.trim().toLowerCase();
+    if (sid) location.href = new URL(sid, appBase).toString();
+  });
+}
+
+// A password-protected session opened without a token: ask for the password.
+function renderPasswordGate(sid: string): void {
+  newButton.hidden = false;
+  statusEl.innerHTML = "";
+  sessionEl.innerHTML = html`<div class="card">
+    <h2>Join <code>${sid}</code></h2>
+    <p>This session is password-protected.</p>
+    <form id="pw-form" class="create-options">
+      <label>Your name <input id="pw-name" type="text" placeholder="optional" /></label>
+      <label>Password <input id="pw-pass" type="password" placeholder="session password" /></label>
+      <p><button class="btn primary" type="submit">Join</button></p>
+      ${notice ? html`<p class="warn">${notice}</p>` : ""}
+    </form>
+  </div>`.html;
+  $<HTMLFormElement>("#pw-form", sessionEl).addEventListener("submit", (e) => {
+    e.preventDefault();
+    void passwordJoin(sid, $<HTMLInputElement>("#pw-pass", sessionEl).value, $<HTMLInputElement>("#pw-name", sessionEl).value.trim());
+  });
+}
+
+async function passwordJoin(sid: string, password: string, name: string): Promise<void> {
+  notice = "";
+  try {
+    const j = await joinSession(sid, { password, name: name || undefined });
+    current = { sid, token: j.token, client_id: j.client_id, name: j.name, hasPassword: true };
+    saveStored(current);
+    attach(current);
+  } catch (err) {
+    notice = err instanceof ApiError && err.status === 401 ? "Wrong password." : err instanceof Error ? err.message : String(err);
+    renderPasswordGate(sid);
+  }
+}
+
+// A public session opened without its token (or a missing session): the token is
+// required, so point the visitor at the full link.
+function renderNeedLink(sid: string): void {
+  newButton.hidden = false;
+  statusEl.innerHTML = "";
+  sessionEl.innerHTML = html`<div class="card">
+    <h2>Session <code>${sid}</code></h2>
+    <p class="warn">${notice || "This session needs its full join link (the one with the access token), or it no longer exists."}</p>
+    <p><a class="btn" href="${appBase}">Home</a></p>
+  </div>`.html;
 }
 
 function attach(s: Stored): void {
@@ -179,22 +325,6 @@ function syncPinger(): void {
   else if (!live && pinger) stopPinging();
 }
 
-async function reset(): Promise<void> {
-  if (current) {
-    try {
-      await deleteSession(current.sid, current.token, current.client_id);
-    } catch {
-      /* already gone */
-    }
-  }
-  stopEvents?.();
-  stopEvents = null;
-  stopPinging();
-  current = null;
-  sessionStorage.removeItem(STORAGE_KEY);
-  await create();
-}
-
 async function download(bid: string, as: string): Promise<void> {
   if (!current || !bid) return;
   try {
@@ -233,38 +363,27 @@ async function removeBeam(bid: string): Promise<void> {
   }
 }
 
+// The invite card for the active session: the QR/link to share, and the on-demand
+// scanner. The link carries the token only for a public session (ADR 0020).
 async function renderSession(): Promise<void> {
   newButton.hidden = current === null;
   if (!current) {
-    sessionEl.innerHTML = html`<div class="card">
-      ${notice ? html`<p class="warn">${notice}</p>` : ""}
-      <p>No session yet. Create one, then scan its code with the phone.</p>
-      <form id="create-form" class="create-options">
-        <label>Label <input id="opt-label" type="text" placeholder="optional" /></label>
-        <label>Join password <input id="opt-password" type="password" placeholder="none — token only" /></label>
-        <label class="check"><input id="opt-admin" type="checkbox" /> Joiners are session admins</label>
-        <p><button class="btn primary" type="submit">Create session</button></p>
-      </form>
-    </div>`.html;
-    $<HTMLFormElement>("#create-form", sessionEl).addEventListener("submit", (e) => {
-      e.preventDefault();
-      void create({
-        label: $<HTMLInputElement>("#opt-label", sessionEl).value.trim() || undefined,
-        password: $<HTMLInputElement>("#opt-password", sessionEl).value || undefined,
-        joiners_admin: $<HTMLInputElement>("#opt-admin", sessionEl).checked || undefined,
-      });
-    });
+    await renderHome();
     return;
   }
-  const link = joinLink(current);
+  const link = joinLink(current.sid, current.token, current.hasPassword);
   sessionEl.innerHTML = html`<div class="card join">
     <canvas id="join-qr" width="256" height="256"></canvas>
     <div class="join-text">
       <h2>Share this session</h2>
-      <p>Scan this code, or open the link, to join on another device — everyone shares the same beams and downloads:</p>
+      <p>${
+        current.hasPassword
+          ? "Share the id and the password — the link alone won't let anyone in."
+          : "Scan this code or open the link to join on another device — everyone shares the same beams and downloads."
+      }</p>
       <p><code class="url">${link}</code> <button class="btn small" id="copy">Copy</button></p>
       <p class="hint">Receive a beam on this device: <button class="btn small primary" id="scan-here" type="button">Scan a beam</button></p>
-      <p class="muted">session ${current.sid}</p>
+      <p class="muted">session <code>${current.sid}</code></p>
     </div>
   </div>`.html;
   $<HTMLButtonElement>("#copy", sessionEl).addEventListener("click", () => void navigator.clipboard?.writeText(link));
@@ -296,14 +415,18 @@ function renderStatus(): void {
   statusEl.innerHTML = html`
     <div class="card place${s.status === "OPEN" ? "" : " terminated"}">
       <div class="head">
-        <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
-        <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
+        <strong>Session <code>${s.sid}</code></strong>
+        <span class="muted">${relays} · link ${connection}</span>
         ${s.status === "OPEN" ? openExpiry(s, iAmAdmin) : s.status === "TERMINATING" ? warningExpiry(s) : ""}
       </div>
       ${s.status !== "OPEN" && s.status !== "TERMINATING" ? terminatedPanel(s, Date.now()) : ""}
-      ${s.beams.length === 0 && s.status === "OPEN" ? html`<p class="muted">Waiting for the first beam. Tap <b>Scan a beam</b> and point the camera at a beam page.</p>` : ""}
-      ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>` : ""}
+      <p class="section-label">Participants (${s.clients.length})</p>
+      <ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>
       ${iAmAdmin ? adminControls(s) : ""}
+    </div>
+    <div class="beams-head">
+      <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
+      ${s.beams.length === 0 && s.status === "OPEN" ? html`<span class="muted"> · waiting — tap <b>Scan a beam</b> and point the camera at a beam page</span>` : ""}
     </div>
     ${view.beams.map((bv) => beamCard(bv, iAmAdmin))}
     ${notice ? html`<p class="warn">${notice}</p>` : ""}
@@ -361,11 +484,8 @@ function onHardDelete(): void {
       stopEvents?.();
       stopEvents = null;
       stopPinging();
-      current = null;
-      sessionStorage.removeItem(STORAGE_KEY);
-      notice = "Session deleted.";
-      void renderSession();
-      renderStatus();
+      clearStored(cur.sid);
+      location.href = appBase; // the session is gone: back to the home page
     })
     .catch((err) => {
       notice = `Could not delete the session: ${err instanceof Error ? err.message : String(err)}`;
@@ -606,5 +726,8 @@ function failedCard(b: Beam): Raw {
   </div>`;
 }
 
-newButton.addEventListener("click", () => void reset());
+// "New session" simply returns to the home page, where you can create or join one.
+newButton.addEventListener("click", () => {
+  location.href = appBase;
+});
 void boot();

@@ -184,6 +184,33 @@ past 30 min, End/Delete now, and a live hard-delete → 404.
 
 - **Phase 10 complete.**
 
+## Phase 11 — session URLs, human ids, password gate (stage 1 done, ADR 0020)
+
+Staged: stage 1 (this) is identity + joining; stage 2 is the admission/knock flow.
+
+- **Human ids + URLs**: a session id is `xxx-xxx-xxx` (three lowercase triples,
+  `Store.freshIDLocked`, `session.ValidID`); every session lives at `<base>/<sid>`
+  (`GET /{sid}` → dashboard, `sessionPage` 404s a mis-shaped id). The 16-hex id and
+  the `#s=<sid>&t=<token>` deep link are gone.
+- **Token gates access; password is its human alternative** (fixes the dead
+  password): `JoinURL` is `…/<sid>#t=<token>` for a public session, `…/<sid>` (id
+  only) for a password session. The dashboard reads the sid from the path, keeps
+  the token in per-session storage (not the URL bar), and for a token-less id
+  probes `POST /join` (401 → password form, 404 → needs-its-link/missing). Snapshot
+  gains `has_password`.
+- **Home**: create (Join password + Joiners-admin only — Label dropped from the
+  form) plus a **Join a session** box (id → `<base>/<sid>`).
+- **Layout**: a **Session** panel (id, a labelled Participants list, End/Delete,
+  +1 h) separate from the beam cards.
+
+Go gates green under `-race` (id format, routing, join_url, the tokens-never-logged
+split); web tsc/eslint/vitest green (46). Verified in-browser: create → path URL +
+token-in-fragment stripped to storage; a password session's id-only link → password
+prompt → join; a public id without its token → "needs its link"; Participants list.
+
+- **Stage 2 (next)**: opening a public id without its token becomes an
+  admission/knock flow (admin admits → token issued).
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender

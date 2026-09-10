@@ -1054,6 +1054,7 @@ type Snapshot struct {
 	Extension   *Extension       `json:"extension"`    // the pending/decided extension request; nil otherwise
 	ExpiresAt   time.Time        `json:"expires_at"`   // the earliest applicable deadline
 	Reopenable  bool             `json:"reopenable"`   // opening the link would revive an inactivity-suspended session (ADR 0018)
+	HasPassword bool             `json:"has_password"` // a join password is set, so the share link omits the token (ADR 0020)
 }
 
 // BeamSnapshot is one beam's state within a place.
@@ -1080,7 +1081,7 @@ func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.bindingDeadlineLocked(), Reopenable: s.reopenableLocked()}
+	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.bindingDeadlineLocked(), Reopenable: s.reopenableLocked(), HasPassword: s.passHash != nil}
 	if s.term != nil {
 		t := *s.term
 		snap.Terminated = &t

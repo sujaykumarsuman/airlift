@@ -94,7 +94,7 @@ func TestCreateGetDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(s.ID) != 16 || len(s.Token) != 22 {
+	if !ValidID(s.ID) || len(s.Token) != 22 {
 		t.Fatalf("id %q token %q", s.ID, s.Token)
 	}
 	if !s.TokenMatches(s.Token) || s.TokenMatches(s.Token[:21]+"x") || s.TokenMatches("") {

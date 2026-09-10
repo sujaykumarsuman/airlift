@@ -304,7 +304,7 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 	h := start(t, nil)
 	d := loadVectors(t)
 	c := h.create(t)
-	if !strings.HasPrefix(c.JoinURL, h.ts.URL+"/#s="+c.SID+"&t="+c.Token) || len(h.joins) != 1 || h.joins[0] != c.JoinURL {
+	if !strings.HasPrefix(c.JoinURL, h.ts.URL+"/"+c.SID+"#t="+c.Token) || len(h.joins) != 1 || h.joins[0] != c.JoinURL {
 		t.Fatalf("join url %q, hook %v", c.JoinURL, h.joins)
 	}
 	if time.Until(c.ExpiresAt) < 50*time.Minute {
@@ -1282,14 +1282,19 @@ func TestAdminDisabled(t *testing.T) {
 
 func TestStaticAndInfo(t *testing.T) {
 	h := start(t, func(o *Options) { o.Version = "test-1"; o.Caps = Caps{Sessions: 4, MaxGzBytes: 64 << 20} })
-	for _, p := range []string{"/", "/s/abc", "/admin"} {
+	// A well-formed session path serves the dashboard (ADR 0020); the scanner and
+	// admin pages serve too.
+	for _, p := range []string{"/", "/aaa-bbb-ccc", "/s/aaa-bbb-ccc", "/admin"} {
 		resp, body := h.do(t, "GET", p, "", "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(string(body), "airlift") {
 			t.Fatalf("%s: %s %q", p, resp.Status, body)
 		}
 	}
-	if resp, _ := h.do(t, "GET", "/nope", "", "", nil); resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("unknown path: %s", resp.Status)
+	// A junk single-segment path is a 404, not the dashboard.
+	for _, p := range []string{"/nope", "/s/nope"} {
+		if resp, _ := h.do(t, "GET", p, "", "", nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s should 404, got %s", p, resp.Status)
+		}
 	}
 	// /api/info is unauthenticated and advertises version, base path and caps.
 	resp, body := h.do(t, "GET", "/api/info", "", "", nil)
@@ -1317,7 +1322,7 @@ func TestStaticAndInfo(t *testing.T) {
 		"icons/icon-192.png":   {Data: []byte("PNG")},
 	}
 	h2 := start(t, func(o *Options) { o.Web = web })
-	for p, want := range map[string]string{"/": "dash", "/s/xyz": "scan", "/admin": `<base href="/">`, "/assets/app.js": "console.log(1)",
+	for p, want := range map[string]string{"/": "dash", "/s/aaa-bbb-ccc": "scan", "/admin": `<base href="/">`, "/assets/app.js": "console.log(1)",
 		"/sw.js": "self.x=1", "/manifest.webmanifest": "airlift", "/icons/icon-192.png": "PNG"} {
 		resp, body := h2.do(t, "GET", p, "", "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(string(body), want) {
@@ -1526,6 +1531,9 @@ func TestTokensNeverLogged(t *testing.T) {
 	h.replay(t, c, loadVectors(t), replay.Options{})
 	h.download(t, c, h.oneBeam(t, c).BID, "zip")
 	h.do(t, "DELETE", "/api/sessions/"+c.SID, c.Token, c.ClientID, nil)
+	// A public session (created before taking the log lock, since create() logs
+	// through the same mutex) carries its token in the join URL.
+	pub := h.create(t)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(logs) < 3 {
@@ -1536,8 +1544,15 @@ func TestTokensNeverLogged(t *testing.T) {
 			t.Fatalf("secret leaked into the log: %q", line)
 		}
 	}
-	if !strings.Contains(strings.Join(h.joins, " "), c.Token) {
-		t.Fatal("the OnCreate hook (terminal QR) is the one place the token may go")
+	// A password session's join link carries only the id (ADR 0020), so its token
+	// must appear nowhere in the join URLs — not even OnCreate.
+	if strings.Contains(strings.Join(h.joins, " "), c.Token) {
+		t.Fatal("a password session's token must not be in the join URL")
+	}
+	// A public session, by contrast, carries its token in the join URL — the one
+	// legitimate place it appears.
+	if !strings.Contains(strings.Join(h.joins, " "), pub.Token) {
+		t.Fatal("a public session's token should be in its join URL (OnCreate)")
 	}
 }
 
@@ -1615,7 +1630,7 @@ func TestServesUnderPathPrefix(t *testing.T) {
 		t.Fatalf("info base_path=%q public_url=%q", info.BasePath, info.PublicURL)
 	}
 
-	page, _ := http.Get(front.URL + prefix + "/s/deadbeef")
+	page, _ := http.Get(front.URL + prefix + "/s/abc-def-ghi")
 	body, _ := io.ReadAll(page.Body)
 	page.Body.Close()
 	if !strings.Contains(string(body), `<base href="/airlift/">`) {
@@ -1623,7 +1638,7 @@ func TestServesUnderPathPrefix(t *testing.T) {
 	}
 
 	s, join, _ := root.CreateSession()
-	if !strings.HasPrefix(join, "http://proxy.example/airlift/#s="+s.ID+"&t=") {
+	if !strings.HasPrefix(join, "http://proxy.example/airlift/"+s.ID+"#t=") {
 		t.Fatalf("join_url = %q", join)
 	}
 	// A headless session has no creator client; register one through the proxy,

@@ -69,10 +69,3 @@ export function failedStage(beam: Beam): Stage | null {
   return null;
 }
 
-/** `/#s=<sid>&t=<token>`: a viewer joining an existing session. */
-export function parseDeepLink(hash: string): { sid: string; token: string } | null {
-  const p = new URLSearchParams(hash.replace(/^#/, ""));
-  const sid = p.get("s")?.trim();
-  const token = p.get("t")?.trim();
-  return sid && token ? { sid, token } : null;
-}

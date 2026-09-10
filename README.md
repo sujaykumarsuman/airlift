@@ -14,9 +14,12 @@ Status: **active development** toward a hosted, multi-user tower (see
 [`STATUS.md`](STATUS.md)). The tower is plain HTTP behind a TLS-terminating
 proxy, config-driven from `~/.airlift` (ADR 0012); multi-beam sessions, clients,
 the session lifecycle and the admin surface (`/admin`, gated by `admin_token`,
-with live config overrides) are in place. A session dropped for inactivity is
-suspended and reopened by simply opening its link (ADR 0018). The tower is
-deployed behind Caddy TLS on a VPS (see [`docs/HOSTING.md`](docs/HOSTING.md)).
+with live config overrides) are in place. Each session has a human id
+(`qkf-mzt-bwp`) and lives at `…/<id>`; a public session's link carries its token,
+a password session's does not (you enter the password) — ADR 0020. A session
+dropped for inactivity is suspended and reopened by simply opening its link (ADR
+0018). The tower is deployed behind Caddy TLS on a VPS (see
+[`docs/HOSTING.md`](docs/HOSTING.md)).
 
 ## The two commands
 

@@ -127,6 +127,17 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
     grace; the expiry countdown and the session-admin +1 h show only in the last
     30 min before the cap. A session admin can hard-delete (`DELETE …?hard` → purge
     session + files at once) beside the soft End. (ADR 0019)
+20. Session URLs + the password gate: a session id is a human `xxx-xxx-xxx`
+    (three lowercase triples) and the session lives at `<base>/<sid>`; the token
+    stays in the fragment (public link) or is absent (password session), never the
+    path. The token gates access — a public link carries it for one-tap join; a
+    password session's link is the id alone and the dashboard prompts for the
+    password (`/join` → token, loaded on the device). Guessing an id grants
+    nothing. The home page is Create (password + joiners-admin only) + Join-by-id;
+    the snapshot carries `has_password`; the dashboard shows a Participants list and
+    keeps session controls separate from beam actions. Public-id-without-token
+    ("needs its link") becomes an admin **admission/knock** flow in stage 2.
+    (ADR 0020)
 
 ## Non-goals
 

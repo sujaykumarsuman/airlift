@@ -4,11 +4,54 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
 )
+
+// idAlphabet is the readable lowercase set human session ids draw from (ADR 0020).
+const idAlphabet = "abcdefghijklmnopqrstuvwxyz"
+
+// ValidID reports whether s has the session-id shape: three lowercase triples
+// joined by dashes, e.g. "qkf-mzt-bwp" (ADR 0020). The page router uses it to 404
+// a junk single-segment path rather than serve it the dashboard.
+func ValidID(s string) bool {
+	if len(s) != 11 || s[3] != '-' || s[7] != '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 3 || i == 7 {
+			continue
+		}
+		if s[i] < 'a' || s[i] > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+// freshIDLocked returns a unique human session id — three dash-separated triples,
+// e.g. "qkf-mzt-bwp". The token (or a join password), not the id, gates access, so
+// the id only needs to be readable and collision-free. Caller holds st.mu.
+func (st *Store) freshIDLocked() (string, error) {
+	for tries := 0; tries < 100; tries++ {
+		var b [9]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return "", err
+		}
+		id := make([]byte, 0, 11)
+		for i := 0; i < 9; i++ {
+			if i == 3 || i == 6 {
+				id = append(id, '-')
+			}
+			id = append(id, idAlphabet[int(b[i])%len(idAlphabet)])
+		}
+		if _, exists := st.sessions[string(id)]; !exists {
+			return string(id), nil
+		}
+	}
+	return "", errors.New("could not allocate a session id")
+}
 
 // ErrTooManySessions is returned by Create at the concurrency limit.
 var ErrTooManySessions = errors.New("too many sessions")
@@ -151,12 +194,12 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	if open >= st.max {
 		return nil, ErrTooManySessions
 	}
-	idBytes := make([]byte, 8)
 	tokenBytes := make([]byte, 16)
-	if _, err := rand.Read(idBytes); err != nil {
+	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, err
 	}
-	if _, err := rand.Read(tokenBytes); err != nil {
+	id, err := st.freshIDLocked()
+	if err != nil {
 		return nil, err
 	}
 	maxGz := st.maxGz
@@ -165,7 +208,7 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	}
 	now := st.now()
 	s := &Session{
-		ID:            hex.EncodeToString(idBytes),
+		ID:            id,
 		Token:         base64.RawURLEncoding.EncodeToString(tokenBytes),
 		CreatedAt:     now,
 		now:           st.now,

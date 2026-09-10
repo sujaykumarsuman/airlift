@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { Beam, Snapshot } from "../shared/types";
-import { failedStage, initialView, parseDeepLink, reduce, tick } from "./state";
+import { failedStage, initialView, reduce, tick } from "./state";
 
 const beam = (over: Partial<Beam> = {}): Beam => ({
   bid: "0000000a",
@@ -30,6 +30,7 @@ const place = (beams: Beam[]): Snapshot => ({
   extension: null,
   expires_at: "2026-09-09T12:00:00Z",
   reopenable: false,
+  has_password: false,
 });
 
 test("empty place has no beam views", () => {
@@ -73,13 +74,6 @@ test("failedStage picks the first failing verdict", () => {
   expect(failedStage(beam({ verdicts: { gz_sha: ok, orig_sha: bad, bundle: null } }))).toBe("orig_sha");
   expect(failedStage(beam({ verdicts: { gz_sha: ok, orig_sha: ok, bundle: bad } }))).toBe("bundle");
   expect(failedStage(beam({ verdicts: { gz_sha: ok, orig_sha: ok, bundle: ok } }))).toBeNull();
-});
-
-test("deep links", () => {
-  expect(parseDeepLink("#s=abc&t=tok")).toEqual({ sid: "abc", token: "tok" });
-  expect(parseDeepLink("#t=tok&s=abc")).toEqual({ sid: "abc", token: "tok" });
-  expect(parseDeepLink("#s=abc")).toBeNull();
-  expect(parseDeepLink("")).toBeNull();
 });
 
 test("server timestamps win over the local clock", () => {

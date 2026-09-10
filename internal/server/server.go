@@ -154,9 +154,14 @@ func (srv *Server) routes() {
 	m.HandleFunc("POST /api/admin/sessions/{sid}/review", srv.adminSess(srv.adminReview))
 	m.HandleFunc("DELETE /api/admin/sessions/{sid}/clients/{cid}", srv.adminSess(srv.adminEvict))
 	m.HandleFunc("GET /api/admin/sessions/{sid}/download", srv.adminSess(srv.adminDownload))
-	m.HandleFunc("GET /s/{sid}", srv.page("scan.html", scanPlaceholder))
+	m.HandleFunc("GET /s/{sid}", srv.sessionPage("scan.html", scanPlaceholder))
 	m.HandleFunc("GET /admin", srv.page("admin.html", adminPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
+	// A session lives at its own path `<base>/<sid>` (ADR 0020); the dashboard page
+	// reads the sid from the URL. This wildcard is the least specific route, so the
+	// literals above (/admin, /sw.js, /assets/…) still win, and sessionPage 404s a
+	// junk sid so a stray single-segment path is not served the dashboard.
+	m.HandleFunc("GET /{sid}", srv.sessionPage("index.html", dashboardPlaceholder))
 	if srv.opts.Web != nil {
 		m.Handle("GET /assets/", http.FileServerFS(srv.opts.Web))
 		m.Handle("GET /icons/", http.FileServerFS(srv.opts.Web))
@@ -181,11 +186,17 @@ func (srv *Server) file(name, contentType string) http.HandlerFunc {
 	}
 }
 
-// JoinURL is the link a client opens to join the shared session: the sid and
-// token in the fragment (never the path), so it lands on the dashboard where any
-// client can watch, download, or open the scanner on demand (ADR 0019).
+// JoinURL is the link a client opens to join the shared session, at the session's
+// own path `<base>/<sid>` (ADR 0020). A public session carries its token in the
+// fragment for one-tap join; a password session shares only the id (the token
+// never travels in the link — joiners enter the password). The fragment never
+// reaches server logs.
 func (srv *Server) JoinURL(s *session.Session) string {
-	return srv.opts.PublicBase + "/#s=" + s.ID + "&t=" + s.Token
+	link := srv.opts.PublicBase + "/" + s.ID
+	if s.HasPassword() {
+		return link
+	}
+	return link + "#t=" + s.Token
 }
 
 // create mints a session with the given options and runs the OnCreate hook. It
@@ -590,6 +601,21 @@ func (srv *Server) page(file, placeholder string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Write(body)
+	}
+}
+
+// sessionPage serves a session-scoped page (dashboard or scanner) only for a
+// well-formed session id, 404 for junk — so a stray single-segment path is not
+// served the dashboard (ADR 0020). The page itself reads the sid from the URL and
+// reports a missing session client-side.
+func (srv *Server) sessionPage(file, placeholder string) http.HandlerFunc {
+	inner := srv.page(file, placeholder)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !session.ValidID(r.PathValue("sid")) {
+			http.NotFound(w, r)
+			return
+		}
+		inner(w, r)
 	}
 }
 
