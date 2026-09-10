@@ -17,6 +17,7 @@ import {
   stopStream,
   streamSize,
 } from "./camera";
+import { activeKey, scanJustCompleted } from "./complete";
 import { createDecoder, startDecodeLoop, type Decoder, type LoopStats } from "./decoder";
 import { resolveJoin } from "./join";
 import { Relay, type RelayStats } from "./relay";
@@ -349,14 +350,13 @@ function activeBeam(): Beam | null {
 function render(): void {
   const beam = activeBeam();
   // The beam this scanner is feeding reaching READY (all packets received) stops
-  // the camera and offers to close — only on the RECEIVING→READY edge, and only
-  // while our camera is running (ADR 0019).
-  const key = beam ? `${beam.bid}:${beam.state}` : "";
-  if (beam && beam.state === "READY" && prevActiveKey === `${beam.bid}:RECEIVING` && stream) {
+  // the camera and offers to close (ADR 0019). Fires on the transition into READY
+  // from RECEIVING or VERIFYING, while our camera is running.
+  if (scanJustCompleted(prevActiveKey, beam, !!stream)) {
     scanComplete = true;
     stopCamera();
   }
-  prevActiveKey = key;
+  prevActiveKey = activeKey(beam);
   updateChrome();
   if (overlayActive() || scanComplete) return; // an overlay owns the screen; skip the live HUD
   const total = beam?.total ?? 0;
