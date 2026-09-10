@@ -59,7 +59,6 @@ airlift-linux: web
 vps-bootstrap:
 	scp deploy/airlift.service $(VPS):/etc/systemd/system/airlift.service
 	sed -e 's/{{DOMAIN}}/$(DOMAIN)/g' -e 's|{{PREFIX}}|$(PREFIX)|g' deploy/Caddyfile | ssh $(VPS) 'cat > /etc/caddy/Caddyfile'
-	scp deploy/landing/index.html $(VPS):/tmp/airlift-landing.html
 	scp deploy/bootstrap.sh $(VPS):/tmp/airlift-bootstrap.sh
 	ssh $(VPS) 'bash /tmp/airlift-bootstrap.sh "$(PUBLIC_URL)" && rm -f /tmp/airlift-bootstrap.sh'
 	ssh $(VPS) 'systemctl restart airlift; systemctl reload caddy || systemctl restart caddy'

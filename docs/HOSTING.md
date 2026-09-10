@@ -18,17 +18,27 @@ strips the `/airlift` prefix before proxying, so the tower's router stays rooted
 | config | `/var/lib/airlift/.airlift/config` | mode `0600`, owned by `airlift`; holds `admin_token`; `public_url` carries the `/airlift` prefix |
 | session data | `/var/lib/airlift/.airlift/data/` | emptied on every start (memory-only sessions, ADR 0005) |
 | TLS + proxy | `caddy.service`, `/etc/caddy/Caddyfile` | listens on `80`/`443`; strips `/airlift` → `127.0.0.1:8443`; serves the hub at `/` |
-| projects hub | `/var/www/projects/index.html` | the landing page at `/`; a placeholder you can replace |
+| projects hub | `/var/www/projects/index.html` | the landing page at `/`; source in the `sujaykumarsuman.github.io` repo (`projects/index.html`), deployed separately |
 | certificates | Caddy's data dir | auto-provisioned/renewed from Let's Encrypt |
 
 The tower sees the real client address because Caddy (on `127.0.0.1`, in the
 default `trusted_proxies`) forwards it in `X-Forwarded-For`, which the tower reads
 right-to-left (ADR 0012).
 
+## The projects hub
+
+`/` is served by Caddy from `/var/www/projects/`. Its page is **not** part of this
+repo — it lives in `sujaykumarsuman.github.io` (`projects/index.html`). Deploy an
+update to the VPS from that repo:
+
+```
+scp projects/index.html airlift-vps:/var/www/projects/index.html
+```
+
 ## Adding another project
 
 Mount it under its own prefix in `/etc/caddy/Caddyfile` (next to airlift's block)
-and link it from `/var/www/projects/index.html`:
+and add a link to the hub page (in the `sujaykumarsuman.github.io` repo):
 
 ```
 handle_path /careerdock/* {

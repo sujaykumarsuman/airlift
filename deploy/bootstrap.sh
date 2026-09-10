@@ -2,9 +2,10 @@
 # airlift VPS bootstrap — idempotent. Usage: bootstrap.sh <public_url>
 #   e.g. bootstrap.sh https://projects.sujaykumar.dev/airlift
 # Creates the service user + state dir, ensures an 0600 config with that
-# public_url and a generated admin_token (preserved on re-runs), seeds the
-# projects hub page if absent, and installs Caddy. The systemd unit, Caddyfile
-# and hub source are placed by `make vps-bootstrap`.
+# public_url and a generated admin_token (preserved on re-runs), ensures the
+# hub webroot exists, and installs Caddy. The systemd unit and Caddyfile are
+# placed by `make vps-bootstrap`; the hub page at /var/www/projects lives in the
+# sujaykumarsuman.github.io repo and is deployed separately.
 set -euo pipefail
 PUBLIC_URL="${1:?usage: bootstrap.sh <public_url>}"
 
@@ -29,13 +30,9 @@ chmod 600 "$CFG"
 chown -R airlift:airlift /var/lib/airlift
 chmod 750 /var/lib/airlift
 
-# projects hub — seed a placeholder only; never clobber a customised page
+# projects hub webroot — Caddy serves it at /; the page source lives in the
+# sujaykumarsuman.github.io repo (projects/index.html) and is deployed separately.
 mkdir -p /var/www/projects
-if [ ! -f /var/www/projects/index.html ] && [ -f /tmp/airlift-landing.html ]; then
-  mv /tmp/airlift-landing.html /var/www/projects/index.html
-  echo "seeded the projects hub placeholder"
-fi
-rm -f /tmp/airlift-landing.html
 
 if ! command -v caddy &>/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
