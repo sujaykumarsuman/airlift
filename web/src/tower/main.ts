@@ -1,8 +1,10 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, registerClient } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, postPing, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
+import { cleanupCountdown, expiryCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
+import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
 import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Termination, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
@@ -36,6 +38,9 @@ let connection: SSEStatus = "connecting";
 let stopEvents: (() => void) | null = null;
 let ticker: ReturnType<typeof setInterval> | null = null;
 let notice = "";
+let pinger: Pinger | null = null;
+let detachActivity: (() => void) | null = null;
+let clocksClosed = false; // guards the one-shot re-render when the cleanup countdown ends
 
 // The app root, incl. any path prefix from the injected <base href>.
 const appBase = new URL("./", document.baseURI).toString();
@@ -92,7 +97,9 @@ async function create(opts: CreateOptions = {}): Promise<void> {
 function attach(s: Stored): void {
   view = initialView;
   connection = "connecting";
+  clocksClosed = false;
   stopEvents?.();
+  stopPinging();
   stopEvents = subscribe(
     eventsURL(s.sid, "viewer"),
     s.token,
@@ -100,9 +107,16 @@ function attach(s: Stored): void {
       onEvent: (ev) => {
         // A one-shot terminated event carries the TERMINATED snapshot; reduce it
         // like a state push so the dashboard reflects the frozen session.
-        if (ev.event === "state" || ev.event === "terminated") view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
-        else if (ev.event === "closed") notice = "The session was closed.";
-        else if (ev.event === "evicted") notice = "You were removed from this session.";
+        if (ev.event === "state" || ev.event === "terminated") {
+          view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
+          if (view.snap?.status === "TERMINATED") pinger?.stop();
+        } else if (ev.event === "closed") {
+          notice = "The session was closed.";
+          pinger?.stop();
+        } else if (ev.event === "evicted") {
+          notice = "You were removed from this session.";
+          pinger?.stop();
+        }
         renderStatus();
       },
       onStatus: (status, detail) => {
@@ -113,17 +127,38 @@ function attach(s: Stored): void {
     },
     { clientId: s.client_id },
   );
+  pinger = new Pinger({ ping: () => doPing(s) });
+  detachActivity = bindActivity(() => pinger?.noteInput());
   if (ticker === null) {
     ticker = setInterval(() => {
-      const next = tick(view, Date.now());
+      const now = Date.now();
+      const next = tick(view, now);
       if (next !== view) {
         view = next;
         renderStatus();
+      } else {
+        updateClocks(now); // tick() returns the same view once beams finish; patch the countdowns
       }
     }, 1000);
   }
   void renderSession();
   renderStatus();
+}
+
+async function doPing(s: Stored): Promise<PingOutcome> {
+  try {
+    await postPing(s.sid, s.token, s.client_id);
+    return "ok";
+  } catch (e) {
+    return e instanceof ApiError && [401, 403, 404, 409].includes(e.status) ? "stop" : "retry";
+  }
+}
+
+function stopPinging(): void {
+  pinger?.stop();
+  pinger = null;
+  detachActivity?.();
+  detachActivity = null;
 }
 
 async function reset(): Promise<void> {
@@ -136,6 +171,7 @@ async function reset(): Promise<void> {
   }
   stopEvents?.();
   stopEvents = null;
+  stopPinging();
   current = null;
   sessionStorage.removeItem(STORAGE_KEY);
   await create();
@@ -240,8 +276,9 @@ function renderStatus(): void {
       <div class="head">
         <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
         <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
+        ${s.status === "OPEN" ? openExpiry(s) : ""}
       </div>
-      ${s.status === "TERMINATED" && s.terminated ? terminatedBanner(s.terminated) : ""}
+      ${s.status === "TERMINATED" && s.terminated ? terminatedPanel(s.terminated, Date.now()) : ""}
       ${s.beams.length === 0 && s.status === "OPEN" ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
       ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>` : ""}
     </div>
@@ -265,10 +302,45 @@ function renderStatus(): void {
   );
 }
 
-/** The banner shown once a session is terminated (the full terminated page is 6.7). */
-function terminatedBanner(t: Termination): Raw {
-  const how = t.reason === "terminated by session admin" ? "ended by an admin" : `ended (${t.reason})`;
-  return html`<p class="warn">Session ${how}. Downloads stay until ${new Date(t.cleanup_at).toLocaleTimeString()}.</p>`;
+/** The "expires in …" countdown while OPEN (hidden when no clock applies). */
+function openExpiry(s: Snapshot): Raw {
+  const c = expiryCountdown(s, Date.now());
+  return c.hidden ? raw("") : html`<span class="muted expiry">expires in <span id="expiry" class="clock">${c.text}</span></span>`;
+}
+
+/** The terminated panel: who/why plus a live countdown to when the files go. */
+function terminatedPanel(t: Termination, now: number): Raw {
+  const c = cleanupCountdown(t, now);
+  return html`<div class="ended">
+    <p class="ended-head"><strong>${terminatedBy(t)}.</strong> ${terminatedWhy(t)}</p>
+    ${c.done
+      ? html`<p>The session has closed and its files have been removed.</p>`
+      : html`<p>Downloads stay available for another <span id="cleanup" class="clock">${c.text}</span>.</p>`}
+  </div>`;
+}
+
+// updateClocks patches only the countdown text nodes so the download/evict/remove
+// buttons are never rebuilt mid-click; a full re-render happens only on the
+// one-shot swap to the "closed" line.
+function updateClocks(now: number): void {
+  const s = view.snap;
+  if (!current || !s) return;
+  if (s.status === "TERMINATED" && s.terminated) {
+    const c = cleanupCountdown(s.terminated, now);
+    if (c.done) {
+      if (!clocksClosed) {
+        clocksClosed = true;
+        renderStatus();
+      }
+      return;
+    }
+    const el = statusEl.querySelector<HTMLElement>("#cleanup");
+    if (el) el.textContent = c.text;
+  } else if (s.status === "OPEN") {
+    const c = expiryCountdown(s, now);
+    const el = statusEl.querySelector<HTMLElement>("#expiry");
+    if (el && !c.hidden) el.textContent = c.text;
+  }
 }
 
 /** One client in the place's people list; admins get an Evict button on others. */

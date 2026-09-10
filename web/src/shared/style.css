@@ -45,6 +45,11 @@ a { color: var(--accent); }
 .card.join canvas { width: 256px; height: 256px; image-rendering: pixelated; }
 .url { word-break: break-all; }
 .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.75rem; margin-bottom: 0.5rem; }
+.expiry { margin-left: auto; }
+.clock { font-variant-numeric: tabular-nums; }
+.card.place.terminated { border-color: var(--warn); }
+.place .ended { margin: 0.35rem 0 0.5rem; }
+.place .ended-head { color: var(--warn); }
 .badge {
   padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.85em; font-weight: 600;
   background: var(--line); text-transform: uppercase; letter-spacing: 0.03em;
@@ -92,3 +97,10 @@ ul.paths { margin: 0.25rem 0 0.75rem; padding-left: 1.25rem; columns: 2; }
 .scan .controls { display: flex; gap: 0.5rem; align-items: center; }
 .scan select { font: inherit; padding: 0.5rem; border-radius: 6px; max-width: 100%; }
 .scan .btn.primary { font-size: 1.1rem; padding: 0.75rem 1.25rem; }
+.scan .ended-overlay[hidden] { display: none; }
+.scan .ended-overlay:not([hidden]) {
+  position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+  padding: 1.5rem; text-align: center; background: rgba(0, 0, 0, 0.88);
+}
+.scan .ended-card h2 { margin: 0 0 0.5rem; }
+.scan .ended-card .clock { font-variant-numeric: tabular-nums; }

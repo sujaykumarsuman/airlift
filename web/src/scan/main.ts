@@ -1,7 +1,9 @@
 import "../shared/style.css";
-import { eventsURL, joinSession, postFrames, registerClient } from "../shared/api";
+import { ApiError, eventsURL, joinSession, postFrames, postPing, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw } from "../shared/dom";
+import { cleanupCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
+import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
 import type { Beam, Snapshot } from "../shared/types";
 import {
@@ -30,6 +32,8 @@ const cameraSelect = $<HTMLSelectElement>("#camera");
 const startButton = $<HTMLButtonElement>("#start");
 const torchButton = $<HTMLButtonElement>("#torch");
 const joinForm = $<HTMLFormElement>("#join-form");
+const hudEl = $<HTMLElement>("#hud");
+const endedEl = $<HTMLElement>("#ended");
 
 function safeStorage(): Storage | null {
   try {
@@ -68,6 +72,13 @@ let torchOn = false;
 let clientID = "";
 let ownName = "";
 
+// The terminal states end the HUD and show a full-screen ended overlay.
+type EndedState = { kind: "terminated"; snap: Snapshot } | { kind: "closed" } | { kind: "evicted" };
+let ended: EndedState | null = null;
+let endedTimer: ReturnType<typeof setInterval> | null = null;
+let pinger: Pinger | null = null;
+let detachActivity: (() => void) | null = null;
+
 const relay = new Relay({
   post: (frames) => postFrames(sid, token, frames, clientID),
   onUpdate: (s) => {
@@ -76,11 +87,69 @@ const relay = new Relay({
   },
 });
 
-/** A short message for a terminated session. */
-function terminatedNote(s: Snapshot): string {
-  return s.terminated?.reason === "terminated by session admin"
-    ? "The session was ended by an admin."
-    : "The session has ended (timed out).";
+async function doPing(): Promise<PingOutcome> {
+  try {
+    await postPing(sid, token, clientID);
+    return "ok";
+  } catch (e) {
+    return e instanceof ApiError && [401, 403, 404, 409].includes(e.status) ? "stop" : "retry";
+  }
+}
+
+function startPinging(): void {
+  if (pinger) return;
+  pinger = new Pinger({ ping: doPing });
+  detachActivity = bindActivity(() => pinger?.noteInput());
+}
+
+function stopPinging(): void {
+  pinger?.stop();
+  pinger = null;
+  detachActivity?.();
+  detachActivity = null;
+}
+
+// The ended overlay: who/why plus a live countdown to when the tower removes the
+// files. Full innerHTML each second is fine — it has no interactive controls.
+function showEnded(): void {
+  hudEl.hidden = true;
+  endedEl.hidden = false;
+  renderEnded();
+  if (endedTimer === null) endedTimer = setInterval(renderEnded, 1000);
+}
+
+function stopEndedTimer(): void {
+  if (endedTimer !== null) {
+    clearInterval(endedTimer);
+    endedTimer = null;
+  }
+}
+
+function renderEnded(): void {
+  if (!ended) return;
+  if (ended.kind !== "terminated") {
+    const closed = ended.kind === "closed";
+    endedEl.innerHTML = html`<div class="ended-card">
+      <h2>${closed ? "Session closed" : "Removed"}</h2>
+      <p>${closed ? "The tower has closed this session." : "You were removed from this session."}</p>
+    </div>`.html;
+    stopEndedTimer();
+    return;
+  }
+  const t = ended.snap.terminated;
+  if (!t) {
+    endedEl.innerHTML = html`<div class="ended-card"><h2>Session closed</h2></div>`.html;
+    return;
+  }
+  const c = cleanupCountdown(t, Date.now());
+  endedEl.innerHTML = html`<div class="ended-card">
+    <h2>${terminatedBy(t)}</h2>
+    <p>${terminatedWhy(t)}</p>
+    ${c.done
+      ? html`<p class="muted">The received files have been removed from the tower.</p>`
+      : html`<p class="muted">The received files stay on the tower for another <b class="clock">${c.text}</b>.</p>`}
+  </div>`.html;
+  if (c.done) stopEndedTimer();
 }
 
 /** The beam the scanner is feeding now: the last one still receiving, else the
@@ -94,6 +163,7 @@ function activeBeam(): Beam | null {
 }
 
 function render(): void {
+  if (ended) return; // the ended overlay owns the screen; do not clobber it
   const beam = activeBeam();
   const total = beam?.total ?? 0;
   const have = beam?.have ?? 0;
@@ -136,21 +206,27 @@ function subscribeProgress(as: "viewer" | "relay"): () => void {
           // A place stays open across beams; keep relaying whatever the camera
           // decodes so the operator can move on to the next beam. But a
           // TERMINATED session freezes the transfer (frames now 409), so stop
-          // relaying and let the operator know.
+          // and show the ended overlay with its countdown.
           snap = JSON.parse(ev.data) as Snapshot;
           if (snap.status === "TERMINATED") {
-            message = terminatedNote(snap);
             stopCamera();
             relay.stop();
+            stopPinging();
+            ended = { kind: "terminated", snap };
+            showEnded();
           }
         } else if (ev.event === "closed") {
-          message = "The session was closed on the tower.";
           stopCamera();
           relay.stop();
+          stopPinging();
+          ended = { kind: "closed" };
+          showEnded();
         } else if (ev.event === "evicted") {
-          message = "You were removed from this session.";
           stopCamera();
           relay.stop();
+          stopPinging();
+          ended = { kind: "evicted" };
+          showEnded();
         }
         render();
       },
@@ -275,6 +351,7 @@ async function register(): Promise<void> {
     return;
   }
   stopEvents = subscribeProgress("viewer");
+  startPinging();
   render();
   void startCamera();
 }
@@ -293,6 +370,7 @@ joinForm.addEventListener("submit", (e) => {
       joinForm.hidden = true;
       message = "";
       stopEvents = subscribeProgress("viewer");
+      startPinging();
       render();
       void startCamera();
     })
@@ -300,6 +378,12 @@ joinForm.addEventListener("submit", (e) => {
       message = err instanceof Error ? err.message : String(err);
       render();
     });
+});
+
+window.addEventListener("pagehide", () => {
+  stopPinging();
+  stopEndedTimer();
+  void relay.flush();
 });
 
 void init();

@@ -212,6 +212,10 @@ snapshot; `terminated_ttl` later the session and its `<data_dir>/<sid>` director
 are deleted (`event: closed`). The airlift-admin terminate with a warning, and
 the extension/review flow, are a later phase (ADR 0014).
 
+The web pages emit the ping automatically (at most once a minute, only while the
+tab is visible and within five minutes of real user input) and show a live
+countdown to expiry while OPEN and to `cleanup_at` once terminated.
+
 ## Events
 
 `GET /api/sessions/{sid}/events` → `text/event-stream`: a snapshot on

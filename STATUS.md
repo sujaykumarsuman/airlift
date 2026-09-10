@@ -58,7 +58,17 @@
   terminated-page UX + ping emission are 6.7. API.md/CLAUDE.md + ADR 0013. Go
   gates green under `-race`, web green. Extension/review/admin-terminate deferred
   to Phase 7.
-- **Next**: web lifecycle UI (6.7), then Phase 7 admin.
+- **6.7 web lifecycle UI** (done): a DOM-free, unit-tested activity pinger
+  (`shared/ping.ts`) — both pages `POST …/ping` at most once a minute, only while
+  visible and within 5 min of real input, keeping the inactive clock alive;
+  `shared/lifecycle.ts` friendly who/why + countdown helpers (guarding Go
+  zero-time). The scan page shows a full-screen ended overlay with a live
+  countdown to `cleanup_at`; the dashboard shows an "expires in …" countdown
+  while OPEN and a terminated panel with its own countdown (text-node patched so
+  download buttons aren't rebuilt mid-click). `saved_path` was already surfaced.
+  Web tsc/eslint/vitest green (13 new tests). Terminated-page controls needing
+  admin (warning/cancel, extension form) stay Phase 7.
+- **Next**: Phase 7 admin (ADR 0014).
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 

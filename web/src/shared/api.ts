@@ -147,6 +147,21 @@ export async function deleteBeam(
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
+/** Keeps the session's inactive clock alive (client tier, rate_ping). 204
+ *  resolves; any other status throws ApiError so the caller can classify it. */
+export async function postPing(
+  sid: string,
+  token: string,
+  clientId: string,
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/ping`), {
+    method: "POST",
+    headers: clientHeaders(token, clientId),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
 /** True for the 403 {error:"evicted"} an evicted address receives. */
 export function isEvicted(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 && err.message === "evicted";
