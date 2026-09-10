@@ -35,18 +35,22 @@ export interface PingerOptions {
   visible?: () => boolean; // default: document visible (guarded for node)
   checkMs?: number; // gate-evaluation cadence, default 20 s
   config?: PingConfig;
+  bindActivity?: (onInput: () => void) => () => void; // input source; released by stop()
 }
 
 const defaultVisible = (): boolean => typeof document === "undefined" || document.visibilityState === "visible";
 
-/** Owns exactly one interval and runs until stop(). Mirrors Relay's self-owned
- *  timer shape; visibility is sampled at each tick, so there is no listener to
- *  leak. */
+/** Owns exactly one interval — and, given a bindActivity factory, one input
+ *  subscription — and runs until stop(). Mirrors Relay's self-owned timer shape;
+ *  visibility is sampled at each tick, and stop() releases the input listener,
+ *  so nothing leaks however it stops (a "stop" ping outcome self-stopping, or
+ *  the owner calling stop()). */
 export class Pinger {
   private readonly now: () => number;
   private readonly visible: () => boolean;
   private readonly cfg: PingConfig;
   private timer: ReturnType<typeof setInterval> | null;
+  private detach: (() => void) | null = null;
   private lastInputAt: number;
   private lastPingAt: number;
   private inflight = false;
@@ -60,6 +64,7 @@ export class Pinger {
     this.lastInputAt = t; // a fresh load counts as recent input
     this.lastPingAt = t; // the first ping is one interval after start
     this.timer = setInterval(() => this.check(), opts.checkMs ?? 20_000);
+    this.detach = opts.bindActivity?.(() => this.noteInput()) ?? null;
   }
 
   /** Record real user input, resetting the "operator is around" window. */
@@ -72,6 +77,8 @@ export class Pinger {
     this.stopped = true;
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+    this.detach?.();
+    this.detach = null;
   }
 
   private check(): void {

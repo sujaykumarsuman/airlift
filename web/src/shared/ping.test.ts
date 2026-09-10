@@ -95,6 +95,31 @@ test("stop() cancels the interval", async () => {
   expect(ping).not.toHaveBeenCalled();
 });
 
+test("stop() releases the activity binding it owns", () => {
+  let bound = 0;
+  let detached = 0;
+  const { p } = make({
+    bindActivity: () => {
+      bound++;
+      return () => detached++;
+    },
+  });
+  expect(bound).toBe(1);
+  p.stop();
+  expect(detached).toBe(1);
+  p.stop(); // idempotent: no double-detach
+  expect(detached).toBe(1);
+});
+
+test("a 'stop' outcome self-stops AND releases the activity binding", async () => {
+  let detached = 0;
+  const ping = vi.fn(async (): Promise<PingOutcome> => "stop");
+  new Pinger({ ping, checkMs: 15_000, visible: () => true, bindActivity: () => () => detached++ });
+  await vi.advanceTimersByTimeAsync(60_000); // first ping → "stop" → self-stop
+  expect(ping).toHaveBeenCalledTimes(1);
+  expect(detached).toBe(1); // the listener is not orphaned by a self-stop
+});
+
 test("bindActivity feeds input and detaches cleanly", () => {
   const target = new EventTarget();
   let n = 0;

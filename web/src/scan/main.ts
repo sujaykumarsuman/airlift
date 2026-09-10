@@ -77,7 +77,6 @@ type EndedState = { kind: "terminated"; snap: Snapshot } | { kind: "closed" } | 
 let ended: EndedState | null = null;
 let endedTimer: ReturnType<typeof setInterval> | null = null;
 let pinger: Pinger | null = null;
-let detachActivity: (() => void) | null = null;
 
 const relay = new Relay({
   post: (frames) => postFrames(sid, token, frames, clientID),
@@ -98,15 +97,12 @@ async function doPing(): Promise<PingOutcome> {
 
 function startPinging(): void {
   if (pinger) return;
-  pinger = new Pinger({ ping: doPing });
-  detachActivity = bindActivity(() => pinger?.noteInput());
+  pinger = new Pinger({ ping: doPing, bindActivity });
 }
 
 function stopPinging(): void {
-  pinger?.stop();
+  pinger?.stop(); // stop() releases the activity binding it owns
   pinger = null;
-  detachActivity?.();
-  detachActivity = null;
 }
 
 // The ended overlay: who/why plus a live countdown to when the tower removes the
@@ -142,14 +138,17 @@ function renderEnded(): void {
     return;
   }
   const c = cleanupCountdown(t, Date.now());
+  const cleanupLine = c.hidden
+    ? "" // no cleanup clock to show
+    : c.done
+      ? html`<p class="muted">The received files have been removed from the tower.</p>`
+      : html`<p class="muted">The received files stay on the tower for another <b class="clock">${c.text}</b>.</p>`;
   endedEl.innerHTML = html`<div class="ended-card">
     <h2>${terminatedBy(t)}</h2>
     <p>${terminatedWhy(t)}</p>
-    ${c.done
-      ? html`<p class="muted">The received files have been removed from the tower.</p>`
-      : html`<p class="muted">The received files stay on the tower for another <b class="clock">${c.text}</b>.</p>`}
+    ${cleanupLine}
   </div>`.html;
-  if (c.done) stopEndedTimer();
+  if (c.done || c.hidden) stopEndedTimer(); // nothing left to count down
 }
 
 /** The beam the scanner is feeding now: the last one still receiving, else the

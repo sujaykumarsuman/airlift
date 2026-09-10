@@ -39,7 +39,6 @@ let stopEvents: (() => void) | null = null;
 let ticker: ReturnType<typeof setInterval> | null = null;
 let notice = "";
 let pinger: Pinger | null = null;
-let detachActivity: (() => void) | null = null;
 let clocksClosed = false; // guards the one-shot re-render when the cleanup countdown ends
 
 // The app root, incl. any path prefix from the injected <base href>.
@@ -109,13 +108,13 @@ function attach(s: Stored): void {
         // like a state push so the dashboard reflects the frozen session.
         if (ev.event === "state" || ev.event === "terminated") {
           view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
-          if (view.snap?.status === "TERMINATED") pinger?.stop();
+          if (view.snap?.status === "TERMINATED") stopPinging();
         } else if (ev.event === "closed") {
           notice = "The session was closed.";
-          pinger?.stop();
+          stopPinging();
         } else if (ev.event === "evicted") {
           notice = "You were removed from this session.";
-          pinger?.stop();
+          stopPinging();
         }
         renderStatus();
       },
@@ -127,8 +126,7 @@ function attach(s: Stored): void {
     },
     { clientId: s.client_id },
   );
-  pinger = new Pinger({ ping: () => doPing(s) });
-  detachActivity = bindActivity(() => pinger?.noteInput());
+  pinger = new Pinger({ ping: () => doPing(s), bindActivity });
   if (ticker === null) {
     ticker = setInterval(() => {
       const now = Date.now();
@@ -155,10 +153,8 @@ async function doPing(s: Stored): Promise<PingOutcome> {
 }
 
 function stopPinging(): void {
-  pinger?.stop();
+  pinger?.stop(); // stop() releases the activity binding it owns
   pinger = null;
-  detachActivity?.();
-  detachActivity = null;
 }
 
 async function reset(): Promise<void> {
@@ -311,11 +307,14 @@ function openExpiry(s: Snapshot): Raw {
 /** The terminated panel: who/why plus a live countdown to when the files go. */
 function terminatedPanel(t: Termination, now: number): Raw {
   const c = cleanupCountdown(t, now);
+  const cleanupLine = c.hidden
+    ? html`<p>The session has ended.</p>` // no cleanup clock to show
+    : c.done
+      ? html`<p>The session has closed and its files have been removed.</p>`
+      : html`<p>Downloads stay available for another <span id="cleanup" class="clock">${c.text}</span>.</p>`;
   return html`<div class="ended">
     <p class="ended-head"><strong>${terminatedBy(t)}.</strong> ${terminatedWhy(t)}</p>
-    ${c.done
-      ? html`<p>The session has closed and its files have been removed.</p>`
-      : html`<p>Downloads stay available for another <span id="cleanup" class="clock">${c.text}</span>.</p>`}
+    ${cleanupLine}
   </div>`;
 }
 
