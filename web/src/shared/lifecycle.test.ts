@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { cleanupCountdown, expiryCountdown, instantMs, terminatedBy, terminatedWhy } from "./lifecycle";
+import { cleanupCountdown, expiryCountdown, instantMs, terminateCountdown, terminatedBy, terminatedWhy } from "./lifecycle";
 import type { Snapshot, Termination } from "./types";
 
 const term = (o: Partial<Termination> = {}): Termination => ({
@@ -38,4 +38,13 @@ test("expiry countdown, hidden for the zero time", () => {
   const s = (e: string): Snapshot => ({ expires_at: e }) as unknown as Snapshot;
   expect(expiryCountdown(s("2026-09-10T00:05:00Z"), Date.parse("2026-09-10T00:00:00Z")).text).toBe("5m 00s");
   expect(expiryCountdown(s("0001-01-01T00:00:00Z"), 0).hidden).toBe(true);
+});
+
+test("terminate countdown and the Phase-7 why reasons", () => {
+  const s = (e: string): Snapshot => ({ terminate_at: e }) as unknown as Snapshot;
+  const now = Date.parse("2026-09-10T00:00:00Z");
+  expect(terminateCountdown(s("2026-09-10T00:01:00Z"), now).text).toBe("1m 00s");
+  expect(terminateCountdown(s("0001-01-01T00:00:00Z"), now).hidden).toBe(true);
+  expect(terminatedWhy(term({ by: "airlift admin", reason: "terminated by airlift admin" }))).toMatch(/administrator/);
+  expect(terminatedWhy(term({ by: "airlift admin", reason: "extension rejected" }))).toMatch(/declined/);
 });

@@ -50,14 +50,29 @@ export interface Termination {
   cleanup_at: string;
 }
 
+/** The five lifecycle states (ADR 0013/0014). Live() = OPEN | TERMINATING. */
+export type Status = "OPEN" | "TERMINATING" | "TERMINATED" | "PENDING_REVIEW" | "REJECTED";
+
+/** A client's request to keep a TERMINATED session alive, and its review (ADR 0014). */
+export interface Extension {
+  by: string;
+  reason: string;
+  at: string;
+  decision?: string; // "accept" | "reject", once reviewed
+  note?: string; // the reviewer's note
+  decided_at?: string;
+}
+
 /** A place: identity, lifecycle status, relay count, beams and clients. */
 export interface Snapshot {
   sid: string;
-  status: "OPEN" | "TERMINATED";
+  status: Status;
   relays: number;
   beams: Beam[];
   clients: ClientSummary[];
   terminated: Termination | null;
+  terminate_at: string | null; // set only while TERMINATING (the warning deadline)
+  extension: Extension | null;
   expires_at: string;
 }
 

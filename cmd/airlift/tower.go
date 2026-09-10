@@ -111,13 +111,16 @@ func runServe(ctx context.Context, cfg *config.Config, headless bool, stdout io.
 			MaxAge:      cfg.MaxAge,
 			Sessions:    cfg.Sessions,
 		},
-		MaxBody:    cfg.MaxBody,
-		RateCreate: server.Rate(cfg.RateCreate),
-		RateJoin:   server.Rate(cfg.RateJoin),
-		RateFrames: server.Rate(cfg.RateFrames),
-		RatePing:   server.Rate(cfg.RatePing),
-		OnCreate:   func(s *session.Session, join string) { printJoin(stdout, s.ID, join) },
-		Logf:       logger.Printf,
+		MaxBody:       cfg.MaxBody,
+		WarningTTL:    cfg.WarningTTL,
+		ReviewTTL:     cfg.ReviewTTL,
+		RateCreate:    server.Rate(cfg.RateCreate),
+		RateJoin:      server.Rate(cfg.RateJoin),
+		RateFrames:    server.Rate(cfg.RateFrames),
+		RatePing:      server.Rate(cfg.RatePing),
+		RateExtension: server.Rate(cfg.RateExtension),
+		OnCreate:      func(s *session.Session, join string) { printJoin(stdout, s.ID, join) },
+		Logf:          logger.Printf,
 	})
 
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}

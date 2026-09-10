@@ -1,8 +1,8 @@
 import "../shared/style.css";
-import { ApiError, eventsURL, joinSession, postFrames, postPing, registerClient } from "../shared/api";
+import { ApiError, eventsURL, joinSession, postExtension, postFrames, postPing, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw } from "../shared/dom";
-import { cleanupCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
+import { cleanupCountdown, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
 import type { Beam, Snapshot } from "../shared/types";
@@ -34,6 +34,7 @@ const torchButton = $<HTMLButtonElement>("#torch");
 const joinForm = $<HTMLFormElement>("#join-form");
 const hudEl = $<HTMLElement>("#hud");
 const endedEl = $<HTMLElement>("#ended");
+const warningEl = $<HTMLElement>("#warning");
 
 function safeStorage(): Storage | null {
   try {
@@ -72,10 +73,16 @@ let torchOn = false;
 let clientID = "";
 let ownName = "";
 
-// The terminal states end the HUD and show a full-screen ended overlay.
-type EndedState = { kind: "terminated"; snap: Snapshot } | { kind: "closed" } | { kind: "evicted" };
-let ended: EndedState | null = null;
-let endedTimer: ReturnType<typeof setInterval> | null = null;
+// Lifecycle chrome (ADR 0014). A TERMINATING session stays live and shows a
+// warning banner; the frozen states (TERMINATED/PENDING_REVIEW/REJECTED) stop the
+// camera and show a full-screen overlay; closed/evicted are final and snapshot-
+// less; a return to OPEN (an admin cancel or an accepted extension) resumes.
+type Terminal = { kind: "closed" } | { kind: "evicted" };
+const FROZEN = new Set(["TERMINATED", "PENDING_REVIEW", "REJECTED"]);
+let terminal: Terminal | null = null;
+let frozen = false; // we have stopped the camera for a frozen status
+let overlayKey = ""; // identifies the currently-rendered overlay (avoids clobbering the form)
+let lifecycleTimer: ReturnType<typeof setInterval> | null = null;
 let pinger: Pinger | null = null;
 
 const relay = new Relay({
@@ -105,50 +112,155 @@ function stopPinging(): void {
   pinger = null;
 }
 
-// The ended overlay: who/why plus a live countdown to when the tower removes the
-// files. Full innerHTML each second is fine — it has no interactive controls.
-function showEnded(): void {
-  hudEl.hidden = true;
-  endedEl.hidden = false;
-  renderEnded();
-  if (endedTimer === null) endedTimer = setInterval(renderEnded, 1000);
+// setTerminal handles the snapshot-less finals: freeze and never resume.
+function setTerminal(t: Terminal): void {
+  terminal = t;
+  frozen = true;
+  stopCamera();
+  relay.stop();
+  stopPinging();
 }
 
-function stopEndedTimer(): void {
-  if (endedTimer !== null) {
-    clearInterval(endedTimer);
-    endedTimer = null;
+// syncLifecycle reacts to a fresh snapshot: freeze on a frozen status, or resume
+// on a return to a live one (a cancel or an accepted extension).
+function syncLifecycle(): void {
+  if (terminal || !snap) return;
+  const shouldFreeze = FROZEN.has(snap.status);
+  if (shouldFreeze && !frozen) {
+    frozen = true;
+    stopCamera();
+    relay.stop();
+    stopPinging();
+  } else if (!shouldFreeze && frozen) {
+    frozen = false;
+    startPinging();
+    void startCamera();
   }
 }
 
-function renderEnded(): void {
-  if (!ended) return;
-  if (ended.kind !== "terminated") {
-    const closed = ended.kind === "closed";
+function overlayActive(): boolean {
+  return terminal !== null || (!!snap && FROZEN.has(snap.status));
+}
+
+// A key for the currently-shown overlay: a full re-render only when it changes,
+// so the extension form's input is not clobbered by the per-second countdown.
+function overlayStateKey(): string {
+  if (terminal) return terminal.kind;
+  if (!snap) return "";
+  if (snap.status === "TERMINATED" || snap.status === "REJECTED") {
+    const done = snap.terminated ? cleanupCountdown(snap.terminated, Date.now()).done : false;
+    return `${snap.status}:${done ? "done" : "live"}`;
+  }
+  return snap.status;
+}
+
+function startLifecycleTimer(): void {
+  if (lifecycleTimer === null) lifecycleTimer = setInterval(render, 1000);
+}
+function stopLifecycleTimer(): void {
+  if (lifecycleTimer !== null) {
+    clearInterval(lifecycleTimer);
+    lifecycleTimer = null;
+  }
+}
+
+// updateChrome shows the frozen/terminal overlay and the TERMINATING warning
+// banner, and runs a 1 s ticker while either has a live countdown.
+function updateChrome(): void {
+  const showOverlay = overlayActive();
+  hudEl.hidden = showOverlay;
+  endedEl.hidden = !showOverlay;
+  if (showOverlay) {
+    const key = overlayStateKey();
+    if (key !== overlayKey) {
+      overlayKey = key;
+      renderOverlay();
+    } else {
+      patchOverlayClock();
+    }
+  } else {
+    overlayKey = "";
+  }
+  const terminating = !terminal && !!snap && snap.status === "TERMINATING";
+  warningEl.hidden = !terminating;
+  if (terminating && snap) {
+    const c = terminateCountdown(snap, Date.now());
+    warningEl.innerHTML = html`Session ending${c.hidden ? "" : html` in <b class="clock">${c.text}</b>`} unless an admin cancels.`.html;
+  }
+  if (showOverlay || terminating) startLifecycleTimer();
+  else stopLifecycleTimer();
+}
+
+function renderOverlay(): void {
+  if (terminal) {
+    const closed = terminal.kind === "closed";
     endedEl.innerHTML = html`<div class="ended-card">
       <h2>${closed ? "Session closed" : "Removed"}</h2>
       <p>${closed ? "The tower has closed this session." : "You were removed from this session."}</p>
     </div>`.html;
-    stopEndedTimer();
     return;
   }
-  const t = ended.snap.terminated;
-  if (!t) {
-    endedEl.innerHTML = html`<div class="ended-card"><h2>Session closed</h2></div>`.html;
+  if (!snap) return;
+  if (snap.status === "PENDING_REVIEW") {
+    endedEl.innerHTML = html`<div class="ended-card">
+      <h2>Awaiting review</h2>
+      <p class="muted">Your request for more time is with the tower's administrator.</p>
+      ${snap.extension?.reason ? html`<p class="muted">“${snap.extension.reason}”</p>` : ""}
+    </div>`.html;
     return;
   }
-  const c = cleanupCountdown(t, Date.now());
+  const t = snap.terminated;
+  const c = t ? cleanupCountdown(t, Date.now()) : { text: "", done: true, hidden: true };
   const cleanupLine = c.hidden
-    ? "" // no cleanup clock to show
+    ? ""
     : c.done
       ? html`<p class="muted">The received files have been removed from the tower.</p>`
-      : html`<p class="muted">The received files stay on the tower for another <b class="clock">${c.text}</b>.</p>`;
+      : html`<p class="muted">The received files stay on the tower for another <b id="cleanup" class="clock">${c.text}</b>.</p>`;
+  const canExtend = snap.status === "TERMINATED" && !c.done;
+  const rejectedNote = snap.status === "REJECTED" && snap.extension?.note;
   endedEl.innerHTML = html`<div class="ended-card">
-    <h2>${terminatedBy(t)}</h2>
-    <p>${terminatedWhy(t)}</p>
+    <h2>${t ? terminatedBy(t) : "Session ended"}</h2>
+    ${t ? html`<p>${terminatedWhy(t)}</p>` : ""}
+    ${rejectedNote ? html`<p class="muted">Note: ${snap.extension!.note}</p>` : ""}
     ${cleanupLine}
+    ${canExtend
+      ? html`<form id="ext-form" class="ext-form">
+          <input id="ext-reason" type="text" placeholder="why you need more time (optional)" />
+          <button class="btn primary" type="submit">Request more time</button>
+        </form>`
+      : ""}
   </div>`.html;
-  if (c.done || c.hidden) stopEndedTimer(); // nothing left to count down
+  const form = endedEl.querySelector<HTMLFormElement>("#ext-form");
+  if (form) form.addEventListener("submit", onExtensionSubmit);
+}
+
+// patchOverlayClock updates only the cleanup countdown text so the extension
+// form's input is preserved across the per-second tick.
+function patchOverlayClock(): void {
+  if (terminal || !snap?.terminated) return;
+  const c = cleanupCountdown(snap.terminated, Date.now());
+  const el = endedEl.querySelector<HTMLElement>("#cleanup");
+  if (el && !c.hidden) el.textContent = c.text;
+}
+
+function onExtensionSubmit(e: Event): void {
+  e.preventDefault();
+  const input = endedEl.querySelector<HTMLInputElement>("#ext-reason");
+  const reason = input?.value.trim() ?? "";
+  const button = endedEl.querySelector<HTMLButtonElement>("#ext-form button");
+  if (button) button.disabled = true;
+  void postExtension(sid, token, clientID, reason)
+    .then(() => {
+      /* the SSE will push PENDING_REVIEW and re-render the overlay */
+    })
+    .catch((err) => {
+      if (button) button.disabled = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      const note = document.createElement("p");
+      note.className = "warn";
+      note.textContent = `Could not request more time: ${msg}`;
+      endedEl.querySelector(".ended-card")?.appendChild(note);
+    });
 }
 
 /** The beam the scanner is feeding now: the last one still receiving, else the
@@ -162,7 +274,8 @@ function activeBeam(): Beam | null {
 }
 
 function render(): void {
-  if (ended) return; // the ended overlay owns the screen; do not clobber it
+  updateChrome();
+  if (overlayActive()) return; // the overlay owns the screen; skip the live HUD
   const beam = activeBeam();
   const total = beam?.total ?? 0;
   const have = beam?.have ?? 0;
@@ -201,31 +314,17 @@ function subscribeProgress(as: "viewer" | "relay"): () => void {
     token,
     {
       onEvent: (ev) => {
-        if (ev.event === "state" || ev.event === "terminated") {
-          // A place stays open across beams; keep relaying whatever the camera
-          // decodes so the operator can move on to the next beam. But a
-          // TERMINATED session freezes the transfer (frames now 409), so stop
-          // and show the ended overlay with its countdown.
-          snap = JSON.parse(ev.data) as Snapshot;
-          if (snap.status === "TERMINATED") {
-            stopCamera();
-            relay.stop();
-            stopPinging();
-            ended = { kind: "terminated", snap };
-            showEnded();
-          }
-        } else if (ev.event === "closed") {
-          stopCamera();
-          relay.stop();
-          stopPinging();
-          ended = { kind: "closed" };
-          showEnded();
+        // closed/evicted are final and snapshot-less; every other event carries a
+        // snapshot (state/terminating/terminated/rejected/reopened) and drives the
+        // freeze/resume decision. A place stays open across beams, and a warned
+        // (TERMINATING) session keeps relaying; only a frozen status stops it.
+        if (ev.event === "closed") {
+          setTerminal({ kind: "closed" });
         } else if (ev.event === "evicted") {
-          stopCamera();
-          relay.stop();
-          stopPinging();
-          ended = { kind: "evicted" };
-          showEnded();
+          setTerminal({ kind: "evicted" });
+        } else {
+          snap = JSON.parse(ev.data) as Snapshot;
+          syncLifecycle();
         }
         render();
       },
@@ -381,7 +480,7 @@ joinForm.addEventListener("submit", (e) => {
 
 window.addEventListener("pagehide", () => {
   stopPinging();
-  stopEndedTimer();
+  stopLifecycleTimer();
   void relay.flush();
 });
 

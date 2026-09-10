@@ -1,12 +1,12 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, postPing, registerClient } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, postExtension, postPing, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
-import { cleanupCountdown, expiryCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
+import { cleanupCountdown, expiryCountdown, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Termination, Verdict } from "../shared/types";
+import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
 import { type BeamView, failedStage, initialView, parseDeepLink, reduce, tick, type View } from "./state";
 
@@ -104,17 +104,19 @@ function attach(s: Stored): void {
     s.token,
     {
       onEvent: (ev) => {
-        // A one-shot terminated event carries the TERMINATED snapshot; reduce it
-        // like a state push so the dashboard reflects the frozen session.
-        if (ev.event === "state" || ev.event === "terminated") {
-          view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
-          if (view.snap?.status === "TERMINATED") stopPinging();
-        } else if (ev.event === "closed") {
+        // closed/evicted are final and snapshot-less; every other event carries a
+        // snapshot (state/terminating/terminated/rejected/reopened). A warned
+        // (TERMINATING) session stays live so the ping keeps running; a frozen one
+        // stops it, and a reopen restarts it — syncPinger decides from the status.
+        if (ev.event === "closed") {
           notice = "The session was closed.";
           stopPinging();
         } else if (ev.event === "evicted") {
           notice = "You were removed from this session.";
           stopPinging();
+        } else {
+          view = reduce(view, JSON.parse(ev.data) as Snapshot, Date.now());
+          syncPinger();
         }
         renderStatus();
       },
@@ -155,6 +157,16 @@ async function doPing(s: Stored): Promise<PingOutcome> {
 function stopPinging(): void {
   pinger?.stop(); // stop() releases the activity binding it owns
   pinger = null;
+}
+
+// syncPinger keeps the pinger running while the session is live (OPEN or
+// TERMINATING) and stops it once frozen; a reopen restarts it.
+function syncPinger(): void {
+  if (!current) return;
+  const st = view.snap?.status;
+  const live = !st || st === "OPEN" || st === "TERMINATING";
+  if (live && !pinger) pinger = new Pinger({ ping: () => doPing(current!), bindActivity });
+  else if (!live && pinger) stopPinging();
 }
 
 async function reset(): Promise<void> {
@@ -268,13 +280,13 @@ function renderStatus(): void {
   const relays = `${s.relays} ${s.relays === 1 ? "relay" : "relays"}`;
   const iAmAdmin = !!current && s.clients.some((cl) => cl.client_id === current!.client_id && cl.session_admin);
   statusEl.innerHTML = html`
-    <div class="card place${s.status === "TERMINATED" ? " terminated" : ""}">
+    <div class="card place${s.status === "OPEN" ? "" : " terminated"}">
       <div class="head">
         <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
         <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
-        ${s.status === "OPEN" ? openExpiry(s) : ""}
+        ${s.status === "OPEN" ? openExpiry(s) : s.status === "TERMINATING" ? warningExpiry(s) : ""}
       </div>
-      ${s.status === "TERMINATED" && s.terminated ? terminatedPanel(s.terminated, Date.now()) : ""}
+      ${s.status !== "OPEN" && s.status !== "TERMINATING" ? terminatedPanel(s, Date.now()) : ""}
       ${s.beams.length === 0 && s.status === "OPEN" ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
       ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>` : ""}
     </div>
@@ -296,6 +308,7 @@ function renderStatus(): void {
   statusEl.querySelectorAll<HTMLButtonElement>("[data-remove-beam]").forEach((btn) =>
     btn.addEventListener("click", () => void removeBeam(btn.dataset.removeBeam ?? "")),
   );
+  statusEl.querySelector<HTMLFormElement>("#ext-form")?.addEventListener("submit", onExtensionSubmit);
 }
 
 /** The "expires in …" countdown while OPEN (hidden when no clock applies). */
@@ -304,18 +317,53 @@ function openExpiry(s: Snapshot): Raw {
   return c.hidden ? raw("") : html`<span class="muted expiry">expires in <span id="expiry" class="clock">${c.text}</span></span>`;
 }
 
-/** The terminated panel: who/why plus a live countdown to when the files go. */
-function terminatedPanel(t: Termination, now: number): Raw {
-  const c = cleanupCountdown(t, now);
+/** The warning countdown while TERMINATING (an airlift admin is ending it). */
+function warningExpiry(s: Snapshot): Raw {
+  const c = terminateCountdown(s, Date.now());
+  return html`<span class="expiry warn">ending in <span id="expiry" class="clock">${c.hidden ? "…" : c.text}</span></span>`;
+}
+
+/** The panel for a non-live session: who/why, a cleanup countdown, and — while
+ *  TERMINATED — an extension request; PENDING_REVIEW shows the awaiting-review
+ *  note, REJECTED the reviewer's note. */
+function terminatedPanel(s: Snapshot, now: number): Raw {
+  const t = s.terminated;
+  if (s.status === "PENDING_REVIEW") {
+    return html`<div class="ended">
+      <p class="ended-head"><strong>Awaiting review.</strong> A request for more time is with the tower's administrator.</p>
+      ${s.extension?.reason ? html`<p class="muted">“${s.extension.reason}”</p>` : ""}
+    </div>`;
+  }
+  const c = t ? cleanupCountdown(t, now) : { text: "", done: true, hidden: true };
   const cleanupLine = c.hidden
-    ? html`<p>The session has ended.</p>` // no cleanup clock to show
+    ? html`<p>The session has ended.</p>`
     : c.done
       ? html`<p>The session has closed and its files have been removed.</p>`
       : html`<p>Downloads stay available for another <span id="cleanup" class="clock">${c.text}</span>.</p>`;
   return html`<div class="ended">
-    <p class="ended-head"><strong>${terminatedBy(t)}.</strong> ${terminatedWhy(t)}</p>
+    <p class="ended-head"><strong>${t ? terminatedBy(t) : "Session ended"}.</strong> ${t ? terminatedWhy(t) : ""}</p>
+    ${s.status === "REJECTED" && s.extension?.note ? html`<p class="muted">Note: ${s.extension.note}</p>` : ""}
     ${cleanupLine}
+    ${s.status === "TERMINATED" && !c.done
+      ? html`<form id="ext-form" class="ext-form">
+          <input id="ext-reason" type="text" placeholder="why you need more time (optional)" />
+          <button class="btn small primary" type="submit">Request more time</button>
+        </form>`
+      : ""}
   </div>`;
+}
+
+function onExtensionSubmit(e: Event): void {
+  e.preventDefault();
+  if (!current) return;
+  const reason = statusEl.querySelector<HTMLInputElement>("#ext-reason")?.value.trim() ?? "";
+  const btn = statusEl.querySelector<HTMLButtonElement>("#ext-form button");
+  if (btn) btn.disabled = true;
+  void postExtension(current.sid, current.token, current.client_id, reason).catch((err) => {
+    notice = `Could not request more time: ${err instanceof Error ? err.message : String(err)}`;
+    if (btn) btn.disabled = false;
+    renderStatus();
+  });
 }
 
 // updateClocks patches only the countdown text nodes so the download/evict/remove
@@ -324,21 +372,26 @@ function terminatedPanel(t: Termination, now: number): Raw {
 function updateClocks(now: number): void {
   const s = view.snap;
   if (!current || !s) return;
-  if (s.status === "TERMINATED" && s.terminated) {
+  if (s.status === "OPEN") {
+    const c = expiryCountdown(s, now);
+    const el = statusEl.querySelector<HTMLElement>("#expiry");
+    if (el && !c.hidden) el.textContent = c.text;
+  } else if (s.status === "TERMINATING") {
+    const c = terminateCountdown(s, now);
+    const el = statusEl.querySelector<HTMLElement>("#expiry");
+    if (el && !c.hidden) el.textContent = c.text;
+  } else if ((s.status === "TERMINATED" || s.status === "REJECTED") && s.terminated) {
+    // Only these two have a live cleanup countdown; PENDING_REVIEW's is frozen.
     const c = cleanupCountdown(s.terminated, now);
     if (c.done) {
       if (!clocksClosed) {
         clocksClosed = true;
-        renderStatus();
+        renderStatus(); // swap the panel to the "removed" line once, without a loop
       }
       return;
     }
     const el = statusEl.querySelector<HTMLElement>("#cleanup");
     if (el) el.textContent = c.text;
-  } else if (s.status === "OPEN") {
-    const c = expiryCountdown(s, now);
-    const el = statusEl.querySelector<HTMLElement>("#expiry");
-    if (el && !c.hidden) el.textContent = c.text;
   }
 }
 

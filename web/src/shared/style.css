@@ -48,8 +48,11 @@ a { color: var(--accent); }
 .expiry { margin-left: auto; }
 .clock { font-variant-numeric: tabular-nums; }
 .card.place.terminated { border-color: var(--warn); }
+.expiry.warn { color: var(--warn); font-weight: 600; }
 .place .ended { margin: 0.35rem 0 0.5rem; }
 .place .ended-head { color: var(--warn); }
+.ext-form { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+.ext-form input { font: inherit; padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--line); flex: 1 1 12rem; }
 .badge {
   padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.85em; font-weight: 600;
   background: var(--line); text-transform: uppercase; letter-spacing: 0.03em;
@@ -104,3 +107,7 @@ ul.paths { margin: 0.25rem 0 0.75rem; padding-left: 1.25rem; columns: 2; }
 }
 .scan .ended-card h2 { margin: 0 0 0.5rem; }
 .scan .ended-card .clock { font-variant-numeric: tabular-nums; }
+.scan .ended-card .ext-form { justify-content: center; }
+.warning-banner[hidden] { display: none; }
+.warning-banner { background: rgba(154, 103, 0, 0.85); color: #fff; padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.5rem; font-weight: 600; }
+.warning-banner .clock { font-variant-numeric: tabular-nums; }

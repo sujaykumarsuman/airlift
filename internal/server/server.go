@@ -50,10 +50,13 @@ type Options struct {
 	Caps           Caps           // limits advertised by /api/info
 	MaxBody        int64          // request body limit (default 8 MiB)
 	MaxFrames      int            // frames per POST (default 500)
+	WarningTTL     time.Duration  // airlift-admin terminate warning window (ADR 0014)
+	ReviewTTL      time.Duration  // how long an extension request awaits review
 	RateCreate     Rate           // per-address create budget (0 disables)
 	RateJoin       Rate           // per-address and per-session join budget
 	RateFrames     Rate           // per-address frames budget
 	RatePing       Rate           // per-address ping budget
+	RateExtension  Rate           // per-address and per-session extension-request budget
 	Now            func() time.Time
 	OnCreate       func(s *session.Session, joinURL string)
 	Logf           func(format string, args ...any)
@@ -80,10 +83,11 @@ func New(opts Options) *Server {
 	}
 	srv := &Server{opts: opts, mux: http.NewServeMux()}
 	srv.lim = newLimiter(opts.Now, map[rateKind]Rate{
-		rlCreate: opts.RateCreate,
-		rlJoin:   opts.RateJoin,
-		rlFrames: opts.RateFrames,
-		rlPing:   opts.RatePing,
+		rlCreate:    opts.RateCreate,
+		rlJoin:      opts.RateJoin,
+		rlFrames:    opts.RateFrames,
+		rlPing:      opts.RatePing,
+		rlExtension: opts.RateExtension,
 	})
 	if opts.Now != nil {
 		opts.Store.SetNow(opts.Now)
@@ -109,6 +113,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("GET /api/sessions/{sid}/events", srv.client(srv.events))
 	m.HandleFunc("POST /api/sessions/{sid}/frames", srv.client(srv.frames))
 	m.HandleFunc("POST /api/sessions/{sid}/ping", srv.client(srv.ping))
+	m.HandleFunc("POST /api/sessions/{sid}/extension", srv.client(srv.extension))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.client(srv.download))
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.sessionAdmin(srv.deleteSession))
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
@@ -269,6 +274,42 @@ func (srv *Server) ping(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		return
 	}
 	s.MarkActivity(c)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// extension records a client's request to keep a TERMINATED session alive,
+// moving it to PENDING_REVIEW for an airlift admin to review (ADR 0014). Client
+// tier, rate_extension (per address and per session); 409 unless the session is
+// TERMINATED with no prior request. The requester's name (never an address) is
+// recorded on the request.
+func (srv *Server) extension(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
+	if d, ok := srv.lim.allow(rlExtension, srv.clientAddr(r)); !ok {
+		retryAfter(w, d)
+		return
+	}
+	if d, ok := srv.lim.allow(rlExtension, "sid:"+s.ID); !ok {
+		retryAfter(w, d)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := decodeOptionalJSON(r.Body, &req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if !s.RequestExtension(c.Name, req.Reason, srv.opts.ReviewTTL) {
+		writeError(w, http.StatusConflict, "no extension can be requested for this session")
+		return
+	}
+	srv.writeSessionJSON(s)
+	srv.opts.Logf("session %s extension requested", s.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

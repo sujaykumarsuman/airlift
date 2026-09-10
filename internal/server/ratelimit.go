@@ -21,6 +21,7 @@ const (
 	rlJoin
 	rlFrames
 	rlPing
+	rlExtension
 )
 
 type bucket struct {

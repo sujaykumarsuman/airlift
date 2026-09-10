@@ -892,6 +892,39 @@ func TestLifecycleWarningLiveCancelTerminate(t *testing.T) {
 	}
 }
 
+// TestExtensionRoute: a client requests an extension of a TERMINATED session,
+// moving it to PENDING_REVIEW; it is 409 while OPEN and single-shot.
+func TestExtensionRoute(t *testing.T) {
+	h := start(t, func(o *Options) { o.ReviewTTL = time.Hour })
+	c := h.create(t)
+	s, _ := h.store.Get(c.SID)
+	ext := func(reason string) *http.Response {
+		resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/extension", c.Token, c.ClientID, []byte(`{"reason":"`+reason+`"}`))
+		return resp
+	}
+	if resp := ext("early"); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("extension while OPEN should 409: %s", resp.Status)
+	}
+	s.Terminate("session admin", "done")
+	if resp := ext("still downloading"); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("extension of a TERMINATED session: %s", resp.Status)
+	}
+	snap := h.snapshot(t, c)
+	if snap.Status != session.StatusPendingReview || snap.Extension == nil || snap.Extension.By == "" || snap.Extension.Reason != "still downloading" {
+		t.Fatalf("snapshot after extension: %+v", snap)
+	}
+	if resp := ext("again"); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a second extension should 409: %s", resp.Status)
+	}
+	// An admin accept (7.4 exposes the route; here via the session method) reopens.
+	if !s.Review(true, "ok") {
+		t.Fatal("Review accept")
+	}
+	if snap := h.snapshot(t, c); snap.Status != session.StatusOpen {
+		t.Fatalf("reopen: %s", snap.Status)
+	}
+}
+
 func TestStaticAndInfo(t *testing.T) {
 	h := start(t, func(o *Options) { o.Version = "test-1"; o.Caps = Caps{Sessions: 4, MaxGzBytes: 64 << 20} })
 	for _, p := range []string{"/", "/s/abc"} {

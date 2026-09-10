@@ -162,6 +162,23 @@ export async function postPing(
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
+/** Requests an extension of a TERMINATED session (client tier, rate_extension).
+ *  204 resolves; any other status throws ApiError so the caller can classify it. */
+export async function postExtension(
+  sid: string,
+  token: string,
+  clientId: string,
+  reason: string,
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/extension`), {
+    method: "POST",
+    headers: { ...clientHeaders(token, clientId), "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
 /** True for the 403 {error:"evicted"} an evicted address receives. */
 export function isEvicted(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 && err.message === "evicted";

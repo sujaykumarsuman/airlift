@@ -24,6 +24,10 @@ export function terminatedWhy(t: Termination): string {
     return "An admin ended this session.";
   }
   switch (t.reason) {
+    case "terminated by airlift admin":
+      return "An administrator ended this session.";
+    case "extension rejected":
+      return "The request for more time was declined.";
     case "idle_ttl":
       return "It closed after everyone disconnected.";
     case "inactive_ttl":
@@ -55,6 +59,15 @@ export function cleanupCountdown(t: Termination, now: number): Countdown {
  *  clock applies. */
 export function expiryCountdown(s: Snapshot, now: number): Countdown {
   const at = instantMs(s.expires_at);
+  if (at === null) return { text: "", done: false, hidden: true };
+  const ms = at - now;
+  return { text: formatDuration(Math.max(0, ms)), done: ms <= 0, hidden: false };
+}
+
+/** Time until a TERMINATING session's warning elapses (→ TERMINATED); hidden when
+ *  there is no warning deadline (i.e. the session is not TERMINATING). */
+export function terminateCountdown(s: Snapshot, now: number): Countdown {
+  const at = instantMs(s.terminate_at);
   if (at === null) return { text: "", done: false, hidden: true };
   const ms = at - now;
   return { text: formatDuration(Math.max(0, ms)), done: ms <= 0, hidden: false };

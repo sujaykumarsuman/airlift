@@ -26,6 +26,8 @@ const place = (beams: Beam[]): Snapshot => ({
   beams,
   clients: [],
   terminated: null,
+  terminate_at: null,
+  extension: null,
   expires_at: "2026-09-09T12:00:00Z",
 });
 
