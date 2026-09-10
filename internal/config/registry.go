@@ -45,7 +45,6 @@ var registry = []key{
 	{"max_beams", KInt, "10", true},
 	{"max_gz_bytes", KBytes, "64MiB", true},
 	{"idle_ttl", KDuration, "30m", true},
-	{"inactive_ttl", KDuration, "30m", true},
 	{"max_age", KDuration, "24h", true},
 	{"warning_ttl", KDuration, "1m", true},
 	{"terminated_ttl", KDuration, "1h", true},

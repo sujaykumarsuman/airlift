@@ -99,7 +99,6 @@ export interface Info {
   caps: {
     max_gz_bytes: number;
     idle_ttl: number;
-    inactive_ttl: number;
     max_age: number;
     sessions: number;
   };
@@ -121,7 +120,6 @@ export interface CreateOptions {
   joiners_admin?: boolean;
   max_gz_bytes?: number;
   idle_ttl?: number; // seconds
-  inactive_ttl?: number; // seconds
 }
 
 /** The response to registering a client (POST .../clients). */

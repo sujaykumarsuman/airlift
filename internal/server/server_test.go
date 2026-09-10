@@ -304,7 +304,7 @@ func TestEndToEndReplayWithDrop(t *testing.T) {
 	h := start(t, nil)
 	d := loadVectors(t)
 	c := h.create(t)
-	if !strings.HasPrefix(c.JoinURL, h.ts.URL+"/s/"+c.SID+"#t="+c.Token) || len(h.joins) != 1 || h.joins[0] != c.JoinURL {
+	if !strings.HasPrefix(c.JoinURL, h.ts.URL+"/#s="+c.SID+"&t="+c.Token) || len(h.joins) != 1 || h.joins[0] != c.JoinURL {
 		t.Fatalf("join url %q, hook %v", c.JoinURL, h.joins)
 	}
 	if time.Until(c.ExpiresAt) < 50*time.Minute {
@@ -635,12 +635,11 @@ func TestJoinersAdmin(t *testing.T) {
 
 func TestCreateOptionClamps(t *testing.T) {
 	h := start(t, func(o *Options) {
-		o.Caps = Caps{MaxGzBytes: 1 << 20, IdleTTL: 10 * time.Minute, InactiveTTL: 30 * time.Minute, Sessions: 4}
+		o.Caps = Caps{MaxGzBytes: 1 << 20, IdleTTL: 10 * time.Minute, Sessions: 4}
 	})
 	over := map[string]string{
 		"max_gz_bytes": `{"max_gz_bytes":2097152}`,
 		"idle_ttl":     `{"idle_ttl":9999}`,
-		"inactive_ttl": `{"inactive_ttl":9999}`,
 	}
 	for key, body := range over {
 		resp, data := h.do(t, "POST", "/api/sessions", "", "", []byte(body))
@@ -1223,7 +1222,7 @@ func TestAdminOverrides(t *testing.T) {
 		o.AdminToken = "adm"
 		o.Config = cfg
 		o.ConfigParams = params
-		o.Store = session.NewStore(cfg.InactiveTTL, cfg.Sessions)
+		o.Store = session.NewStore(cfg.IdleTTL, cfg.Sessions)
 	})
 	patch := func(body string) (*http.Response, []byte) {
 		req, _ := http.NewRequest("PATCH", h.ts.URL+"/api/admin/config", bytes.NewReader([]byte(body)))
@@ -1543,7 +1542,13 @@ func TestTokensNeverLogged(t *testing.T) {
 }
 
 func TestSessionExpiryClosesStreams(t *testing.T) {
-	h := start(t, func(o *Options) { o.Store = session.NewStore(150*time.Millisecond, 32) })
+	// Presence keeps a connected session alive (ADR 0019), so drive the expiry with
+	// the max_age cap, which applies even while a stream is open.
+	h := start(t, func(o *Options) {
+		st := session.NewStore(150*time.Millisecond, 32)
+		st.SetLifecycle(150*time.Millisecond, 150*time.Millisecond, 150*time.Millisecond) // idle, max_age, terminated
+		o.Store = st
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go h.store.Run(ctx, 20*time.Millisecond)
@@ -1618,7 +1623,7 @@ func TestServesUnderPathPrefix(t *testing.T) {
 	}
 
 	s, join, _ := root.CreateSession()
-	if !strings.HasPrefix(join, "http://proxy.example/airlift/s/"+s.ID+"#t=") {
+	if !strings.HasPrefix(join, "http://proxy.example/airlift/#s="+s.ID+"&t=") {
 		t.Fatalf("join_url = %q", join)
 	}
 	// A headless session has no creator client; register one through the proxy,
@@ -1873,7 +1878,7 @@ func TestDeleteTerminatesThenReclaims(t *testing.T) {
 	h := start(t, func(o *Options) {
 		o.Now = clk.now
 		st := session.NewStore(time.Hour, 32)
-		st.SetLifecycle(time.Hour, time.Hour, 0, 30*time.Minute) // terminated_ttl 30m
+		st.SetLifecycle(time.Hour, 0, 30*time.Minute) // idle 1h, no max_age, terminated_ttl 30m
 		o.Store = st
 	})
 	c := h.create(t)

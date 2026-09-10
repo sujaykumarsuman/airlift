@@ -4,7 +4,7 @@ import type { Snapshot, Termination } from "./types";
 
 const term = (o: Partial<Termination> = {}): Termination => ({
   by: "system",
-  reason: "inactive_ttl",
+  reason: "idle_ttl",
   at: "2026-09-10T00:00:00Z",
   cleanup_at: "2026-09-10T00:10:00Z",
   ...o,
@@ -15,7 +15,6 @@ test("friendly who/why", () => {
   expect(terminatedBy(term({ by: "airlift admin" }))).toBe("Ended by airlift admin"); // Phase-7 fallback
   expect(terminatedWhy(term({ by: "session admin", reason: "terminated by session admin" }))).toMatch(/admin ended/);
   expect(terminatedWhy(term({ reason: "idle_ttl" }))).toMatch(/disconnected/);
-  expect(terminatedWhy(term({ reason: "inactive_ttl" }))).toMatch(/inactivity/);
   expect(terminatedWhy(term({ reason: "max_age" }))).toMatch(/maximum age/);
 });
 

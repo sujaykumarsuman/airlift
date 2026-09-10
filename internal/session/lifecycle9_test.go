@@ -22,7 +22,7 @@ func hasEvent(log []LifecycleEvent, event, by string) bool {
 // A session suspended by the idle clock is reopenable, and opening the link
 // revives it to a normal OPEN session with the beam intact and the clocks reset.
 func TestInactivitySuspendReopenByLink(t *testing.T) {
-	st, c := newStore(t, 30*time.Minute, 32) // idle = inactive = terminated = 30m, max_age off
+	st, c := newStore(t, 30*time.Minute, 32) // idle = terminated = 30m, max_age off
 	s, _ := st.Create()
 	if r := s.Ingest(vectors(t).Frames); r.Accepted == 0 { // the place now holds a beam
 		t.Fatalf("ingest: %+v", r)
@@ -66,22 +66,18 @@ func TestInactivitySuspendReopenByLink(t *testing.T) {
 	}
 }
 
-// The inactive clock (a stream connected, no activity) suspends just the same,
-// and that suspension is reopenable too.
-func TestInactiveTTLReopenable(t *testing.T) {
-	st, c := newStore(t, 30*time.Minute, 32)
+// Presence keeps a connected session alive (ADR 0019): the idle grace never fires
+// while a stream is open, so it is not suspended.
+func TestPresenceKeepsAlive(t *testing.T) {
+	st, c := newStore(t, 30*time.Minute, 32) // idle grace 30m, max_age off
 	s, _ := st.Create()
-	s.Subscribe(nil, RoleViewer) // a connected stream → the inactive clock applies
-	c.t = c.t.Add(31 * time.Minute)
-	st.Sweep(c.t)
-	if term := s.Terminated(); term == nil || term.Reason != "inactive_ttl" {
-		t.Fatalf("termination %+v", s.Terminated())
+	s.Subscribe(nil, RoleViewer) // a connected stream keeps it alive
+	c.t = c.t.Add(2 * time.Hour)
+	if st.Sweep(c.t); s.Status() != StatusOpen {
+		t.Fatalf("a connected session must stay OPEN, got %s", s.Status())
 	}
-	if !s.Reopenable() {
-		t.Fatal("an inactive-clock suspension should be reopenable")
-	}
-	if !s.Reopen("viewer") || s.Status() != StatusOpen {
-		t.Fatalf("reopen failed: %s", s.Status())
+	if got := s.ExpiresAt(); !got.IsZero() {
+		t.Fatalf("no clock should bound a connected, uncapped session, got %v", got)
 	}
 }
 
@@ -108,7 +104,7 @@ func TestDeliberateTerminationNotReopenable(t *testing.T) {
 // The max_age cap is not a self-service reopen either — it keeps the review flow.
 func TestMaxAgeNotReopenable(t *testing.T) {
 	st, c := newStore(t, time.Hour, 32)
-	st.SetLifecycle(time.Hour, time.Hour, 5*time.Minute, time.Hour) // max_age caps at 5m
+	st.SetLifecycle(time.Hour, 5*time.Minute, time.Hour) // max_age caps at 5m
 	s, _ := st.Create()
 	c.t = c.t.Add(6 * time.Minute)
 	st.Sweep(c.t)
@@ -123,7 +119,7 @@ func TestMaxAgeNotReopenable(t *testing.T) {
 // A session admin can push the max_age cap out an hour at a time (ADR 0018).
 func TestExtendMaxAge(t *testing.T) {
 	st, c := newStore(t, time.Hour, 32)
-	st.SetLifecycle(24*time.Hour, 24*time.Hour, 5*time.Minute, time.Hour) // max_age is the binding clock
+	st.SetLifecycle(24*time.Hour, 5*time.Minute, time.Hour) // max_age is the binding clock
 	s, _ := st.Create()
 	if got := s.ExpiresAt(); !got.Equal(c.t.Add(5 * time.Minute)) {
 		t.Fatalf("max_age deadline %v, want now+5m", got)
@@ -147,7 +143,7 @@ func TestExtendMaxAge(t *testing.T) {
 		t.Fatal("ExtendMaxAge on a terminated session must fail")
 	}
 	// No cap set → refused.
-	st.SetLifecycle(24*time.Hour, 24*time.Hour, 0, time.Hour)
+	st.SetLifecycle(24*time.Hour, 0, time.Hour)
 	s2, _ := st.Create()
 	if s2.ExtendMaxAge(time.Hour) {
 		t.Fatal("ExtendMaxAge with max_age off must fail")

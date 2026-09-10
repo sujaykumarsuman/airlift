@@ -37,8 +37,8 @@ func TestDefaults(t *testing.T) {
 	if c.MaxAge != 24*time.Hour {
 		t.Fatalf("max_age default = %v, want 24h", c.MaxAge)
 	}
-	if c.IdleTTL != 30*time.Minute || c.InactiveTTL != 30*time.Minute || c.TerminatedTTL != time.Hour {
-		t.Fatalf("ttls idle=%v inactive=%v terminated=%v", c.IdleTTL, c.InactiveTTL, c.TerminatedTTL)
+	if c.IdleTTL != 30*time.Minute || c.TerminatedTTL != time.Hour {
+		t.Fatalf("ttls idle=%v terminated=%v", c.IdleTTL, c.TerminatedTTL)
 	}
 	if c.MaxGzBytes != 64<<20 || c.MaxBody != 8<<20 {
 		t.Fatalf("bytes %d %d", c.MaxGzBytes, c.MaxBody)

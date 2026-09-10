@@ -92,9 +92,9 @@ func runServe(ctx context.Context, cfg *config.Config, params config.Params, hea
 		return fail(err)
 	}
 
-	store := session.NewStore(cfg.InactiveTTL, cfg.Sessions)
+	store := session.NewStore(cfg.IdleTTL, cfg.Sessions)
 	store.SetLimits(cfg.MaxBeams, cfg.MaxGzBytes)
-	store.SetLifecycle(cfg.IdleTTL, cfg.InactiveTTL, cfg.MaxAge, cfg.TerminatedTTL)
+	store.SetLifecycle(cfg.IdleTTL, cfg.MaxAge, cfg.TerminatedTTL)
 	go store.Run(ctx, sweepEvery)
 	srv := server.New(server.Options{
 		Store:          store,
@@ -106,11 +106,10 @@ func runServe(ctx context.Context, cfg *config.Config, params config.Params, hea
 		AdminEnabled:   cfg.AdminEnabled(),
 		Version:        airlift.Version,
 		Caps: server.Caps{
-			MaxGzBytes:  cfg.MaxGzBytes,
-			IdleTTL:     cfg.IdleTTL,
-			InactiveTTL: cfg.InactiveTTL,
-			MaxAge:      cfg.MaxAge,
-			Sessions:    cfg.Sessions,
+			MaxGzBytes: cfg.MaxGzBytes,
+			IdleTTL:    cfg.IdleTTL,
+			MaxAge:     cfg.MaxAge,
+			Sessions:   cfg.Sessions,
 		},
 		MaxBody:       cfg.MaxBody,
 		WarningTTL:    cfg.WarningTTL,

@@ -20,7 +20,6 @@ type createReq struct {
 	JoinersAdmin bool   `json:"joiners_admin"`
 	MaxGzBytes   *int64 `json:"max_gz_bytes"` // bytes
 	IdleTTL      *int64 `json:"idle_ttl"`     // seconds
-	InactiveTTL  *int64 `json:"inactive_ttl"` // seconds
 }
 
 func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -92,11 +91,6 @@ func (srv *Server) createParams(req createReq) (session.CreateParams, error) {
 		return p, err
 	}
 	p.IdleTTL = idle
-	inactive, err := clampTTL("inactive_ttl", req.InactiveTTL, caps.InactiveTTL)
-	if err != nil {
-		return p, err
-	}
-	p.InactiveTTL = inactive
 	return p, nil
 }
 

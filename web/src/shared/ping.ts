@@ -1,9 +1,8 @@
 /**
  * The activity pinger. A passive dashboard viewer or a scan page between beams
- * sends no frames, so it must ping to keep the session's inactive clock alive —
- * but only while the tab is visible and the operator is actually around. This
- * module is DOM-free (bindActivity is the one exception) so its logic is
- * unit-tested with fake timers.
+ * sends no frames, so it pings to mark itself active — but only while the tab is
+ * visible and the operator is actually around. This module is DOM-free
+ * (bindActivity is the one exception) so its logic is unit-tested with fake timers.
  */
 
 export interface PingConfig {

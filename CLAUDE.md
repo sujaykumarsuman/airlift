@@ -24,17 +24,19 @@ format), `docs/API.md` (HTTP API), `docs/adr/` (locked decisions), `STATUS.md`
   air gap.
 - **Tower** — the Go binary on the operator's laptop (the Mac). It hosts the
   session and the `web/` UI on the LAN. Exactly one per session.
-- **Scanner** — any camera-bearing browser on the LAN that joins the session
-  and relays decoded frames (the `scan` page). Phones, tablets, or the tower
-  laptop itself with a webcam. Multiple scanners may feed one session.
-- **Dashboard viewer** — a browser on the LAN that joins to watch progress and
-  download (the `tower` page). A device with no camera joins as a viewer only.
+- **Dashboard** — the shared session view (the `tower` page). The join link/QR
+  opens it (ADR 0019), so **every client lands here**: watch progress, download
+  results, invite others. Multiple clients share one session.
+- **Scanner** — the camera relay (the `scan` page), opened **on demand** from the
+  dashboard's *Scan a beam* button, never by the join link itself. Any
+  camera-bearing client can open it; it relays decoded frames and stops itself
+  once the beam is received. Multiple scanners may feed one session.
 
-A device's role is decided by capability and page, never by a "sender mode":
-camera → can be a scanner; no camera → viewer only. Nothing joins the session
-as a sender. The sender is the offline beam, by construction. If a machine is
-already on the LAN, it is not a sender — it would just upload to tower
-directly (out of scope; see non-goals).
+A device's role is decided by capability and page, never by a "sender mode": the
+join link always lands on the dashboard, and a camera-bearing client *can* open
+the scanner on demand. Nothing joins the session as a sender. The sender is the
+offline beam, by construction. If a machine is already on the LAN, it is not a
+sender — it would just upload to tower directly (out of scope; see non-goals).
 
 ## Components
 
@@ -95,12 +97,11 @@ directly (out of scope; see non-goals).
     salted-SHA-256 password join, per-address/session rate limits (429 +
     `Retry-After`), address eviction, and operator beam removal + auto-evict of
     the oldest terminal beam at the cap. (ADR 0017)
-16. Session lifecycle: `status` is OPEN or TERMINATED; `expires_at` is the
-    earliest of three clocks (idle/inactive/max_age), moved by activity (a frames
-    POST with progress, a download, a ping) not by presence; a session-admin
-    DELETE or a clock soft-terminates (freeze + keep files), then the two-phase
-    sweep deletes after `terminated_ttl`; a session-level `session.json` receipt.
-    (ADR 0013)
+16. Session lifecycle: `status` is OPEN or TERMINATED; a session-admin DELETE or a
+    clock soft-terminates (freeze + keep files), then the two-phase sweep deletes
+    after `terminated_ttl`; a session-level `session.json` receipt. Expiry is
+    revised by ADR 0019 — presence keeps a connected session alive; idle + max_age
+    only. (ADR 0013)
 17. Admin surface: the lifecycle completes with TERMINATING (a `warning_ttl`
     grace window, `Live() = OPEN||TERMINATING`), a client extension request →
     PENDING_REVIEW, and an airlift-admin review (accept→reopen / reject→REJECTED).
@@ -109,15 +110,23 @@ directly (out of scope; see non-goals).
     at `/admin`. Live config keys are PATCH-able at runtime (atomic 0600 overrides,
     applied without a restart); the CLI stays `beam` + `tower` — `sessions`/`fetch`
     fold into `/admin`, so ADR 0010 stands. (ADR 0014)
-18. Reopen by link: a session suspended by inactivity (`system` terminate for
-    `idle_ttl`/`inactive_ttl`; snapshot `reopenable`) revokes all access (downloads
+18. Reopen by link: a session suspended by the idle grace (`system` terminate for
+    `idle_ttl`; snapshot `reopenable`) revokes all access (downloads
     409 too) and is revived — every clock reset — simply by opening its link
     (register/join call `Reopen`); no admin review. Deliberate (session/airlift-
     admin) terminations and the `max_age` cap keep the ADR 0014 request→review flow
     and stay downloadable. A session admin extends the cap an hour at a time
-    (`POST …/max-age`, the dashboard "+1 h"). Defaults: `idle_ttl` 30m (one
-    inactivity rule), `terminated_ttl` 1h (the reopen window). Beam default fps 5.
-    (ADR 0018)
+    (`POST …/max-age`, the dashboard "+1 h"). Defaults: `idle_ttl` 30m (the
+    everyone-left grace), `terminated_ttl` 1h (the reopen window). Beam default fps
+    5. (ADR 0018)
+19. Shared session, scan on demand: the join link/QR opens the shared dashboard
+    (`…/#s=<sid>&t=<token>`) — every client watches/downloads there and opens the
+    scanner on demand via a *Scan a beam* button; the scanner self-stops on READY
+    and can close its own tab. Presence keeps a connected session alive (bounded
+    only by `max_age`); `inactive_ttl` is removed, idle is the sole everyone-left
+    grace; the expiry countdown and the session-admin +1 h show only in the last
+    30 min before the cap. A session admin can hard-delete (`DELETE …?hard` → purge
+    session + files at once) beside the soft End. (ADR 0019)
 
 ## Non-goals
 

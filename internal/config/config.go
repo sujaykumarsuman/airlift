@@ -58,7 +58,6 @@ type Config struct {
 	MaxBeams       int
 	MaxGzBytes     int64
 	IdleTTL        time.Duration
-	InactiveTTL    time.Duration
 	MaxAge         time.Duration // 0 = off
 	WarningTTL     time.Duration
 	TerminatedTTL  time.Duration
@@ -255,8 +254,6 @@ func assign(c *Config, name string, val any) {
 		c.MaxGzBytes = val.(int64)
 	case "idle_ttl":
 		c.IdleTTL = val.(time.Duration)
-	case "inactive_ttl":
-		c.InactiveTTL = val.(time.Duration)
 	case "max_age":
 		c.MaxAge = val.(time.Duration)
 	case "warning_ttl":

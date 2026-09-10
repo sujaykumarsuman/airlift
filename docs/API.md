@@ -13,7 +13,7 @@ client), *a-admin* (the airlift admin, `admin_token`).
 
 ```
 POST   /api/sessions                  public → body {label?,password?,joiners_admin?,
-                                               max_gz_bytes?,idle_ttl?,inactive_ttl?}
+                                               max_gz_bytes?,idle_ttl?}
                                              → {sid, token, client_id, name, join_url, expires_at}
 POST   /api/sessions/{sid}/join       public → body {password, name?} → {token, client_id, name}
 POST   /api/sessions/{sid}/clients    token  → body {name?, role?} → {client_id, name, session_admin, roles}
@@ -29,7 +29,7 @@ PATCH  /api/sessions/{sid}            s-admin → body {password} (set or, with 
 POST   /api/sessions/{sid}/max-age    s-admin → 200 {expires_at}; +1h before the max_age cap (ADR 0018)
 DELETE /api/sessions/{sid}/clients/{cid}  s-admin → evict a client's address
 DELETE /api/sessions/{sid}/beams/{bid}    s-admin → remove a beam and its files
-DELETE /api/sessions/{sid}            s-admin → terminate the session (freeze, keep files)
+DELETE /api/sessions/{sid}[?hard]     s-admin → soft-terminate (freeze, keep files), or ?hard purge now
 GET    /api/info                      public → {version, public_url, base_path, admin_enabled, caps}
 
 GET    /api/admin/config              a-admin → {keys:[{name,value,source,live},…]} (secrets masked)
@@ -49,7 +49,7 @@ GET    /admin                         admin console (sign in with admin_token)
 
 `GET /api/info` is unauthenticated (the pages call it before any session
 exists) and never logged; `caps` carries `{max_gz_bytes, idle_ttl,
-inactive_ttl, max_age, sessions}` (the `*_ttl`/`max_age` in seconds).
+max_age, sessions}` (the `*_ttl`/`max_age` in seconds).
 
 ## Client address and X-Forwarded-For
 
@@ -64,8 +64,9 @@ is client-spoofable and is never trusted on its own.
 A session is multi-user (ADR 0017). Every `/api/sessions/{sid}…` call carries
 the session token in the `Authorization: Bearer <token>` header; tokens are
 128-bit random, base64url (22 characters), minted with the session, and never
-logged. The join URL places the token in the fragment (`/s/{sid}#t=<token>`) so
-it never reaches server logs; the scan page reads `location.hash`.
+logged. The join URL places the sid and token in the fragment
+(`/#s=<sid>&t=<token>`, the shared dashboard — ADR 0019) so they never reach server
+logs; the page reads `location.hash`.
 
 Beyond the token, most calls also carry a **client id** in the
 `X-Airlift-Client` header. A client is one participant, registered once per
@@ -143,12 +144,12 @@ simply has no beams yet.
 ## Create
 
 `POST /api/sessions` takes an optional body `{label, password, joiners_admin,
-max_gz_bytes, idle_ttl, inactive_ttl}` (durations in seconds); each limit is
-clamped to its cap, and a value above a cap is a `400` naming it. It registers
-the caller as the first session admin and returns `201 {sid, token, client_id,
-name, join_url, expires_at}`. `join_url` is `<public base>/s/{sid}#t={token}`;
-in serve mode the tower also prints it, with a terminal QR code, to stdout.
-`idle_ttl`/`inactive_ttl` set the session's lifecycle clocks (see Lifecycle).
+max_gz_bytes, idle_ttl}` (durations in seconds); each limit is clamped to its cap,
+and a value above a cap is a `400` naming it. It registers the caller as the first
+session admin and returns `201 {sid, token, client_id, name, join_url,
+expires_at}`. `join_url` is `<public base>/#s={sid}&t={token}` — the shared
+dashboard (ADR 0019); in serve mode the tower also prints it, with a terminal QR
+code, to stdout. `idle_ttl` sets the idle grace (see Lifecycle).
 
 When a password is set the session is also joinable without a token: `POST
 /api/sessions/{sid}/join {password, name}` → `{token, client_id, name}` (a `404`
@@ -226,19 +227,19 @@ sender's manifest arrives, without disturbing any other beam.
 
 A session has a `status` of `OPEN`, `TERMINATING`, `TERMINATED`,
 `PENDING_REVIEW` or `REJECTED` (ADR 0013, ADR 0014). *Live* means `OPEN` or
-`TERMINATING` — the transfer runs, and the concurrency cap counts these. While
-OPEN its `expires_at` is the earliest of three clocks:
+`TERMINATING` — the transfer runs, and the concurrency cap counts these.
+**Presence keeps a connected session alive** (ADR 0019): while any client stream
+is open, `expires_at` is only the `max_age` cap (unset ⇒ no expiry). Two clocks
+apply otherwise:
 
 - **idle** — `idle_ttl` after the last client stream leaves (runs only while no
-  stream is connected).
-- **inactive** — `inactive_ttl` after the last activity while streams are
-  connected.
-- **max_age** — `max_age` from the creation base, when set (a reopen rebases it).
+  stream is connected; `reopenable` when it fires, ADR 0018).
+- **max_age** — `max_age` from the creation base, when set (a reopen rebases it; a
+  session admin pushes it out an hour at a time via `POST …/max-age`).
 
-*Activity* — a frames POST that accepted or duplicated ≥ 1 frame, a download, or
-a ping — resets the inactive clock. A bare snapshot, an open stream, a
-register/join and an all-bad POST are presence, not activity, and no longer
-refresh anything.
+`inactive_ttl` is gone (ADR 0019). *Activity* — a frames POST that accepted or
+duplicated ≥ 1 frame, a download, or a ping — moves the last-activity used for the
+idle base; a bare snapshot, an open stream and a register/join are presence.
 
 Terminating:
 
@@ -265,25 +266,26 @@ Extension and review (ADR 0014):
 
 Reopen by link and max-age grants (ADR 0018):
 
-- A session suspended by inactivity (a `system` terminate for `idle_ttl` or
-  `inactive_ttl`; `reopenable: true`) is revived — `→ OPEN`, every clock reset,
-  beams and files intact — simply by registering a client or password-joining, so
-  opening the link reopens it with no admin review. The deliberate terminations
-  and the `max_age` cap above are **not** reopenable this way; they keep the
-  extension → review path.
+- A session suspended by the idle grace (a `system` terminate for `idle_ttl`;
+  `reopenable: true`) is revived — `→ OPEN`, every clock reset, beams and files
+  intact — simply by registering a client or password-joining, so opening the link
+  reopens it with no admin review. The deliberate terminations and the `max_age`
+  cap above are **not** reopenable this way; they keep the extension → review path.
 - A session admin may `POST …/max-age` to add an hour to the `max_age` cap
   (repeatable), so an actively-used session can outlive the 24 h cap without the
   operator; a reopen clears the granted hours.
 
 `terminated_ttl` after a session reaches `TERMINATED` or `REJECTED`, it and its
 `<data_dir>/<sid>` directory are deleted (`event: closed`). `PENDING_REVIEW` is
-never swept-to-delete while it awaits a decision.
+never swept-to-delete while it awaits a decision. A session admin's `DELETE …?hard`
+does that deletion at once (ADR 0019), rather than waiting for the sweep.
 
-The web pages emit the ping automatically (at most once a minute, only while the
-tab is visible and within five minutes of real user input), show a live countdown
-(expiry while OPEN, the warning while TERMINATING, cleanup once terminated), and
-offer the extension form — or, for an inactivity-suspended session, a **Reopen**
-button. The dashboard also gives session admins a **+1 h** button while live; the
+The web pages: the dashboard is the shared session (ADR 0019) — the join
+link/QR opens it, any client watches/downloads, and a **Scan a beam** button opens
+the scanner on demand (which stops itself once the beam is received). It shows the
+expiry countdown and the session-admin **+1 h** button only in the last 30 min
+before the `max_age` cap (presence keeps it alive otherwise), a **Reopen** button
+for an idle-suspended session, and **End session** / **Delete now** for admins; the
 admin console drives the warning, cancel and review.
 
 ## Events

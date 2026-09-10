@@ -151,6 +151,39 @@ scan-here button opening the scan page.
 
 - **Phase 9 complete.**
 
+## Phase 10 — shared session, scan on demand, presence-keeps-alive (done, ADR 0019)
+
+Reshapes the join/role model and the expiry model from user feedback on the live
+site:
+
+- **Shared session, scan on demand**: `JoinURL` is now the dashboard deep link
+  (`…/#s=<sid>&t=<token>`), so the QR/link/print all open the shared dashboard —
+  every client watches, downloads and invites; the scanner is opened on demand by a
+  **Scan a beam** button (any client) that `window.open`s the scan page. CLAUDE.md
+  roles updated (dashboard is the landing, scanning is opt-in).
+- **Presence keeps a connected session alive**: while any stream is open only the
+  `max_age` cap bounds it; the idle grace runs when everyone leaves, then suspends →
+  reopen by link. **`inactive_ttl` removed** across config/session/server/web +
+  `/api/info` caps + create options; idle is the sole everyone-left grace, and only
+  `idle_ttl` is reopenable.
+- **Countdown + +1 h only near the cap**: the dashboard hides the expiry countdown
+  and the session-admin +1 h until the last 30 min before the `max_age` cap, so the
+  control acts on the clock it sits beside.
+- **Scanner self-stops + closes**: on the RECEIVING→READY edge (all packets
+  received) it stops the camera and shows **Close** (`window.close()`) + **Scan
+  another**.
+- **Session-admin delete**: `DELETE …?hard` purges the session and its files at
+  once (`Store.Delete`); the dashboard gives admins **End session** (soft) and
+  **Delete now** (hard, confirmed).
+
+ADR 0019 + API.md/CLAUDE.md/HOSTING.md/README updated. Go gates green under `-race`
+(TestLifecycleClocks/TestPresenceKeepsAlive rewritten for presence, TestHardDelete,
+join_url format); web tsc/eslint/vitest green (44). Verified in-browser: the
+dashboard-link QR + Scan a beam opening the scanner, the +1 h hiding the countdown
+past 30 min, End/Delete now, and a live hard-delete → 404.
+
+- **Phase 10 complete.**
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender

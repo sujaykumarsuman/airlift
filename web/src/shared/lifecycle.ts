@@ -30,8 +30,6 @@ export function terminatedWhy(t: Termination): string {
       return "The request for more time was declined.";
     case "idle_ttl":
       return "It closed after everyone disconnected.";
-    case "inactive_ttl":
-      return "It closed after a spell of inactivity.";
     case "max_age":
       return "It reached its maximum age.";
     default:

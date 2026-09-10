@@ -109,8 +109,10 @@ a flag; the common ones are `--public_url`, `--listen` and `--admin_token`, and
 [`docs/API.md`](docs/API.md) and ADR 0012.
 
 Open the dashboard, press **Create session**, and point the phone's camera app
-at the QR code it shows. The phone opens the scan page, asks for the camera,
-and relays what it decodes; the dashboard fills in live and, once every hash
+at the QR code it shows: the QR opens the **shared session dashboard** on the
+phone (ADR 0019). There, tap **Scan a beam** to open the camera and point it at
+a beam page; the phone relays what it decodes, the camera stops once the beam is
+received, and the dashboard fills in live and, once every hash
 matches, offers the downloads (raw file, or the unpacked tree as a zip) named
 after the beam.
 

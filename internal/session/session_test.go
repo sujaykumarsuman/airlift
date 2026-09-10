@@ -185,19 +185,20 @@ func TestSweepTerminatesThenDeletes(t *testing.T) {
 	}
 }
 
-// TestLifecycleClocks exercises the earliest-of-three deadline and activity.
+// TestLifecycleClocks exercises presence-keeps-alive, the idle grace and the
+// max_age cap (ADR 0019).
 func TestLifecycleClocks(t *testing.T) {
-	// idle 10m, inactive 30m, no max_age, terminated 1h.
-	mk := func() (*Store, *clock, *Session) {
+	// idle 10m grace, terminated 1h; max_age per case.
+	mk := func(maxAge time.Duration) (*Store, *clock, *Session) {
 		c := &clock{t: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
 		st := NewStore(time.Hour, 32)
 		st.now = c.now
-		st.SetLifecycle(10*time.Minute, 30*time.Minute, 0, time.Hour)
+		st.SetLifecycle(10*time.Minute, maxAge, time.Hour)
 		s, _ := st.CreateWith(CreateParams{})
 		return st, c, s
 	}
-	// (a) No stream → idle clock from creation.
-	st, c, s := mk()
+	// (a) No stream → the idle grace runs from creation.
+	st, c, s := mk(0)
 	if got := s.ExpiresAt(); !got.Equal(c.t.Add(10 * time.Minute)) {
 		t.Fatalf("idle deadline %v", got)
 	}
@@ -205,29 +206,20 @@ func TestLifecycleClocks(t *testing.T) {
 	if st.Sweep(c.t); s.Status() != StatusTerminated || s.Terminated().Reason != "idle_ttl" {
 		t.Fatalf("idle terminate %s %+v", s.Status(), s.Terminated())
 	}
-	// (b) A connected stream switches to the inactive clock; activity resets it.
-	st, c, s = mk()
+	// (b) A connected stream keeps it alive: no idle clock applies, and with no
+	// max_age it never expires.
+	st, c, s = mk(0)
 	sub := s.Subscribe(nil, RoleViewer)
-	if got := s.ExpiresAt(); !got.Equal(s.lastActivity.Add(30 * time.Minute)) {
-		t.Fatalf("inactive deadline %v", got)
+	if got := s.ExpiresAt(); !got.IsZero() {
+		t.Fatalf("a connected session with no cap should not expire, got %v", got)
 	}
-	c.t = c.t.Add(20 * time.Minute)
-	s.MarkActivity(nil) // resets inactive to now+30m
-	c.t = c.t.Add(20 * time.Minute)
-	if st.Sweep(c.t); s.Status() != StatusOpen { // 40m elapsed but activity at +20m
-		t.Fatalf("activity did not reset inactive: %s", s.Status())
-	}
-	c.t = c.t.Add(11 * time.Minute) // now 31m since the last activity
-	if st.Sweep(c.t); s.Status() != StatusTerminated || s.Terminated().Reason != "inactive_ttl" {
-		t.Fatalf("inactive terminate %s %+v", s.Status(), s.Terminated())
+	c.t = c.t.Add(2 * time.Hour)
+	if st.Sweep(c.t); s.Status() != StatusOpen {
+		t.Fatalf("presence did not keep it alive: %s", s.Status())
 	}
 	s.Unsubscribe(sub)
-	// (c) max_age caps an actively-fed connected session.
-	c2 := &clock{t: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
-	st2 := NewStore(time.Hour, 32)
-	st2.now = c2.now
-	st2.SetLifecycle(10*time.Minute, 30*time.Minute, 5*time.Minute, time.Hour)
-	s2, _ := st2.CreateWith(CreateParams{})
+	// (c) max_age caps even an actively-fed connected session.
+	st2, c2, s2 := mk(5 * time.Minute)
 	s2.Subscribe(nil, RoleViewer)
 	for i := 0; i < 6; i++ { // keep it active every minute
 		c2.t = c2.t.Add(time.Minute)

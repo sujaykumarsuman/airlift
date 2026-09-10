@@ -81,6 +81,8 @@ type Terminal = { kind: "closed" } | { kind: "evicted" };
 const FROZEN = new Set(["TERMINATED", "PENDING_REVIEW", "REJECTED"]);
 let terminal: Terminal | null = null;
 let frozen = false; // we have stopped the camera for a frozen status
+let scanComplete = false; // the beam we were feeding is fully received (ADR 0019)
+let prevActiveKey = ""; // `${bid}:${state}` of the active beam last render, for the READY edge
 let overlayKey = ""; // identifies the currently-rendered overlay (avoids clobbering the form)
 let lifecycleTimer: ReturnType<typeof setInterval> | null = null;
 let pinger: Pinger | null = null;
@@ -171,15 +173,15 @@ function stopLifecycleTimer(): void {
 // updateChrome shows the frozen/terminal overlay and the TERMINATING warning
 // banner, and runs a 1 s ticker while either has a live countdown.
 function updateChrome(): void {
-  const showOverlay = overlayActive();
+  const showOverlay = overlayActive() || scanComplete;
   hudEl.hidden = showOverlay;
   endedEl.hidden = !showOverlay;
   if (showOverlay) {
-    const key = overlayStateKey();
+    const key = overlayActive() ? overlayStateKey() : "COMPLETE";
     if (key !== overlayKey) {
       overlayKey = key;
       renderOverlay();
-    } else {
+    } else if (overlayActive()) {
       patchOverlayClock();
     }
   } else {
@@ -191,11 +193,25 @@ function updateChrome(): void {
     const c = terminateCountdown(snap, Date.now());
     warningEl.innerHTML = html`Session ending${c.hidden ? "" : html` in <b class="clock">${c.text}</b>`} unless an admin cancels.`.html;
   }
-  if (showOverlay || terminating) startLifecycleTimer();
+  if (overlayActive() || terminating) startLifecycleTimer();
   else stopLifecycleTimer();
 }
 
 function renderOverlay(): void {
+  if (scanComplete && !overlayActive()) {
+    // The beam is fully received: camera off, offer to close or scan another.
+    endedEl.innerHTML = html`<div class="ended-card">
+      <h2>Beam received</h2>
+      <p class="muted">The tower has the whole beam. Close this tab, or scan another.</p>
+      <p class="overlay-actions">
+        <button id="scan-again" class="btn" type="button">Scan another</button>
+        <button id="close-tab" class="btn primary" type="button">Close</button>
+      </p>
+    </div>`.html;
+    endedEl.querySelector<HTMLButtonElement>("#scan-again")?.addEventListener("click", onScanAnother);
+    endedEl.querySelector<HTMLButtonElement>("#close-tab")?.addEventListener("click", onCloseTab);
+    return;
+  }
   if (terminal) {
     const closed = terminal.kind === "closed";
     endedEl.innerHTML = html`<div class="ended-card">
@@ -257,6 +273,26 @@ function patchOverlayClock(): void {
   if (el && !c.hidden) el.textContent = c.text;
 }
 
+// onScanAnother clears the completion overlay and restarts the camera for the
+// next beam (ADR 0019).
+function onScanAnother(): void {
+  scanComplete = false;
+  void startCamera();
+}
+
+// onCloseTab closes the scanner tab (script-closable since the dashboard's Scan
+// button opened it); if the browser blocks it, tell the user they can close it.
+function onCloseTab(): void {
+  window.close();
+  const card = endedEl.querySelector(".ended-card");
+  if (card && !card.querySelector(".close-hint")) {
+    const p = document.createElement("p");
+    p.className = "muted close-hint";
+    p.textContent = "If the tab did not close, you can close it now.";
+    card.appendChild(p);
+  }
+}
+
 // onReopen revives a session suspended by inactivity: registering reopens it
 // server-side (ADR 0018), then the SSE pushes OPEN and syncLifecycle brings the
 // camera and relay back.
@@ -311,9 +347,18 @@ function activeBeam(): Beam | null {
 }
 
 function render(): void {
-  updateChrome();
-  if (overlayActive()) return; // the overlay owns the screen; skip the live HUD
   const beam = activeBeam();
+  // The beam this scanner is feeding reaching READY (all packets received) stops
+  // the camera and offers to close — only on the RECEIVING→READY edge, and only
+  // while our camera is running (ADR 0019).
+  const key = beam ? `${beam.bid}:${beam.state}` : "";
+  if (beam && beam.state === "READY" && prevActiveKey === `${beam.bid}:RECEIVING` && stream) {
+    scanComplete = true;
+    stopCamera();
+  }
+  prevActiveKey = key;
+  updateChrome();
+  if (overlayActive() || scanComplete) return; // an overlay owns the screen; skip the live HUD
   const total = beam?.total ?? 0;
   const have = beam?.have ?? 0;
   progressEl.textContent = total > 0 ? `${have} / ${total}` : snap ? "waiting for a beam" : "…";
@@ -340,7 +385,7 @@ function render(): void {
   if (beam) parts.push(`beam ${beam.bid}`);
   if (connection !== "open") parts.push(`link: ${connection}`);
   statsEl.innerHTML = html`${parts.map((p) => html`<span>${p}</span>`)}`.html;
-  messageEl.textContent = beam?.state === "READY" ? "Beam received. Point at the next, or stop." : (beam?.error ?? message);
+  messageEl.textContent = beam?.error ?? message;
   document.body.dataset.state = state;
 }
 
@@ -388,6 +433,7 @@ async function fillCameraList(): Promise<void> {
 }
 
 async function startCamera(deviceId?: string): Promise<void> {
+  scanComplete = false;
   stopCamera(false);
   startButton.disabled = true;
   message = "Starting camera…";

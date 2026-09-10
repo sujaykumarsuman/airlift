@@ -65,7 +65,7 @@ func (srv *Server) adminConfig(w http.ResponseWriter, _ *http.Request) {
 func (srv *Server) applyLive(cfg *config.Config) {
 	srv.live.Store(&liveCfg{
 		MaxBody:    cfg.MaxBody,
-		Caps:       Caps{MaxGzBytes: cfg.MaxGzBytes, IdleTTL: cfg.IdleTTL, InactiveTTL: cfg.InactiveTTL, MaxAge: cfg.MaxAge, Sessions: cfg.Sessions},
+		Caps:       Caps{MaxGzBytes: cfg.MaxGzBytes, IdleTTL: cfg.IdleTTL, MaxAge: cfg.MaxAge, Sessions: cfg.Sessions},
 		WarningTTL: cfg.WarningTTL,
 		ReviewTTL:  cfg.ReviewTTL,
 	})
@@ -82,7 +82,7 @@ func (srv *Server) applyLive(cfg *config.Config) {
 	})
 	srv.opts.Store.SetMax(cfg.Sessions)
 	srv.opts.Store.SetLimits(cfg.MaxBeams, cfg.MaxGzBytes)
-	srv.opts.Store.SetLifecycle(cfg.IdleTTL, cfg.InactiveTTL, cfg.MaxAge, cfg.TerminatedTTL)
+	srv.opts.Store.SetLifecycle(cfg.IdleTTL, cfg.MaxAge, cfg.TerminatedTTL)
 }
 
 // adminPatchConfig writes live-key changes to the overrides file — validated,

@@ -170,8 +170,7 @@ type Session struct {
 	lastActivity   time.Time        // moved only by real activity while Live()
 	lastEmptyAt    time.Time        // when presence last dropped to zero (idle origin)
 	maxAgeBase     time.Time        // max_age clock base: CreatedAt at create, now on reopen
-	idleTTL        time.Duration    // after the last client stream leaves
-	inactiveTTL    time.Duration    // after the last activity while clients are connected
+	idleTTL        time.Duration    // grace after the last client stream leaves (ADR 0019)
 	maxAge         time.Duration    // overall from maxAgeBase; 0 disables
 	maxAgeBonus    time.Duration    // session-admin grants added to the max_age cap (ADR 0018)
 	terminatedTTL  time.Duration    // how long a TERMINATED session's files are kept
@@ -263,12 +262,12 @@ func (s *Session) TokenMatches(token string) bool {
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.Token)) == 1
 }
 
-// deadlineLocked is when the OPEN session next expires: the earliest of the
-// three clocks (ADR 0013). Idle counts only while no client stream is connected
+// deadlineLocked is when the OPEN session next expires. Presence keeps a
+// connected session alive (ADR 0019): while any client stream is open only the
+// max_age hard cap bounds it. When the last stream leaves the idle grace runs
 // (from the later of the last departure and the last activity, so a stream-less
-// but actively-fed relay is not reaped); inactive counts while streams are
-// connected; max_age counts from creation. A zero limit disables that clock; a
-// zero result means no clock applies and the session never expires.
+// but actively-fed relay is not reaped). A zero limit disables that clock; a zero
+// result means no clock applies and the session never expires.
 func (s *Session) deadlineLocked() (time.Time, string) {
 	var best time.Time
 	var why string
@@ -280,16 +279,12 @@ func (s *Session) deadlineLocked() (time.Time, string) {
 			best, why = t, w
 		}
 	}
-	if len(s.subs) == 0 {
-		if s.idleTTL > 0 {
-			base := s.lastEmptyAt
-			if s.lastActivity.After(base) {
-				base = s.lastActivity
-			}
-			consider(base.Add(s.idleTTL), "idle_ttl")
+	if len(s.subs) == 0 && s.idleTTL > 0 {
+		base := s.lastEmptyAt
+		if s.lastActivity.After(base) {
+			base = s.lastActivity
 		}
-	} else if s.inactiveTTL > 0 {
-		consider(s.lastActivity.Add(s.inactiveTTL), "inactive_ttl")
+		consider(base.Add(s.idleTTL), "idle_ttl")
 	}
 	if s.maxAge > 0 {
 		consider(s.maxAgeBase.Add(s.maxAge+s.maxAgeBonus), "max_age")
@@ -520,12 +515,12 @@ func (s *Session) reopenLocked(now time.Time, by string) {
 }
 
 // reopenableLocked reports whether the session may be revived by simply opening
-// its link: it was suspended by the inactivity sweep (system idle_ttl/inactive_ttl),
-// not by a deliberate session/airlift-admin terminate or the max_age cap. Those
-// keep the request-more-time → airlift-admin review flow (ADR 0018).
+// its link: it was suspended by the idle grace after everyone left (system
+// idle_ttl), not by a deliberate session/airlift-admin terminate or the max_age
+// cap. Those keep the request-more-time → airlift-admin review flow (ADR 0018).
 func (s *Session) reopenableLocked() bool {
 	return s.status == StatusTerminated && s.term != nil && s.term.By == "system" &&
-		(s.term.Reason == "idle_ttl" || s.term.Reason == "inactive_ttl")
+		s.term.Reason == "idle_ttl"
 }
 
 // Reopenable reports whether opening the link would revive the session. While it

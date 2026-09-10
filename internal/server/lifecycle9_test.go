@@ -18,7 +18,7 @@ func TestSuspendedReopenViaRegister(t *testing.T) {
 	if !ok {
 		t.Fatal("session missing")
 	}
-	s.Terminate("system", "inactive_ttl") // stand in for the inactivity sweep
+	s.Terminate("system", "idle_ttl") // stand in for the idle-grace sweep
 
 	if snap := h.snapshot(t, c); snap.Status != session.StatusTerminated || !snap.Reopenable {
 		t.Fatalf("want suspended+reopenable, got %s reopenable=%v", snap.Status, snap.Reopenable)
@@ -61,7 +61,7 @@ func TestDeliberateTerminationRegisterDoesNotReopen(t *testing.T) {
 func TestExtendMaxAgeRoute(t *testing.T) {
 	h := start(t, func(o *Options) {
 		st := session.NewStore(time.Hour, 32)
-		st.SetLifecycle(24*time.Hour, 24*time.Hour, time.Hour, time.Hour) // max_age binds at 1h
+		st.SetLifecycle(24*time.Hour, time.Hour, time.Hour) // idle 24h, max_age binds at 1h
 		o.Store = st
 	})
 	c := h.create(t)

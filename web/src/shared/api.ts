@@ -108,9 +108,10 @@ export async function deleteSession(
   sid: string,
   token: string,
   clientId?: string,
+  hard = false,
   fetchFn: FetchFn = fetch,
 ): Promise<void> {
-  const resp = await fetchFn(apiURL(`api/sessions/${sid}`), {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}${hard ? "?hard" : ""}`), {
     method: "DELETE",
     headers: clientHeaders(token, clientId),
   });
@@ -147,8 +148,8 @@ export async function deleteBeam(
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
-/** Keeps the session's inactive clock alive (client tier, rate_ping). 204
- *  resolves; any other status throws ApiError so the caller can classify it. */
+/** Marks the client active on the session (client tier, rate_ping). 204 resolves;
+ *  any other status throws ApiError so the caller can classify it. */
 export async function postPing(
   sid: string,
   token: string,

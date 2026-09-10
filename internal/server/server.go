@@ -32,11 +32,10 @@ const baseSentinel = "<!--airlift-base-->"
 // Caps is the subset of server limits GET /api/info advertises so the pages can
 // shape their forms and guidance.
 type Caps struct {
-	MaxGzBytes  int64
-	IdleTTL     time.Duration
-	InactiveTTL time.Duration
-	MaxAge      time.Duration
-	Sessions    int
+	MaxGzBytes int64
+	IdleTTL    time.Duration
+	MaxAge     time.Duration
+	Sessions   int
 }
 
 // Options configure a Server.
@@ -182,9 +181,11 @@ func (srv *Server) file(name, contentType string) http.HandlerFunc {
 	}
 }
 
-// JoinURL is the link the phone scans: token in the fragment, never the path.
+// JoinURL is the link a client opens to join the shared session: the sid and
+// token in the fragment (never the path), so it lands on the dashboard where any
+// client can watch, download, or open the scanner on demand (ADR 0019).
 func (srv *Server) JoinURL(s *session.Session) string {
-	return srv.opts.PublicBase + "/s/" + s.ID + "#t=" + s.Token
+	return srv.opts.PublicBase + "/#s=" + s.ID + "&t=" + s.Token
 }
 
 // create mints a session with the given options and runs the OnCreate hook. It
@@ -288,9 +289,17 @@ func (srv *Server) getSession(w http.ResponseWriter, _ *http.Request, s *session
 	writeJSON(w, http.StatusOK, s.Snapshot())
 }
 
-// deleteSession soft-terminates the session (ADR 0013): the transfer freezes,
-// the files stay for terminated_ttl, then the sweep deletes them.
-func (srv *Server) deleteSession(w http.ResponseWriter, _ *http.Request, s *session.Session, _ *session.Client) {
+// deleteSession ends the session (session admin). By default it soft-terminates
+// (ADR 0013): the transfer freezes, the files stay for terminated_ttl, then the
+// sweep deletes them. With ?hard it purges the session and its files at once —
+// the streams get "closed" (ADR 0019).
+func (srv *Server) deleteSession(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+	if r.URL.Query().Has("hard") {
+		srv.opts.Store.Delete(s.ID) // closes streams + reclaims <data_dir>/<sid>
+		srv.opts.Logf("session %s hard-deleted by admin", s.ID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if !s.Terminate("session admin", "terminated by session admin") {
 		writeError(w, http.StatusConflict, "session is already terminated")
 		return
@@ -559,7 +568,6 @@ func (srv *Server) info(w http.ResponseWriter, _ *http.Request) {
 		"caps": map[string]any{
 			"max_gz_bytes": c.MaxGzBytes,
 			"idle_ttl":     secs(c.IdleTTL),
-			"inactive_ttl": secs(c.InactiveTTL),
 			"max_age":      secs(c.MaxAge),
 			"sessions":     c.Sessions,
 		},

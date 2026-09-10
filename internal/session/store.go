@@ -21,11 +21,11 @@ type Store struct {
 	maxBeams int
 	maxGz    int64
 
-	// Lifecycle defaults new sessions inherit (ADR 0013); SetLifecycle overrides
-	// them from config. A bare store uses the NewStore inactive value for all
-	// three windows and disables max_age, so it behaves like the old single TTL.
+	// Lifecycle defaults new sessions inherit; SetLifecycle overrides them from
+	// config. A bare store seeds the idle and terminated windows from the NewStore
+	// value and disables max_age. Presence keeps a connected session alive, so
+	// there is no inactive-while-connected clock (ADR 0019).
 	idleTTL       time.Duration
-	inactiveTTL   time.Duration
 	maxAge        time.Duration
 	terminatedTTL time.Duration
 
@@ -36,23 +36,24 @@ type Store struct {
 	onTerminate func(*Session) // writes session.json on a lifecycle transition
 }
 
-// NewStore creates a store with the given inactive TTL and session concurrency
-// limit. The per-place beam cap defaults to defaultMaxBeams and the per-beam
-// gzip ceiling is off until SetLimits sets them (the tower does, from config).
-func NewStore(inactive time.Duration, max int) *Store {
+// NewStore creates a store seeding the idle and terminated windows with ttl and
+// the given session concurrency limit. The per-place beam cap defaults to
+// defaultMaxBeams and the per-beam gzip ceiling is off until SetLimits sets them
+// (the tower does, from config).
+func NewStore(ttl time.Duration, max int) *Store {
 	return &Store{
 		sessions: map[string]*Session{}, max: max, maxBeams: defaultMaxBeams, now: time.Now,
-		idleTTL: inactive, inactiveTTL: inactive, terminatedTTL: inactive,
+		idleTTL: ttl, terminatedTTL: ttl,
 	}
 }
 
-// SetLifecycle sets the three lifecycle clocks and the terminated-file window new
-// sessions inherit (ADR 0013). Set it before creating sessions; a zero duration
-// disables that clock.
-func (st *Store) SetLifecycle(idle, inactive, maxAge, terminated time.Duration) {
+// SetLifecycle sets the idle grace (after the last client leaves), the max_age
+// hard cap and the terminated-file window new sessions inherit (ADR 0013/0019).
+// Set it before creating sessions; a zero duration disables that clock.
+func (st *Store) SetLifecycle(idle, maxAge, terminated time.Duration) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.idleTTL, st.inactiveTTL, st.maxAge, st.terminatedTTL = idle, inactive, maxAge, terminated
+	st.idleTTL, st.maxAge, st.terminatedTTL = idle, maxAge, terminated
 }
 
 // SetTerminateHook installs the function run, off the store lock, when a session
@@ -127,8 +128,7 @@ type CreateParams struct {
 	JoinersAdmin bool
 	Password     string        // "" = no join password
 	MaxGz        int64         // 0 = the store default
-	IdleTTL      time.Duration // stored for 6.6; 0 = unset
-	InactiveTTL  time.Duration // stored for 6.6; 0 = unset
+	IdleTTL      time.Duration // 0 = the store default
 }
 
 // Create mints an open, option-less session (headless use and tests).
@@ -174,7 +174,6 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 		lastEmptyAt:   now, // presence starts at zero, so the idle clock runs from creation
 		maxAgeBase:    now, // max_age counts from creation until a reopen rebases it
 		idleTTL:       orDur(p.IdleTTL, st.idleTTL),
-		inactiveTTL:   orDur(p.InactiveTTL, st.inactiveTTL),
 		maxAge:        st.maxAge, // session admins push the cap out via ExtendMaxAge (ADR 0018)
 		terminatedTTL: st.terminatedTTL,
 		events:        []LifecycleEvent{{At: now, Event: "created"}},

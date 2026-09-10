@@ -3,7 +3,7 @@ import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, event
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
-import { cleanupCountdown, expiryCountdown, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
+import { cleanupCountdown, expiryCountdown, instantMs, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
 import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Verdict } from "../shared/types";
@@ -44,13 +44,16 @@ let clocksClosed = false; // guards the one-shot re-render when the cleanup coun
 // The app root, incl. any path prefix from the injected <base href>.
 const appBase = new URL("./", document.baseURI).toString();
 
+// The shared-session link: opening it lands any client on this dashboard (ADR
+// 0019). In `vite dev` the deep-link form reaches the dev server; in prod the
+// server's join_url already points at the dashboard.
 function joinLink(s: Stored): string {
-  // In `vite dev` the phone must reach the dev server, not the tower.
-  return import.meta.env.DEV ? new URL(`s/${s.sid}#t=${s.token}`, appBase).toString() : s.join_url;
+  return import.meta.env.DEV ? new URL(`#s=${s.sid}&t=${s.token}`, appBase).toString() : s.join_url;
 }
 
-function viewerLink(s: Stored): string {
-  return new URL(`#s=${s.sid}&t=${s.token}`, appBase).toString();
+// The scanner for this session, opened on demand by the Scan button.
+function scanLink(s: Stored): string {
+  return new URL(`s/${s.sid}#t=${s.token}`, appBase).toString();
 }
 
 async function boot(): Promise<void> {
@@ -135,14 +138,15 @@ function attach(s: Stored): void {
       const next = tick(view, now);
       const st = view.snap?.status;
       const live = st === "OPEN" || st === "TERMINATING";
-      if (next !== view && live) {
-        view = next;
+      const changed = next !== view;
+      view = next;
+      // Rebuild while live and progressing, or once near the hard cap so the
+      // countdown and +1 h appear and tick. Otherwise a frozen session's panel
+      // holds the extension form; never rebuild it on the tick (that would wipe
+      // the reason input) — only patch the countdown text nodes.
+      if (live && (changed || nearCap(view.snap, now))) {
         renderStatus();
       } else {
-        // A frozen session's beams no longer progress, and its panel holds the
-        // extension form; never rebuild it on the tick (that would wipe the
-        // reason input) — only patch the countdown text nodes.
-        view = next;
         updateClocks(now);
       }
     }, 1000);
@@ -256,18 +260,18 @@ async function renderSession(): Promise<void> {
   sessionEl.innerHTML = html`<div class="card join">
     <canvas id="join-qr" width="256" height="256"></canvas>
     <div class="join-text">
-      <h2>Join with the phone</h2>
-      <p>Scan this code with the phone's camera app, or open the link:</p>
+      <h2>Share this session</h2>
+      <p>Scan this code, or open the link, to join on another device — everyone shares the same beams and downloads:</p>
       <p><code class="url">${link}</code> <button class="btn small" id="copy">Copy</button></p>
-      <p class="hint">Or receive on this device: <button class="btn small" id="scan-here" type="button">Scan with this camera</button></p>
-      <p class="hint">Watch from another device: <code class="url">${viewerLink(current)}</code></p>
+      <p class="hint">Receive a beam on this device: <button class="btn small primary" id="scan-here" type="button">Scan a beam</button></p>
       <p class="muted">session ${current.sid}</p>
     </div>
   </div>`.html;
   $<HTMLButtonElement>("#copy", sessionEl).addEventListener("click", () => void navigator.clipboard?.writeText(link));
-  // Open the scan page for this session in a new tab so the laptop's own camera
-  // can relay (the zero-hop variant); the scan page joins from the link's token.
-  $<HTMLButtonElement>("#scan-here", sessionEl).addEventListener("click", () => window.open(joinLink(current!), "_blank", "noopener"));
+  // The scanner is opened on demand (ADR 0019): a new tab pointed at this session
+  // that closes itself once the beam is received. No noopener, so it stays
+  // script-closable.
+  $<HTMLButtonElement>("#scan-here", sessionEl).addEventListener("click", () => window.open(scanLink(current!), "_blank"));
   try {
     await renderQR($<HTMLCanvasElement>("#join-qr", sessionEl), link);
   } catch {
@@ -294,12 +298,12 @@ function renderStatus(): void {
       <div class="head">
         <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
         <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
-        ${s.status === "OPEN" ? openExpiry(s) : s.status === "TERMINATING" ? warningExpiry(s) : ""}
-        ${s.status === "OPEN" && iAmAdmin ? html` <button class="btn small" id="extend-btn" type="button" title="Push the max-age limit out by an hour">+1 h</button>` : ""}
+        ${s.status === "OPEN" ? openExpiry(s, iAmAdmin) : s.status === "TERMINATING" ? warningExpiry(s) : ""}
       </div>
       ${s.status !== "OPEN" && s.status !== "TERMINATING" ? terminatedPanel(s, Date.now()) : ""}
-      ${s.beams.length === 0 && s.status === "OPEN" ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
+      ${s.beams.length === 0 && s.status === "OPEN" ? html`<p class="muted">Waiting for the first beam. Tap <b>Scan a beam</b> and point the camera at a beam page.</p>` : ""}
       ${s.clients.length ? html`<ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>` : ""}
+      ${iAmAdmin ? adminControls(s) : ""}
     </div>
     ${view.beams.map((bv) => beamCard(bv, iAmAdmin))}
     ${notice ? html`<p class="warn">${notice}</p>` : ""}
@@ -322,6 +326,51 @@ function renderStatus(): void {
   statusEl.querySelector<HTMLFormElement>("#ext-form")?.addEventListener("submit", onExtensionSubmit);
   statusEl.querySelector<HTMLButtonElement>("#reopen-btn")?.addEventListener("click", onReopen);
   statusEl.querySelector<HTMLButtonElement>("#extend-btn")?.addEventListener("click", onExtend);
+  statusEl.querySelector<HTMLButtonElement>("#end-btn")?.addEventListener("click", onEndSession);
+  statusEl.querySelector<HTMLButtonElement>("#del-btn")?.addEventListener("click", onHardDelete);
+}
+
+/** Session-admin controls: end the session gracefully, or hard-delete it now. */
+function adminControls(s: Snapshot): Raw {
+  const live = s.status === "OPEN" || s.status === "TERMINATING";
+  return html`<p class="controls">
+    ${live ? html`<button class="btn small" id="end-btn" type="button">End session</button>` : ""}
+    <button class="btn small danger" id="del-btn" type="button">Delete now</button>
+  </p>`;
+}
+
+// onEndSession soft-terminates: the session freezes but its downloads stay for the
+// terminated window before the sweep removes them.
+function onEndSession(): void {
+  if (!current) return;
+  if (!confirm("End this session? Downloads stay available for a while, then it is removed.")) return;
+  void deleteSession(current.sid, current.token, current.client_id, false).catch((err) => {
+    notice = `Could not end the session: ${err instanceof Error ? err.message : String(err)}`;
+    renderStatus();
+  });
+}
+
+// onHardDelete purges the session and its files at once (ADR 0019), then drops to
+// the create screen.
+function onHardDelete(): void {
+  if (!current) return;
+  if (!confirm("Permanently delete this session and its files now? This cannot be undone.")) return;
+  const cur = current;
+  void deleteSession(cur.sid, cur.token, cur.client_id, true)
+    .then(() => {
+      stopEvents?.();
+      stopEvents = null;
+      stopPinging();
+      current = null;
+      sessionStorage.removeItem(STORAGE_KEY);
+      notice = "Session deleted.";
+      void renderSession();
+      renderStatus();
+    })
+    .catch((err) => {
+      notice = `Could not delete the session: ${err instanceof Error ? err.message : String(err)}`;
+      renderStatus();
+    });
 }
 
 // onReopen revives a session suspended by inactivity: registering reopens it
@@ -363,10 +412,24 @@ function onExtend(): void {
     });
 }
 
-/** The "expires in …" countdown while OPEN (hidden when no clock applies). */
-function openExpiry(s: Snapshot): Raw {
+const EXPIRY_SOON_MS = 30 * 60 * 1000; // show the countdown only near the hard cap
+
+/** True when an OPEN session is within 30 min of its hard cap. Presence keeps a
+ *  connected session alive until then, so there is no countdown to show (ADR 0019). */
+function nearCap(s: Snapshot | null, now: number): boolean {
+  if (!s || s.status !== "OPEN") return false;
+  const at = instantMs(s.expires_at);
+  return at !== null && at - now <= EXPIRY_SOON_MS;
+}
+
+/** The "ends in …" countdown, shown only in the last 30 min before the hard cap;
+ *  a session admin gets a +1 h button alongside to push the cap out (ADR 0019). */
+function openExpiry(s: Snapshot, iAmAdmin: boolean): Raw {
+  if (!nearCap(s, Date.now())) return raw("");
   const c = expiryCountdown(s, Date.now());
-  return c.hidden ? raw("") : html`<span class="muted expiry">expires in <span id="expiry" class="clock">${c.text}</span></span>`;
+  return html`<span class="muted expiry">ends in <span id="expiry" class="clock">${c.text}</span></span>${
+    iAmAdmin ? html` <button class="btn small" id="extend-btn" type="button" title="Push the limit out by an hour">+1 h</button>` : ""
+  }`;
 }
 
 /** The warning countdown while TERMINATING (an airlift admin is ending it). */
