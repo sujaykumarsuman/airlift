@@ -5,7 +5,12 @@ AIRLIFT   := airlift
 MODULE    := github.com/sujaykumarsuman/airlift
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: all web airlift airlift-all go-test go-lint web-test web-lint test lint pre-commit setup clean
+# Deployment (Phase 8, docs/HOSTING.md). VPS is an ssh host alias; DOMAIN is the
+# public hostname whose A record points at the VPS.
+VPS       ?= airlift-vps
+DOMAIN    ?= projects.sujaykumar.dev
+
+.PHONY: all web airlift airlift-all airlift-linux go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy
 
 all: web airlift
 
@@ -39,6 +44,26 @@ airlift-all: web
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="-s -w" \
 	    -o $(BIN)/$(AIRLIFT)-$$os-$$arch$$ext ./cmd/airlift || exit 1; \
 	done
+
+airlift-linux: web
+	mkdir -p $(BIN)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+	  -o $(BIN)/$(AIRLIFT)-linux-amd64 ./cmd/airlift
+
+## ---- deploy (Phase 8; see docs/HOSTING.md) ----
+# One-time host setup: install the unit + Caddyfile, create the service user and
+# an 0600 config with an admin token, install Caddy. Idempotent.
+vps-bootstrap:
+	scp deploy/airlift.service $(VPS):/etc/systemd/system/airlift.service
+	sed 's/{{DOMAIN}}/$(DOMAIN)/g' deploy/Caddyfile | ssh $(VPS) 'cat > /etc/caddy/Caddyfile'
+	scp deploy/bootstrap.sh $(VPS):/tmp/airlift-bootstrap.sh
+	ssh $(VPS) 'bash /tmp/airlift-bootstrap.sh $(DOMAIN) && rm -f /tmp/airlift-bootstrap.sh'
+	ssh $(VPS) 'systemctl reload caddy || systemctl restart caddy'
+
+# Build the Linux binary and roll it out with a zero-downtime rename + restart.
+deploy: airlift-linux
+	scp $(BIN)/$(AIRLIFT)-linux-amd64 $(VPS):/usr/local/bin/airlift.new
+	ssh $(VPS) 'chmod 755 /usr/local/bin/airlift.new && mv -f /usr/local/bin/airlift.new /usr/local/bin/airlift && systemctl restart airlift && sleep 1 && systemctl is-active airlift'
 
 go-lint:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt:"; echo "$$out"; exit 1; fi

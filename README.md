@@ -119,9 +119,10 @@ satisfied without TLS. In production the tower runs **behind a reverse proxy
 that terminates real TLS** and forwards to `listen` over plain HTTP;
 `public_url` carries the public scheme, host and any path prefix (e.g.
 `https://host/airlift`), which the tower injects as `<base href>` and uses for
-every join link. The proxy setup lands under `deploy/` in a later phase. There
-is no built-in certificate authority any more — the phone simply trusts the
-proxy's certificate.
+every join link. There is no built-in certificate authority any more — the phone
+simply trusts the proxy's certificate. The `deploy/` tooling and
+[`docs/HOSTING.md`](docs/HOSTING.md) run the tower behind Caddy (automatic
+Let's Encrypt TLS) on a VPS; `make vps-bootstrap` then `make deploy`.
 
 ### Zero-hop variant
 

@@ -1,0 +1,8 @@
+# airlift — TLS termination + reverse proxy to the tower (installed to
+# /etc/caddy/Caddyfile). Caddy provisions and renews the certificate from
+# Let's Encrypt automatically, once {{DOMAIN}}'s A record points at this host.
+# `make vps-bootstrap DOMAIN=...` substitutes {{DOMAIN}}.
+{{DOMAIN}} {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8443
+}

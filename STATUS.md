@@ -101,7 +101,24 @@ Seven slices, each committed and reviewed:
 
 Go gates green under `-race`; web tsc/eslint/vitest green.
 
-- **Next**: Phase 8 — the VPS deployment.
+- **Phase 7 complete.**
+
+## Phase 8 — the VPS (done)
+
+The tower is deployed and live at **https://projects.sujaykumar.dev** (Hostinger
+KVM, Ubuntu 24.04). Caddy terminates TLS (Let's Encrypt, auto-renew) and
+reverse-proxies to the tower on `127.0.0.1:8443`; the tower runs as the
+unprivileged `airlift` systemd user with an `0600` config holding the admin token.
+The prior `careerdock` stack was surveyed, backed up (verified, 332 MB, on the
+laptop under `~/Backups/careerdock-20260910/`), then wiped to free ports 80/443.
+Verified over the internet: a valid cert, the real client address through
+`X-Forwarded-For` (not the proxy's), a beam driven to READY through 30% loss +
+reorder, on-disk persistence + the unpacked tree, and admin terminate over HTTPS.
+Deploy tooling in `deploy/` + `make vps-bootstrap` / `make deploy`; `docs/HOSTING.md`
+documents it. `sessions`/`fetch` are the `/admin` table + Download (ADR 0014), so
+no CLI subcommand was added.
+
+- **Next**: the hardware runs below.
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
@@ -127,14 +144,12 @@ Go gates green under `-race`; web tsc/eslint/vitest green.
   fountain over the multi bundle yields the frozen index sets and decodes back;
   `beam .` and multi-file naming exercised through the CLI.
 
-## Pending — the VPS, and hardware validation
+## Pending — hardware validation
 
-- Phase 8: the VPS deployment (operator prerequisites, survey/back-up/wipe of the
-  existing `careerdock`, `make vps-bootstrap` + `make deploy`, Caddy TLS).
-- Hardware, still outstanding from Phase 3/4 (now over the hosted, HTTP tower):
-  Mac + Android, scan the join QR, scan `beam.html` off the monitor, compare the
-  zip download with the source; then a 1 MB bundle in fountain mode at ≥ 8 fps,
-  and two phones on one session.
+- Hardware, still outstanding from Phase 3/4 (now over the hosted, TLS tower at
+  `projects.sujaykumar.dev`): Mac + Android, scan the join QR, scan `beam.html`
+  off the monitor, compare the zip download with the source; then a 1 MB bundle
+  in fountain mode at ≥ 8 fps, and two phones on one session.
 - Deferred from Phase 7: the airlift-admin-only per-session `max_age` override (a
   one-field extension of the admin terminate route; not in the exit demo).
 
