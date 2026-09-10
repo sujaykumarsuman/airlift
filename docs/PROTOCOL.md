@@ -105,7 +105,7 @@ transfer; small N needs more, which the default's surplus term covers.
 
 ## Loop schedule
 
-The player cycles frames at `--fps` (default 8):
+The player cycles frames at `--fps` (default 5):
 
 - **Sequential** (small payloads): `[M, D0 … D(N-1)]` repeating, with `M`
   re-inserted after every 20 data frames (`--manifest-every`) so a scanner

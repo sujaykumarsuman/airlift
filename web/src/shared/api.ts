@@ -179,6 +179,21 @@ export async function postExtension(
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
+/** Session admin grants the session another hour before the max_age cap ends it
+ *  (ADR 0018). 200 resolves; any other status throws ApiError. */
+export async function postExtendMaxAge(
+  sid: string,
+  token: string,
+  clientId: string,
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/max-age`), {
+    method: "POST",
+    headers: clientHeaders(token, clientId),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
 /** True for the 403 {error:"evicted"} an evicted address receives. */
 export function isEvicted(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 && err.message === "evicted";

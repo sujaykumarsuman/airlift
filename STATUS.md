@@ -120,6 +120,37 @@ no CLI subcommand was added.
 
 - **Next**: the hardware runs below.
 
+## Phase 9 — reopen-by-link, suspended access, max-age grants (done, ADR 0018)
+
+Reworks the recovery half of the lifecycle so a session dropped for inactivity is
+brought back by whoever holds the link, without the operator in the loop:
+
+- **Suspended = reopenable TERMINATED** (no new state): a `system` terminate for
+  `idle_ttl`/`inactive_ttl` sets a snapshot `reopenable` flag; while it holds, all
+  access is revoked (downloads `409` too). Registering/joining calls a shared
+  `Reopen` (reuses ADR 0014's clock-reset reopen), so opening the link revives it
+  with no review. Deliberate (session/airlift-admin) terminations and the `max_age`
+  cap keep the ADR 0014 request→review flow and stay downloadable.
+- **Session-admin max-age grant**: `POST …/max-age` (s-admin) adds an hour to the
+  cap via a per-session `maxAgeBonus`; the dashboard shows a **+1 h** button. The
+  24 h cap stays the default; the grant (and a reopen) reset it.
+- **Defaults**: `idle_ttl` 10m→30m (one 30-minute inactivity rule),
+  `terminated_ttl` 30m→1h (the reopen window). Beam default **fps 8→5**.
+- **Web**: scan + dashboard show a "Session paused — Reopen" panel for a suspended
+  session (vs the ended/review overlay for deliberate terminations); the dashboard
+  gains the +1 h button and a **"Scan with this camera"** button that opens the
+  scan page for the session (the zero-hop variant) in a new tab.
+- **Deploy**: the `admin_token` moves to `AIRLIFT_ADMIN_TOKEN` in an `0600`
+  `/etc/default/airlift` loaded by the systemd unit (env beats the config file);
+  bootstrap migrates any existing token so a re-run never rotates it.
+
+ADR 0018 + API.md/HOSTING.md/CLAUDE.md/README updated. Go gates green under
+`-race` (new session + server lifecycle-9 tests); web tsc/eslint/vitest green.
+Verified in-browser: suspend → Reopen, the +1 h grant (server-logged), and the
+scan-here button opening the scan page.
+
+- **Phase 9 complete.**
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender
@@ -150,8 +181,9 @@ no CLI subcommand was added.
   `projects.sujaykumar.dev`): Mac + Android, scan the join QR, scan `beam.html`
   off the monitor, compare the zip download with the source; then a 1 MB bundle
   in fountain mode at ≥ 8 fps, and two phones on one session.
-- Deferred from Phase 7: the airlift-admin-only per-session `max_age` override (a
-  one-field extension of the admin terminate route; not in the exit demo).
+- The per-session `max_age` override deferred from Phase 7 shipped in Phase 9 as a
+  session-admin **+1 h** grant (`POST …/max-age`, ADR 0018), not an airlift-admin
+  override.
 
 ## Open questions
 

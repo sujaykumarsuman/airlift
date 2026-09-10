@@ -35,7 +35,7 @@ func Build(data []byte, name string, o Options) (*Result, error) {
 		o.ECC = "M"
 	}
 	if o.FPS == 0 {
-		o.FPS = 8
+		o.FPS = 5
 	}
 	if o.ManifestEvery == 0 {
 		o.ManifestEvery = 20

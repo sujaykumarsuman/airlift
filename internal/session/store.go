@@ -175,7 +175,7 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 		maxAgeBase:    now, // max_age counts from creation until a reopen rebases it
 		idleTTL:       orDur(p.IdleTTL, st.idleTTL),
 		inactiveTTL:   orDur(p.InactiveTTL, st.inactiveTTL),
-		maxAge:        st.maxAge, // the per-session max_age override is a later 7.x slice
+		maxAge:        st.maxAge, // session admins push the cap out via ExtendMaxAge (ADR 0018)
 		terminatedTTL: st.terminatedTTL,
 		events:        []LifecycleEvent{{At: now, Event: "created"}},
 		maxBeams:      st.maxBeams,

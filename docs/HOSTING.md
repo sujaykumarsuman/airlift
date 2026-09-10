@@ -15,7 +15,8 @@ strips the `/airlift` prefix before proxying, so the tower's router stays rooted
 | --- | --- | --- |
 | `airlift` binary | `/usr/local/bin/airlift` | static Linux/amd64, web UI embedded |
 | tower service | `systemd` unit `airlift.service` | runs as the unprivileged `airlift` user, `AIRLIFT_HOME=/var/lib/airlift/.airlift` |
-| config | `/var/lib/airlift/.airlift/config` | mode `0600`, owned by `airlift`; holds `admin_token`; `public_url` carries the `/airlift` prefix |
+| config | `/var/lib/airlift/.airlift/config` | mode `0600`, owned by `airlift`; `public_url` carries the `/airlift` prefix |
+| admin token | `/etc/default/airlift` | mode `0600`, root-owned; `AIRLIFT_ADMIN_TOKEN=…`, loaded by the systemd unit as an env var (env wins over the config file) |
 | session data | `/var/lib/airlift/.airlift/data/` | emptied on every start (memory-only sessions, ADR 0005) |
 | TLS + proxy | `caddy.service`, `/etc/caddy/Caddyfile` | listens on `80`/`443`; strips `/airlift` → `127.0.0.1:8443`; serves the hub at `/` |
 | projects hub | `/var/www/projects/index.html` | the landing page at `/`; source in the `sujaykumarsuman.github.io` repo (`projects/index.html`), deployed separately |
@@ -59,8 +60,10 @@ make deploy        VPS=airlift-vps
 
 `vps-bootstrap` (idempotent) installs the systemd unit and the Caddyfile (with
 `{{DOMAIN}}`/`{{PREFIX}}` substituted), creates the `airlift` user and an `0600`
-config with `public_url=https://<domain><prefix>` and a freshly generated
-`admin_token`, seeds the hub page if absent, and installs Caddy. `deploy` builds
+config with `public_url=https://<domain><prefix>`, an `0600` `/etc/default/airlift`
+holding a freshly generated `AIRLIFT_ADMIN_TOKEN` (migrating any token from an
+older config, so a re-run never rotates a live token), seeds the hub page if
+absent, and installs Caddy. `deploy` builds
 the Linux binary and rolls it out with a rename + `systemctl restart` (no downtime
 for the binary swap). Caddy issues the certificate as soon as the A record
 resolves; verify with `curl https://<domain><prefix>/api/info`.
@@ -79,28 +82,32 @@ in-flight transfer (expected — see the non-goals in `CLAUDE.md`).
 Every setting lives in `/var/lib/airlift/.airlift/config` (flat `key = value`;
 `docs/API.md` and `internal/config/registry.go` list them). Restart-only keys —
 `public_url`, `listen`, `admin_token`, `data_dir`, `trusted_proxies` — need an
-`airlift.service` restart. The rest are live-editable from `/admin` → Settings,
+`airlift.service` restart. The `admin_token` is supplied as the
+`AIRLIFT_ADMIN_TOKEN` environment variable from `/etc/default/airlift`, not the
+config file (env beats the config file in the precedence above). The rest are
+live-editable from `/admin` → Settings,
 which writes `/var/lib/airlift/.airlift/overrides` (atomic, `0600`) and applies
 them without a restart (ADR 0014). Precedence is flag > env `AIRLIFT_<KEY>` >
 overrides > config file > default.
 
 ## The admin surface
 
-`/admin` is gated by `admin_token` (never logged, masked in the config dump). Sign
-in with the token from the config file:
+`/admin` is gated by `admin_token` (never logged, masked in the config dump). It is
+supplied to the tower as the `AIRLIFT_ADMIN_TOKEN` environment variable from
+`/etc/default/airlift` (mode `0600`, root-owned). Sign in with:
 
 ```
-ssh airlift-vps "grep '^admin_token' /var/lib/airlift/.airlift/config"
+ssh airlift-vps "grep '^AIRLIFT_ADMIN_TOKEN' /etc/default/airlift"
 ```
 
 ### Rotating the admin token
 
-`admin_token` is restart-only, so rotate it on the box and restart:
+The admin token is restart-only, so rotate it on the box and restart:
 
 ```
 ssh airlift-vps
 NEW=$(openssl rand -hex 24)
-sed -i "s|^admin_token = .*|admin_token = $NEW|" /var/lib/airlift/.airlift/config
+sed -i "s|^AIRLIFT_ADMIN_TOKEN=.*|AIRLIFT_ADMIN_TOKEN=$NEW|" /etc/default/airlift
 systemctl restart airlift
 ```
 
@@ -112,7 +119,7 @@ token.
 ```
 ssh airlift-vps
 systemctl disable --now airlift caddy
-rm -f /etc/systemd/system/airlift.service /usr/local/bin/airlift
+rm -f /etc/systemd/system/airlift.service /usr/local/bin/airlift /etc/default/airlift
 rm -rf /var/lib/airlift
 apt-get purge -y caddy          # optional
 userdel airlift                 # optional

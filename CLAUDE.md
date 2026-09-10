@@ -109,6 +109,15 @@ directly (out of scope; see non-goals).
     at `/admin`. Live config keys are PATCH-able at runtime (atomic 0600 overrides,
     applied without a restart); the CLI stays `beam` + `tower` — `sessions`/`fetch`
     fold into `/admin`, so ADR 0010 stands. (ADR 0014)
+18. Reopen by link: a session suspended by inactivity (`system` terminate for
+    `idle_ttl`/`inactive_ttl`; snapshot `reopenable`) revokes all access (downloads
+    409 too) and is revived — every clock reset — simply by opening its link
+    (register/join call `Reopen`); no admin review. Deliberate (session/airlift-
+    admin) terminations and the `max_age` cap keep the ADR 0014 request→review flow
+    and stay downloadable. A session admin extends the cap an hour at a time
+    (`POST …/max-age`, the dashboard "+1 h"). Defaults: `idle_ttl` 30m (one
+    inactivity rule), `terminated_ttl` 1h (the reopen window). Beam default fps 5.
+    (ADR 0018)
 
 ## Non-goals
 

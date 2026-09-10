@@ -14,7 +14,9 @@ Status: **active development** toward a hosted, multi-user tower (see
 [`STATUS.md`](STATUS.md)). The tower is plain HTTP behind a TLS-terminating
 proxy, config-driven from `~/.airlift` (ADR 0012); multi-beam sessions, clients,
 the session lifecycle and the admin surface (`/admin`, gated by `admin_token`,
-with live config overrides) are in place. The VPS deployment is the next step.
+with live config overrides) are in place. A session dropped for inactivity is
+suspended and reopened by simply opening its link (ADR 0018). The tower is
+deployed behind Caddy TLS on a VPS (see [`docs/HOSTING.md`](docs/HOSTING.md)).
 
 ## The two commands
 
@@ -75,9 +77,9 @@ largest chunk for a version; these are the numbers at ECC M:
 | 30 | 137×137 | 1311 | 10.2 | 15.4 | 1.7 min |
 | 40 | 177×177 | 2242 | 17.5 | 26.3 | 1.0 min |
 
-Start with the default (600 bytes, version 20) at 8 fps. If the phone decodes
+Start with the default (600 bytes, version 20) at 5 fps. If the phone decodes
 every frame (its stats line shows the decode rate), raise `--fps` with the `+`
-key until it starts missing, then back off; if it misses at 8 fps, try a
+key until it starts missing, then back off; if it misses at 5 fps, try a
 smaller version or move the phone closer. Larger modules matter more than more
 of them. `--ecc L` gains ~15 % capacity at the cost of glare tolerance;
 `--ecc Q` or `H` the reverse.

@@ -140,6 +140,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("POST /api/sessions/{sid}/frames", srv.client(srv.frames))
 	m.HandleFunc("POST /api/sessions/{sid}/ping", srv.client(srv.ping))
 	m.HandleFunc("POST /api/sessions/{sid}/extension", srv.client(srv.extension))
+	m.HandleFunc("POST /api/sessions/{sid}/max-age", srv.sessionAdmin(srv.extendMaxAge))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.client(srv.download))
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.sessionAdmin(srv.deleteSession))
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
@@ -349,6 +350,18 @@ func (srv *Server) extension(w http.ResponseWriter, r *http.Request, s *session.
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// extendMaxAge grants a session admin one more hour before the max_age cap ends
+// the session (ADR 0018), so an actively-used session can outlive the hard cap.
+// Session-admin tier; 409 when the session is not live or has no max_age cap.
+func (srv *Server) extendMaxAge(w http.ResponseWriter, _ *http.Request, s *session.Session, _ *session.Client) {
+	if !s.ExtendMaxAge(time.Hour) {
+		writeError(w, http.StatusConflict, "cannot extend this session")
+		return
+	}
+	srv.opts.Logf("session %s max_age extended by an hour", s.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"expires_at": s.ExpiresAt()})
+}
+
 func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
 	if !s.Status().Live() {
 		writeError(w, http.StatusConflict, "session is not open")
@@ -482,6 +495,13 @@ func (srv *Server) download(w http.ResponseWriter, r *http.Request, s *session.S
 	sender, perr := strconv.ParseUint(r.URL.Query().Get("beam"), 16, 32)
 	if perr != nil {
 		writeError(w, http.StatusBadRequest, "missing or malformed beam id")
+		return
+	}
+	// A session suspended by inactivity revokes all access until it is reopened
+	// (ADR 0018); opening its link restores downloads. Deliberate terminations
+	// keep their files downloadable for the terminated_ttl window.
+	if s.Reopenable() {
+		writeError(w, http.StatusConflict, "session is paused after inactivity; open the link to reopen it")
 		return
 	}
 	s.MarkActivity(c) // a client download counts as activity (a no-op once terminated)

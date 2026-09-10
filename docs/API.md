@@ -17,14 +17,16 @@ POST   /api/sessions                  public → body {label?,password?,joiners_
                                              → {sid, token, client_id, name, join_url, expires_at}
 POST   /api/sessions/{sid}/join       public → body {password, name?} → {token, client_id, name}
 POST   /api/sessions/{sid}/clients    token  → body {name?, role?} → {client_id, name, session_admin, roles}
+                                             (reopens a session suspended by inactivity — ADR 0018)
 GET    /api/sessions/{sid}            client → place snapshot
 GET    /api/sessions/{sid}/events     client → SSE place snapshots
 POST   /api/sessions/{sid}/frames     client → body {frames:[base45,...]}
                                              → {accepted, dup, bad, completed_beams}
 POST   /api/sessions/{sid}/ping       client → 204; activity, resets the inactive clock
 POST   /api/sessions/{sid}/extension  client → body {reason?}; 204; request more time (→ PENDING_REVIEW)
-GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes
+GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes (409 while suspended)
 PATCH  /api/sessions/{sid}            s-admin → body {password} (set or, with "", clear)
+POST   /api/sessions/{sid}/max-age    s-admin → 200 {expires_at}; +1h before the max_age cap (ADR 0018)
 DELETE /api/sessions/{sid}/clients/{cid}  s-admin → evict a client's address
 DELETE /api/sessions/{sid}/beams/{bid}    s-admin → remove a beam and its files
 DELETE /api/sessions/{sid}            s-admin → terminate the session (freeze, keep files)
@@ -76,7 +78,7 @@ four tiers:
 - **client** — token + a registered, non-evicted client whose id matches the
   caller's address: snapshot, events, frames, ping, extension, download.
 - **s-admin** (session admin) — a client that is a session admin: delete the
-  session, evict a client, set the password, remove a beam.
+  session, evict a client, set the password, remove a beam, extend the max_age cap.
 - **a-admin** (airlift admin) — the operator, holding the tower's `admin_token`
   (ADR 0014). A fifth, orthogonal tier: `/api/admin/*` checks only the token,
   ignores `X-Airlift-Client`, and never touches the four session tiers. The token
@@ -98,9 +100,11 @@ Unknown `sid` → `404`. Missing or wrong token → `401`. A valid token with no
 an unknown client → `401`; a client id from a different address, a non-admin on
 a session-admin route, or an evicted address → `403` (an evicted address gets
 `{"error":"evicted"}`). A `409` means the action is not allowed in the session's
-current status: frames, ping, patch and beam-removal need a *live* session (`OPEN`
-or `TERMINATING`), so they `409` once it is `TERMINATED`/`PENDING_REVIEW`/
-`REJECTED`; an admin cancel/review/extension `409`s out of its expected state.
+current status: frames, ping, patch, beam-removal and `…/max-age` need a *live*
+session (`OPEN` or `TERMINATING`), so they `409` once it is `TERMINATED`/
+`PENDING_REVIEW`/`REJECTED`; a session suspended by inactivity also `409`s
+downloads until reopened (ADR 0018); an admin cancel/review/extension `409`s out
+of its expected state.
 Session expiry is no longer refreshed by every call — see Lifecycle.
 
 ## Limits
@@ -167,6 +171,7 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `terminate_at` | RFC 3339 or null | the warning deadline; set only while `TERMINATING` |
 | `extension` | object or null | `{by, reason, at, decision?, note?, decided_at?}` once a client has requested more time; `by` is a client name |
 | `expires_at` | RFC 3339 | the earliest applicable deadline (see Lifecycle): the OPEN clock, the `TERMINATING` warning, the `PENDING_REVIEW` review deadline, or the cleanup time |
+| `reopenable` | bool | true when the session was suspended by inactivity and opening its link would revive it (ADR 0018); while true, access is revoked (downloads `409`) |
 
 Each entry of `beams` is:
 
@@ -244,8 +249,10 @@ Terminating:
   session-admin `DELETE`, or `DELETE …?now` moves it `→ TERMINATED`.
 
 A non-live session freezes the transfer (frames, ping, patch and beam-removal
-return `409`) but keeps its files and keeps serving READY downloads and the
-snapshot.
+return `409`) but keeps its files and the snapshot. A session terminated
+**deliberately** (a session or airlift admin) or by the `max_age` cap keeps
+serving READY downloads through its terminated window; a session **suspended by
+inactivity** (ADR 0018) revokes all access — downloads `409` too — until reopened.
 
 Extension and review (ADR 0014):
 
@@ -256,6 +263,18 @@ Extension and review (ADR 0014):
   every clock restarted, the beams and files intact) or **rejects** (`→ REJECTED`
   with the note). A `review_ttl` elapsing counts as a rejection.
 
+Reopen by link and max-age grants (ADR 0018):
+
+- A session suspended by inactivity (a `system` terminate for `idle_ttl` or
+  `inactive_ttl`; `reopenable: true`) is revived — `→ OPEN`, every clock reset,
+  beams and files intact — simply by registering a client or password-joining, so
+  opening the link reopens it with no admin review. The deliberate terminations
+  and the `max_age` cap above are **not** reopenable this way; they keep the
+  extension → review path.
+- A session admin may `POST …/max-age` to add an hour to the `max_age` cap
+  (repeatable), so an actively-used session can outlive the 24 h cap without the
+  operator; a reopen clears the granted hours.
+
 `terminated_ttl` after a session reaches `TERMINATED` or `REJECTED`, it and its
 `<data_dir>/<sid>` directory are deleted (`event: closed`). `PENDING_REVIEW` is
 never swept-to-delete while it awaits a decision.
@@ -263,7 +282,9 @@ never swept-to-delete while it awaits a decision.
 The web pages emit the ping automatically (at most once a minute, only while the
 tab is visible and within five minutes of real user input), show a live countdown
 (expiry while OPEN, the warning while TERMINATING, cleanup once terminated), and
-offer the extension form; the admin console drives the warning, cancel and review.
+offer the extension form — or, for an inactivity-suspended session, a **Reopen**
+button. The dashboard also gives session admins a **+1 h** button while live; the
+admin console drives the warning, cancel and review.
 
 ## Events
 

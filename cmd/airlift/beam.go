@@ -32,7 +32,7 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 	chunk := fs.Int("chunk", beam.DefaultChunk, "payload bytes per frame (default 600; at most 2242 at ECC M)")
 	ecc := fs.String("ecc", "M", "QR error-correction level: L, M, Q or H")
 	versionTarget := fs.Int("version-target", 0, "pick the largest chunk that fits QR version V (1..40) instead of --chunk")
-	fps := fs.Int("fps", 8, "initial frames per second (1..60)")
+	fps := fs.Int("fps", 5, "initial frames per second (1..60)")
 	manifestEvery := fs.Int("manifest-every", 20, "re-insert the manifest frame after every K frames")
 	seed := fs.Int64("seed", 0, "derive the sender session id from N instead of at random")
 	positional, err := parsePermuted(fs, args)

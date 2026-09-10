@@ -74,6 +74,7 @@ export interface Snapshot {
   terminate_at: string | null; // set only while TERMINATING (the warning deadline)
   extension: Extension | null;
   expires_at: string;
+  reopenable: boolean; // suspended by inactivity — opening the link revives it (ADR 0018)
 }
 
 /** One row of GET /api/admin/config (a setting's value, source and mutability). */

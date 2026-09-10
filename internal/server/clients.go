@@ -147,12 +147,24 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
+	srv.reopenOnOpen(s, c)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"client_id":     c.ID,
 		"name":          c.Name,
 		"session_admin": s.ClientIsAdmin(c),
 		"roles":         []string{},
 	})
+}
+
+// reopenOnOpen revives a session suspended by inactivity when a client opens its
+// link (register or password-join), refreshing the receipt (ADR 0018). It is a
+// no-op for a live session or a deliberate/max_age termination, which keep the
+// request-more-time → airlift-admin review flow.
+func (srv *Server) reopenOnOpen(s *session.Session, c *session.Client) {
+	if s.Reopen(c.Name) {
+		srv.writeSessionJSON(s)
+		srv.opts.Logf("session %s reopened", s.ID)
+	}
 }
 
 // join admits a client by the session password (no token needed). It is 404
@@ -199,6 +211,7 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
+	srv.reopenOnOpen(s, c)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":     s.Token,
 		"client_id": c.ID,

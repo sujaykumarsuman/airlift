@@ -150,6 +150,7 @@ function overlayActive(): boolean {
 function overlayStateKey(): string {
   if (terminal) return terminal.kind;
   if (!snap) return "";
+  if (snap.reopenable) return "SUSPENDED";
   if (snap.status === "TERMINATED" || snap.status === "REJECTED") {
     const done = snap.terminated ? cleanupCountdown(snap.terminated, Date.now()).done : false;
     return `${snap.status}:${done ? "done" : "live"}`;
@@ -204,6 +205,16 @@ function renderOverlay(): void {
     return;
   }
   if (!snap) return;
+  if (snap.reopenable) {
+    // Suspended by inactivity (ADR 0018): opening the link reopens it — no review.
+    endedEl.innerHTML = html`<div class="ended-card">
+      <h2>Session paused</h2>
+      <p class="muted">This session closed after a spell of inactivity. Reopen it to carry on — every timer resets.</p>
+      <p><button id="reopen-btn" class="btn primary" type="button">Reopen session</button></p>
+    </div>`.html;
+    endedEl.querySelector<HTMLButtonElement>("#reopen-btn")?.addEventListener("click", onReopen);
+    return;
+  }
   if (snap.status === "PENDING_REVIEW") {
     endedEl.innerHTML = html`<div class="ended-card">
       <h2>Awaiting review</h2>
@@ -244,6 +255,29 @@ function patchOverlayClock(): void {
   const c = cleanupCountdown(snap.terminated, Date.now());
   const el = endedEl.querySelector<HTMLElement>("#cleanup");
   if (el && !c.hidden) el.textContent = c.text;
+}
+
+// onReopen revives a session suspended by inactivity: registering reopens it
+// server-side (ADR 0018), then the SSE pushes OPEN and syncLifecycle brings the
+// camera and relay back.
+function onReopen(): void {
+  const btn = endedEl.querySelector<HTMLButtonElement>("#reopen-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Reopening…";
+  }
+  void registerClient(sid, token, { role: "relay" })
+    .then((c) => {
+      clientID = c.client_id;
+    })
+    .catch((err) => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Reopen session";
+      }
+      message = err instanceof Error ? err.message : String(err);
+      render();
+    });
 }
 
 function onExtensionSubmit(e: Event): void {

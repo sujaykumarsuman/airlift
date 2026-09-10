@@ -173,6 +173,7 @@ type Session struct {
 	idleTTL        time.Duration    // after the last client stream leaves
 	inactiveTTL    time.Duration    // after the last activity while clients are connected
 	maxAge         time.Duration    // overall from maxAgeBase; 0 disables
+	maxAgeBonus    time.Duration    // session-admin grants added to the max_age cap (ADR 0018)
 	terminatedTTL  time.Duration    // how long a TERMINATED session's files are kept
 
 	maxBeams int
@@ -251,7 +252,7 @@ type Extension struct {
 // LifecycleEvent is one entry of the session's append-only lifecycle log.
 type LifecycleEvent struct {
 	At     time.Time `json:"at"`
-	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminating | termination_cancelled | terminated | extension_requested | reopened | rejected
+	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminating | termination_cancelled | terminated | extension_requested | reopened | rejected | max_age_extended
 	By     string    `json:"by,omitempty"`
 	Reason string    `json:"reason,omitempty"`
 	BID    string    `json:"bid,omitempty"`
@@ -291,7 +292,7 @@ func (s *Session) deadlineLocked() (time.Time, string) {
 		consider(s.lastActivity.Add(s.inactiveTTL), "inactive_ttl")
 	}
 	if s.maxAge > 0 {
-		consider(s.maxAgeBase.Add(s.maxAge), "max_age")
+		consider(s.maxAgeBase.Add(s.maxAge+s.maxAgeBonus), "max_age")
 	}
 	return best, why
 }
@@ -492,19 +493,74 @@ func (s *Session) Review(accept bool, note string) bool {
 		s.rejectLocked(now, "airlift admin", note)
 		return true
 	}
-	s.status = StatusOpen
-	s.term = nil
-	s.terminateAt = time.Time{}
-	s.reviewDeadline = time.Time{}
-	s.maxAgeBase = now
-	s.lastActivity = now
-	s.lastEmptyAt = now
 	if s.extension != nil {
 		s.extension.Decision = "accept"
 		s.extension.Note = note
 		s.extension.DecidedAt = &now
 	}
-	s.events = append(s.events, LifecycleEvent{At: now, Event: "reopened", By: "airlift admin"})
+	s.reopenLocked(now, "airlift admin")
+	return true
+}
+
+// reopenLocked revives a terminated session to OPEN, clearing the termination and
+// restarting every clock (and any max_age grants) from now, the beams and their
+// files intact. Shared by the airlift-admin review-accept and the self-service
+// link reopen (ADR 0018).
+func (s *Session) reopenLocked(now time.Time, by string) {
+	s.status = StatusOpen
+	s.term = nil
+	s.terminateAt = time.Time{}
+	s.reviewDeadline = time.Time{}
+	s.maxAgeBase = now
+	s.maxAgeBonus = 0
+	s.lastActivity = now
+	s.lastEmptyAt = now
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "reopened", By: by})
+	s.notifyLocked()
+}
+
+// reopenableLocked reports whether the session may be revived by simply opening
+// its link: it was suspended by the inactivity sweep (system idle_ttl/inactive_ttl),
+// not by a deliberate session/airlift-admin terminate or the max_age cap. Those
+// keep the request-more-time → airlift-admin review flow (ADR 0018).
+func (s *Session) reopenableLocked() bool {
+	return s.status == StatusTerminated && s.term != nil && s.term.By == "system" &&
+		(s.term.Reason == "idle_ttl" || s.term.Reason == "inactive_ttl")
+}
+
+// Reopenable reports whether opening the link would revive the session. While it
+// holds, the session is suspended: client access is revoked until a reopen.
+func (s *Session) Reopenable() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reopenableLocked()
+}
+
+// Reopen revives an inactivity-suspended session to a normal OPEN session,
+// resetting every clock (ADR 0018). A no-op returning false if it is not
+// reopenable (still live, or terminated deliberately or by max_age). `by` records
+// who reopened it, for the session.json receipt.
+func (s *Session) Reopen(by string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.reopenableLocked() {
+		return false
+	}
+	s.reopenLocked(s.now(), by)
+	return true
+}
+
+// ExtendMaxAge pushes the max_age cap out by d — a session-admin grant so an
+// actively-used session can outlive the hard cap (ADR 0018). Only meaningful
+// while the session is live with a max_age cap set; returns false otherwise.
+func (s *Session) ExtendMaxAge(d time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.status.Live() || s.maxAge <= 0 || d <= 0 {
+		return false
+	}
+	s.maxAgeBonus += d
+	s.events = append(s.events, LifecycleEvent{At: s.now(), Event: "max_age_extended", By: "session admin"})
 	s.notifyLocked()
 	return true
 }
@@ -1002,6 +1058,7 @@ type Snapshot struct {
 	TerminateAt *time.Time       `json:"terminate_at"` // set only while TERMINATING (the warning deadline)
 	Extension   *Extension       `json:"extension"`    // the pending/decided extension request; nil otherwise
 	ExpiresAt   time.Time        `json:"expires_at"`   // the earliest applicable deadline
+	Reopenable  bool             `json:"reopenable"`   // opening the link would revive an inactivity-suspended session (ADR 0018)
 }
 
 // BeamSnapshot is one beam's state within a place.
@@ -1028,7 +1085,7 @@ func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.bindingDeadlineLocked()}
+	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.bindingDeadlineLocked(), Reopenable: s.reopenableLocked()}
 	if s.term != nil {
 		t := *s.term
 		snap.Terminated = &t

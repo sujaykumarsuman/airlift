@@ -2,8 +2,9 @@
 # airlift VPS bootstrap — idempotent. Usage: bootstrap.sh <public_url>
 #   e.g. bootstrap.sh https://projects.sujaykumar.dev/airlift
 # Creates the service user + state dir, ensures an 0600 config with that
-# public_url and a generated admin_token (preserved on re-runs), ensures the
-# hub webroot exists, and installs Caddy. The systemd unit and Caddyfile are
+# public_url and an 0600 /etc/default/airlift env file holding a generated admin
+# token (both preserved on re-runs), ensures the hub webroot exists, and installs
+# Caddy. The systemd unit and Caddyfile are
 # placed by `make vps-bootstrap`; the hub page at /var/www/projects lives in the
 # sujaykumarsuman.github.io repo and is deployed separately.
 set -euo pipefail
@@ -17,16 +18,39 @@ if [ -f "$CFG" ]; then
   grep -q '^public_url' "$CFG" \
     && sed -i "s|^public_url = .*|public_url = $PUBLIC_URL|" "$CFG" \
     || echo "public_url = $PUBLIC_URL" >> "$CFG"
-  echo "updated public_url; kept the existing admin_token"
+  echo "updated public_url in $CFG"
 else
   cat > "$CFG" <<EOF
-# airlift tower configuration (managed on the VPS; holds the admin token).
+# airlift tower configuration (managed on the VPS). The admin token lives in the
+# systemd EnvironmentFile /etc/default/airlift, not here.
 public_url = $PUBLIC_URL
-admin_token = $(openssl rand -hex 24)
 EOF
-  echo "wrote $CFG with a fresh admin_token"
+  echo "wrote $CFG"
 fi
 chmod 600 "$CFG"
+
+# The admin token is an environment variable (AIRLIFT_ADMIN_TOKEN) the systemd
+# unit loads from /etc/default/airlift (0600, root-owned; env wins over the config
+# file). Keep an existing token, else migrate one from an older config, else
+# generate a fresh one — so re-runs never rotate a live token.
+ENVFILE=/etc/default/airlift
+if [ -f "$ENVFILE" ] && grep -q '^AIRLIFT_ADMIN_TOKEN=' "$ENVFILE"; then
+  echo "kept the existing admin token in $ENVFILE"
+else
+  TOKEN="$(sed -n 's/^admin_token = //p' "$CFG" 2>/dev/null | head -n1)"
+  [ -n "$TOKEN" ] || TOKEN="$(openssl rand -hex 24)"
+  cat > "$ENVFILE" <<EOF
+# airlift tower environment (managed on the VPS; holds the admin token).
+AIRLIFT_ADMIN_TOKEN=$TOKEN
+EOF
+  echo "wrote $ENVFILE with the admin token"
+fi
+chmod 600 "$ENVFILE"
+chown root:root "$ENVFILE"
+
+# The token now lives only in the env file; drop any copy left in the config.
+sed -i '/^admin_token/d' "$CFG"
+
 chown -R airlift:airlift /var/lib/airlift
 chmod 750 /var/lib/airlift
 

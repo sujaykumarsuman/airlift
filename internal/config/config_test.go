@@ -37,8 +37,8 @@ func TestDefaults(t *testing.T) {
 	if c.MaxAge != 24*time.Hour {
 		t.Fatalf("max_age default = %v, want 24h", c.MaxAge)
 	}
-	if c.IdleTTL != 10*time.Minute || c.InactiveTTL != 30*time.Minute {
-		t.Fatalf("ttls %v %v", c.IdleTTL, c.InactiveTTL)
+	if c.IdleTTL != 30*time.Minute || c.InactiveTTL != 30*time.Minute || c.TerminatedTTL != time.Hour {
+		t.Fatalf("ttls idle=%v inactive=%v terminated=%v", c.IdleTTL, c.InactiveTTL, c.TerminatedTTL)
 	}
 	if c.MaxGzBytes != 64<<20 || c.MaxBody != 8<<20 {
 		t.Fatalf("bytes %d %d", c.MaxGzBytes, c.MaxBody)
@@ -275,7 +275,7 @@ func TestDataDirTildeExpands(t *testing.T) {
 
 func TestDurationCanonicalCompact(t *testing.T) {
 	c, _ := load(t, t.TempDir(), nil, nil)
-	want := map[string]string{"max_age": "24h", "idle_ttl": "10m", "warning_ttl": "1m", "rate_frames": "30/s"}
+	want := map[string]string{"max_age": "24h", "idle_ttl": "30m", "warning_ttl": "1m", "rate_frames": "30/s"}
 	got := map[string]string{}
 	for _, kv := range c.Effective() {
 		got[kv.Name] = kv.Value

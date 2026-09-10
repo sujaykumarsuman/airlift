@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, postExtension, postPing, registerClient } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, postExtension, postExtendMaxAge, postPing, registerClient } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
@@ -259,11 +259,15 @@ async function renderSession(): Promise<void> {
       <h2>Join with the phone</h2>
       <p>Scan this code with the phone's camera app, or open the link:</p>
       <p><code class="url">${link}</code> <button class="btn small" id="copy">Copy</button></p>
+      <p class="hint">Or receive on this device: <button class="btn small" id="scan-here" type="button">Scan with this camera</button></p>
       <p class="hint">Watch from another device: <code class="url">${viewerLink(current)}</code></p>
       <p class="muted">session ${current.sid}</p>
     </div>
   </div>`.html;
   $<HTMLButtonElement>("#copy", sessionEl).addEventListener("click", () => void navigator.clipboard?.writeText(link));
+  // Open the scan page for this session in a new tab so the laptop's own camera
+  // can relay (the zero-hop variant); the scan page joins from the link's token.
+  $<HTMLButtonElement>("#scan-here", sessionEl).addEventListener("click", () => window.open(joinLink(current!), "_blank", "noopener"));
   try {
     await renderQR($<HTMLCanvasElement>("#join-qr", sessionEl), link);
   } catch {
@@ -291,6 +295,7 @@ function renderStatus(): void {
         <strong>${s.beams.length} ${s.beams.length === 1 ? "beam" : "beams"}</strong>
         <span class="muted">session ${s.sid} · ${relays} · link ${connection}</span>
         ${s.status === "OPEN" ? openExpiry(s) : s.status === "TERMINATING" ? warningExpiry(s) : ""}
+        ${s.status === "OPEN" && iAmAdmin ? html` <button class="btn small" id="extend-btn" type="button" title="Push the max-age limit out by an hour">+1 h</button>` : ""}
       </div>
       ${s.status !== "OPEN" && s.status !== "TERMINATING" ? terminatedPanel(s, Date.now()) : ""}
       ${s.beams.length === 0 && s.status === "OPEN" ? html`<p class="muted">Waiting for the first beam. Scan a beam page with the phone.</p>` : ""}
@@ -315,6 +320,47 @@ function renderStatus(): void {
     btn.addEventListener("click", () => void removeBeam(btn.dataset.removeBeam ?? "")),
   );
   statusEl.querySelector<HTMLFormElement>("#ext-form")?.addEventListener("submit", onExtensionSubmit);
+  statusEl.querySelector<HTMLButtonElement>("#reopen-btn")?.addEventListener("click", onReopen);
+  statusEl.querySelector<HTMLButtonElement>("#extend-btn")?.addEventListener("click", onExtend);
+}
+
+// onReopen revives a session suspended by inactivity: registering reopens it
+// server-side (ADR 0018) and the SSE then pushes OPEN, restarting the pinger.
+function onReopen(): void {
+  if (!current) return;
+  const btn = statusEl.querySelector<HTMLButtonElement>("#reopen-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Reopening…";
+  }
+  void registerClient(current.sid, current.token, { role: "viewer" })
+    .then((c) => {
+      if (current) current.client_id = c.client_id;
+    })
+    .catch((err) => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Reopen session";
+      }
+      notice = `Could not reopen: ${err instanceof Error ? err.message : String(err)}`;
+      renderStatus();
+    });
+}
+
+// onExtend grants the session another hour before the max_age cap (session admin).
+function onExtend(): void {
+  if (!current) return;
+  const btn = statusEl.querySelector<HTMLButtonElement>("#extend-btn");
+  if (btn) btn.disabled = true;
+  void postExtendMaxAge(current.sid, current.token, current.client_id)
+    .catch((err) => {
+      notice = `Could not extend: ${err instanceof Error ? err.message : String(err)}`;
+      renderStatus();
+    })
+    .finally(() => {
+      const b = statusEl.querySelector<HTMLButtonElement>("#extend-btn");
+      if (b) b.disabled = false;
+    });
 }
 
 /** The "expires in …" countdown while OPEN (hidden when no clock applies). */
@@ -333,6 +379,14 @@ function warningExpiry(s: Snapshot): Raw {
  *  TERMINATED — an extension request; PENDING_REVIEW shows the awaiting-review
  *  note, REJECTED the reviewer's note. */
 function terminatedPanel(s: Snapshot, now: number): Raw {
+  if (s.reopenable) {
+    // Suspended by inactivity (ADR 0018): reopen it from the link, no review needed.
+    return html`<div class="ended">
+      <p class="ended-head"><strong>Session paused.</strong> It closed after a spell of inactivity.</p>
+      <p>Reopen it to carry on — every timer resets.</p>
+      <p><button id="reopen-btn" class="btn primary" type="button">Reopen session</button></p>
+    </div>`;
+  }
   const t = s.terminated;
   if (s.status === "PENDING_REVIEW") {
     return html`<div class="ended">

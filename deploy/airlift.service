@@ -11,6 +11,9 @@ Type=simple
 User=airlift
 Group=airlift
 Environment=AIRLIFT_HOME=/var/lib/airlift/.airlift
+# The admin token is supplied as AIRLIFT_ADMIN_TOKEN from this 0600 root-owned
+# file (env wins over the config file); the leading '-' makes it optional.
+EnvironmentFile=-/etc/default/airlift
 ExecStart=/usr/local/bin/airlift tower
 Restart=on-failure
 RestartSec=3

@@ -12,6 +12,7 @@ const row = (sid: string, status: Status, over: Partial<AdminRow> = {}): AdminRo
   terminate_at: null,
   extension: null,
   expires_at: "2026-09-10T00:00:00Z",
+  reopenable: false,
   label: "",
   addresses: {},
   ...over,
