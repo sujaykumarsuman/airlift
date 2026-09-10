@@ -100,7 +100,15 @@ directly (out of scope; see non-goals).
     POST with progress, a download, a ping) not by presence; a session-admin
     DELETE or a clock soft-terminates (freeze + keep files), then the two-phase
     sweep deletes after `terminated_ttl`; a session-level `session.json` receipt.
-    (ADR 0013; the admin terminate/extension/review is Phase 7, ADR 0014.)
+    (ADR 0013)
+17. Admin surface: the lifecycle completes with TERMINATING (a `warning_ttl`
+    grace window, `Live() = OPEN||TERMINATING`), a client extension request →
+    PENDING_REVIEW, and an airlift-admin review (accept→reopen / reject→REJECTED).
+    A fifth, orthogonal auth tier gates `/api/admin/*` on `admin_token` (404 when
+    unset, else constant-time compare then `rate_admin`); the admin console lives
+    at `/admin`. Live config keys are PATCH-able at runtime (atomic 0600 overrides,
+    applied without a restart); the CLI stays `beam` + `tower` — `sessions`/`fetch`
+    fold into `/admin`, so ADR 0010 stands. (ADR 0014)
 
 ## Non-goals
 
@@ -112,8 +120,9 @@ directly (out of scope; see non-goals).
 (The prompt-001 non-goals "Hosted / VPS deployment" and "Multi-user" are
 overturned by prompt 002: the tower is a hosted, multi-user service. Hosting
 transport landed in ADR 0012; the multi-beam place in ADR 0015; the open
-multi-user access layer in ADR 0017. The session lifecycle and admin surface,
-which prompt 002 calls ADR 0013, are still to come.)
+multi-user access layer in ADR 0017; the session lifecycle in ADR 0013; and the
+admin surface, review flow and runtime overrides in ADR 0014. The VPS deployment
+is the remaining step.)
 
 ## Conventions
 

@@ -8,8 +8,8 @@ and the server tests are its reference clients.
 ## Routes
 
 The middle column is the auth tier (see Auth): *public*, *token* (a valid token,
-no client yet), *client* (token + a registered client), *admin* (a session-admin
-client).
+no client yet), *client* (token + a registered client), *s-admin* (a session-admin
+client), *a-admin* (the airlift admin, `admin_token`).
 
 ```
 POST   /api/sessions                  public → body {label?,password?,joiners_admin?,
@@ -22,14 +22,27 @@ GET    /api/sessions/{sid}/events     client → SSE place snapshots
 POST   /api/sessions/{sid}/frames     client → body {frames:[base45,...]}
                                              → {accepted, dup, bad, completed_beams}
 POST   /api/sessions/{sid}/ping       client → 204; activity, resets the inactive clock
+POST   /api/sessions/{sid}/extension  client → body {reason?}; 204; request more time (→ PENDING_REVIEW)
 GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes
-PATCH  /api/sessions/{sid}            admin  → body {password} (set or, with "", clear)
-DELETE /api/sessions/{sid}/clients/{cid}  admin  → evict a client's address
-DELETE /api/sessions/{sid}/beams/{bid}    admin  → remove a beam and its files
-DELETE /api/sessions/{sid}            admin  → terminate the session (freeze, keep files)
+PATCH  /api/sessions/{sid}            s-admin → body {password} (set or, with "", clear)
+DELETE /api/sessions/{sid}/clients/{cid}  s-admin → evict a client's address
+DELETE /api/sessions/{sid}/beams/{bid}    s-admin → remove a beam and its files
+DELETE /api/sessions/{sid}            s-admin → terminate the session (freeze, keep files)
 GET    /api/info                      public → {version, public_url, base_path, admin_enabled, caps}
+
+GET    /api/admin/config              a-admin → {keys:[{name,value,source,live},…]} (secrets masked)
+PATCH  /api/admin/config              a-admin → body {changes:{key:value,…}} → the fresh dump
+GET    /api/admin/sessions            a-admin → {sessions:[snapshot + {label, addresses},…]}
+GET    /api/admin/events              a-admin → SSE {sessions:[…]} (event: sessions)
+DELETE /api/admin/sessions/{sid}[?now] a-admin → warn (TERMINATING), or with ?now terminate at once
+POST   /api/admin/sessions/{sid}/cancel-termination  a-admin → back to OPEN
+POST   /api/admin/sessions/{sid}/review  a-admin → body {decision:"accept"|"reject", note?}
+DELETE /api/admin/sessions/{sid}/clients/{cid}  a-admin → evict a client
+GET    /api/admin/sessions/{sid}/download?beam=<bid>&as=…  a-admin → bytes (no activity marked)
+
 GET    /                              tower dashboard
 GET    /s/{sid}                       scan page (token arrives in #t=)
+GET    /admin                         admin console (sign in with admin_token)
 ```
 
 `GET /api/info` is unauthenticated (the pages call it before any session
@@ -61,9 +74,17 @@ four tiers:
 - **public** — no auth: create, join, `/api/info`, static pages.
 - **token** — a valid token, no client needed: register a client.
 - **client** — token + a registered, non-evicted client whose id matches the
-  caller's address: snapshot, events, frames, download.
-- **admin** — a client that is a session admin: delete the session, evict a
-  client, set the password, remove a beam.
+  caller's address: snapshot, events, frames, ping, extension, download.
+- **s-admin** (session admin) — a client that is a session admin: delete the
+  session, evict a client, set the password, remove a beam.
+- **a-admin** (airlift admin) — the operator, holding the tower's `admin_token`
+  (ADR 0014). A fifth, orthogonal tier: `/api/admin/*` checks only the token,
+  ignores `X-Airlift-Client`, and never touches the four session tiers. The token
+  is the `Authorization: Bearer` on every admin call and on the admin SSE (there
+  is no cookie); it is compared in constant time, masked in the config dump, and
+  never logged. An unconfigured `admin_token` makes the whole subtree a `404` (the
+  surface is invisible); a wrong token is charged against `rate_admin` — a `429`
+  when the bucket is empty, else a `401` — while a valid token is never throttled.
 
 A client's roles are the union of its open streams' roles (`?role=relay` on the
 event stream marks a scanner). The creator is the first session admin; password/
@@ -75,10 +96,12 @@ streaming `fetch` with a small SSE parser instead of `EventSource`, and
 
 Unknown `sid` → `404`. Missing or wrong token → `401`. A valid token with no or
 an unknown client → `401`; a client id from a different address, a non-admin on
-an admin route, or an evicted address → `403` (an evicted address gets
+a session-admin route, or an evicted address → `403` (an evicted address gets
 `{"error":"evicted"}`). A `409` means the action is not allowed in the session's
-current status (e.g. frames, ping, patch or beam-removal on a TERMINATED
-session). Session expiry is no longer refreshed by every call — see Lifecycle.
+current status: frames, ping, patch and beam-removal need a *live* session (`OPEN`
+or `TERMINATING`), so they `409` once it is `TERMINATED`/`PENDING_REVIEW`/
+`REJECTED`; an admin cancel/review/extension `409`s out of its expected state.
+Session expiry is no longer refreshed by every call — see Lifecycle.
 
 ## Limits
 
@@ -90,7 +113,9 @@ session). Session expiry is no longer refreshed by every call — see Lifecycle.
 | Beams per place | `max_beams` (default 10) | over-cap MANIFEST auto-evicts the oldest terminal beam, else counted as `bad` |
 | Held pre-manifest senders | 8 (65 536 frames) | further held frames counted as `bad` |
 | Concurrent sessions | `sessions` (default 32) | `429` + `Retry-After` on create |
-| Create / join / frames rate | `rate_create` / `rate_join` / `rate_frames` (per address; join also per session) | `429` + `Retry-After` |
+| Create / join / frames / ping rate | `rate_create` / `rate_join` / `rate_frames` / `rate_ping` (per address; join also per session) | `429` + `Retry-After` |
+| Extension-request rate | `rate_extension` (per address and per session) | `429` + `Retry-After` |
+| Wrong admin-token rate | `rate_admin` (per address, charged only on a failed compare) | `429` + `Retry-After` |
 | Malformed JSON body | — | `400` |
 | Create option over its cap | — | `400` naming the cap |
 
@@ -134,12 +159,14 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `sid` | string | tower session id |
-| `status` | string | `OPEN` or `TERMINATED` (see Lifecycle) |
+| `status` | string | `OPEN`, `TERMINATING`, `TERMINATED`, `PENDING_REVIEW` or `REJECTED` (see Lifecycle) |
 | `relays` | int | open event streams that declared `role=relay` |
 | `beams` | object[] | the beams read into the place, in arrival order |
 | `clients` | object[] | the registered clients: `{client_id, name, roles, session_admin, connected, last_active}` |
-| `terminated` | object or null | `{by, reason, at, cleanup_at}` once TERMINATED; null while OPEN |
-| `expires_at` | RFC 3339 | the earliest applicable deadline (see Lifecycle); a TERMINATED session's `cleanup_at` |
+| `terminated` | object or null | `{by, reason, at, cleanup_at}` once non-live (`TERMINATED`/`PENDING_REVIEW`/`REJECTED`); null while OPEN/TERMINATING |
+| `terminate_at` | RFC 3339 or null | the warning deadline; set only while `TERMINATING` |
+| `extension` | object or null | `{by, reason, at, decision?, note?, decided_at?}` once a client has requested more time; `by` is a client name |
+| `expires_at` | RFC 3339 | the earliest applicable deadline (see Lifecycle): the OPEN clock, the `TERMINATING` warning, the `PENDING_REVIEW` review deadline, or the cleanup time |
 
 Each entry of `beams` is:
 
@@ -192,43 +219,100 @@ sender's manifest arrives, without disturbing any other beam.
 
 ## Lifecycle
 
-A session has a `status`: `OPEN` or `TERMINATED` (ADR 0013). While OPEN its
-`expires_at` is the earliest of three clocks:
+A session has a `status` of `OPEN`, `TERMINATING`, `TERMINATED`,
+`PENDING_REVIEW` or `REJECTED` (ADR 0013, ADR 0014). *Live* means `OPEN` or
+`TERMINATING` — the transfer runs, and the concurrency cap counts these. While
+OPEN its `expires_at` is the earliest of three clocks:
 
 - **idle** — `idle_ttl` after the last client stream leaves (runs only while no
   stream is connected).
 - **inactive** — `inactive_ttl` after the last activity while streams are
   connected.
-- **max_age** — `max_age` from creation, when set.
+- **max_age** — `max_age` from the creation base, when set (a reopen rebases it).
 
 *Activity* — a frames POST that accepted or duplicated ≥ 1 frame, a download, or
 a ping — resets the inactive clock. A bare snapshot, an open stream, a
 register/join and an all-bad POST are presence, not activity, and no longer
-refresh anything. A session admin's `DELETE` and any clock firing move the
-session `OPEN → TERMINATED`, recording `terminated {by, reason, at, cleanup_at}`.
-A TERMINATED session freezes the transfer (frames, ping, patch and beam-removal
+refresh anything.
+
+Terminating:
+
+- A session admin's `DELETE` or any clock firing moves `→ TERMINATED` at once.
+- An airlift admin's `DELETE …` starts a **warning**: `OPEN → TERMINATING` with
+  `terminate_at = now + warning_ttl`, the transfer staying live so a **cancel**
+  (`POST …/cancel-termination`) returns it to `OPEN`. The warning elapsing, a
+  session-admin `DELETE`, or `DELETE …?now` moves it `→ TERMINATED`.
+
+A non-live session freezes the transfer (frames, ping, patch and beam-removal
 return `409`) but keeps its files and keeps serving READY downloads and the
-snapshot; `terminated_ttl` later the session and its `<data_dir>/<sid>` directory
-are deleted (`event: closed`). The airlift-admin terminate with a warning, and
-the extension/review flow, are a later phase (ADR 0014).
+snapshot.
+
+Extension and review (ADR 0014):
+
+- Any registered client may `POST …/extension {reason?}` once on a `TERMINATED`
+  session, moving it `→ PENDING_REVIEW` and stopping the cleanup clock in favour
+  of a review clock (`review_ttl`). `extension.by` is the requester's name.
+- An airlift admin `POST …/review {decision,note?}` either **accepts** (`→ OPEN`,
+  every clock restarted, the beams and files intact) or **rejects** (`→ REJECTED`
+  with the note). A `review_ttl` elapsing counts as a rejection.
+
+`terminated_ttl` after a session reaches `TERMINATED` or `REJECTED`, it and its
+`<data_dir>/<sid>` directory are deleted (`event: closed`). `PENDING_REVIEW` is
+never swept-to-delete while it awaits a decision.
 
 The web pages emit the ping automatically (at most once a minute, only while the
-tab is visible and within five minutes of real user input) and show a live
-countdown to expiry while OPEN and to `cleanup_at` once terminated.
+tab is visible and within five minutes of real user input), show a live countdown
+(expiry while OPEN, the warning while TERMINATING, cleanup once terminated), and
+offer the extension form; the admin console drives the warning, cancel and review.
 
 ## Events
 
-`GET /api/sessions/{sid}/events` → `text/event-stream`: a snapshot on
-connect, one per change (coalesced), a `: keepalive` comment every 15 s,
-`event: terminated` (once, carrying the snapshot) when the session is
-terminated, `event: closed` when it is finally deleted, and `event: evicted`
-when the viewer's address has been evicted (the stream then ends). `?role=relay`
-counts the connection under `relays` and adds `relay` to the client's roles.
+`GET /api/sessions/{sid}/events` → `text/event-stream`: a snapshot on connect,
+one per change (coalesced), and a `: keepalive` comment every 15 s. Each push is
+named on the entering edge of a status change so a page can react — `terminating`,
+`terminated`, `rejected`, and `reopened` on a return to `OPEN` (a cancel or an
+accepted extension) — and `state` otherwise (entering `PENDING_REVIEW` included).
+`event: closed` fires when the session is finally deleted, and `event: evicted`
+when the viewer's address has been evicted (the stream then ends). The snapshot
+`status` is authoritative; the event name is only a hint, and clients re-render on
+any name. `?role=relay` counts the connection under `relays` and adds `relay` to
+the client's roles.
 
 ```
 event: state
 data: {"sid":"…","relays":0,"beams":[…],…}
 ```
+
+## Admin surface
+
+`/api/admin/*` (ADR 0014) is gated by the tower's `admin_token` (see Auth). It is
+`404` when `admin_token` is unset, so an unconfigured tower's admin surface is
+invisible. `GET /api/admin/sessions` returns every session as its snapshot plus
+`label` and `addresses` (a `{client_id: address}` map — the operator sees
+addresses, which the session snapshot deliberately omits); `GET /api/admin/events`
+streams the same list (`event: sessions`), pushing only when it changes. The
+mutation routes drive the lifecycle above: warn/terminate-now
+(`DELETE …/{sid}[?now]`), `cancel-termination`, `review`, client `evict`, and a
+`download` that serves a READY beam in any non-deleted status without marking
+activity.
+
+### Runtime config
+
+`GET /api/admin/config` → `{keys:[{name, value, source, live}, …]}`, secrets
+masked (`****`). `source` is the winning layer (`flag` > `env` > `overrides` >
+`file` > `default`); `live` is whether the key is PATCH-able at runtime.
+
+`PATCH /api/admin/config {changes:{key:value,…}}` merges live-key changes into the
+tower's `overrides` file (atomic, mode 0600) and applies them without a restart,
+returning the fresh dump. Restart-only keys (`public_url`, `listen`, `admin_token`,
+`data_dir`, `trusted_proxies`) and unknown keys are rejected with `400`, and an
+invalid value with `400`. The cap, the rate budgets, `max_body` and the
+warning/review windows take effect on the next request; the per-session clocks and
+beam ceilings bind **new** sessions (existing sessions keep what they were created
+with). A key pinned by a higher-precedence flag or env var keeps that value and
+source after a `PATCH` — the dump shows it, so a pinned key is visibly pinned
+rather than silently ignored. The change survives a restart via the overrides file
+(which lives under the tower's home, never `data_dir`).
 
 ## Downloads
 

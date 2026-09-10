@@ -68,7 +68,40 @@
   download buttons aren't rebuilt mid-click). `saved_path` was already surfaced.
   Web tsc/eslint/vitest green (13 new tests). Terminated-page controls needing
   admin (warning/cancel, extension form) stay Phase 7.
-- **Next**: Phase 7 admin (ADR 0014).
+- **Phase 6 complete.**
+
+## Phase 7 — admin surface, review flow, runtime overrides (done, ADR 0014)
+
+Seven slices, each committed and reviewed:
+
+- **7.1 lifecycle state machine** (done): the five states in the session package —
+  OPEN → TERMINATING (an airlift-admin warning grace window, `Live()=OPEN||
+  TERMINATING`) → TERMINATED → PENDING_REVIEW (one client extension request) → OPEN
+  on accept / REJECTED on reject; `warning_ttl`/`review_ttl` as method arguments; a
+  reopen rebases every clock; the SSE names each transition edge; the two-phase
+  sweep reused, no new closed-flag or dir-delete path. Adversarially reviewed (no
+  correctness findings; stale comments fixed).
+- **7.2 extension route + client UI** (done): `POST …/extension` (client tier,
+  `rate_extension`); the scan/tower pages drive their lifecycle chrome off the
+  status — a TERMINATING warning banner + countdown (still live), a frozen overlay
+  with an extension form → awaiting-review → reopened, or a rejected note.
+- **7.3 admin auth + read routes + SSE** (done): the fifth tier gated by
+  `admin_token` (404/constant-time/`rate_admin`); `GET /api/admin/config`,
+  `…/sessions` (with client addresses), and `…/events` (a 1 s coalesced diff).
+- **7.4 admin mutations** (done): warn/terminate-now, cancel, review, evict, and a
+  no-activity download.
+- **7.5 admin console** (done): a third Vite entry at `/admin` — login,
+  pending-reviews-first, a live table with controls and a review form.
+- **7.6 runtime overrides** (done): a live `PATCH /api/admin/config` that persists
+  to the 0600 overrides file and applies without a restart (a `srv.live` atomic
+  swap + `SetRates`/`SetMax`/`SetLimits`/`SetLifecycle`), plus the settings page.
+- **7.7 ADR 0014 + docs** (done): the `sessions`/`fetch` resolution (fold into
+  `/admin`, ADR 0010 unamended), ADR 0014, and the API.md/CLAUDE.md/README/STATUS
+  updates.
+
+Go gates green under `-race`; web tsc/eslint/vitest green.
+
+- **Next**: Phase 8 — the VPS deployment.
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
@@ -94,24 +127,16 @@
   fountain over the multi bundle yields the frozen index sets and decodes back;
   `beam .` and multi-file naming exercised through the CLI.
 
-## Pending — the rest of Phase 6, then admin and the VPS
+## Pending — the VPS, and hardware validation
 
-- Phase 6 remaining: 6.5–6.7 (below). Phase 7 admin surface; Phase 8 the VPS.
+- Phase 8: the VPS deployment (operator prerequisites, survey/back-up/wipe of the
+  existing `careerdock`, `make vps-bootstrap` + `make deploy`, Caddy TLS).
 - Hardware, still outstanding from Phase 3/4 (now over the hosted, HTTP tower):
   Mac + Android, scan the join QR, scan `beam.html` off the monitor, compare the
   zip download with the source; then a 1 MB bundle in fountain mode at ≥ 8 fps,
   and two phones on one session.
-
-## Next
-
-- 6.7 web lifecycle UI: the terminated page (who ended it, why, the countdown to
-  `cleanup_at`), the clients list, `saved_path` display, and browser ping
-  emission gated on visibility + within 5 min of pointer/key/touch input.
-- Phase 7 admin (ADR 0014): `/admin` + `/api/admin/*` + `admin_token`; the
-  airlift-admin terminate with the `warning_ttl` countdown + `TERMINATING` +
-  cancel; the extension request + `PENDING_REVIEW` + review (accept→reopen /
-  reject) + `REJECTED`; the airlift-admin-only per-session `max_age` override;
-  activation of `warning_ttl`/`review_ttl`/`rate_extension`/`rate_admin`.
+- Deferred from Phase 7: the airlift-admin-only per-session `max_age` override (a
+  one-field extension of the admin terminate route; not in the exit demo).
 
 ## Open questions
 

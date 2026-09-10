@@ -11,9 +11,10 @@ two commands: `beam` inside the air gap, `tower` on the laptop.
 
 Status: **active development** toward a hosted, multi-user tower (see
 [`prompts/002-go-cli-and-hosting.md`](prompts/002-go-cli-and-hosting.md) and
-[`STATUS.md`](STATUS.md)). The tower is now plain HTTP behind a TLS-terminating
-proxy, config-driven from `~/.airlift` (ADR 0012); multi-beam sessions,
-clients, lifecycle and the admin surface are the next steps.
+[`STATUS.md`](STATUS.md)). The tower is plain HTTP behind a TLS-terminating
+proxy, config-driven from `~/.airlift` (ADR 0012); multi-beam sessions, clients,
+the session lifecycle and the admin surface (`/admin`, gated by `admin_token`,
+with live config overrides) are in place. The VPS deployment is the next step.
 
 ## The two commands
 
