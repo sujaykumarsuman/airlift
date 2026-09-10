@@ -29,12 +29,12 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		retryAfter(w, d)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req createReq
 	if err := decodeOptionalJSON(r.Body, &req); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body exceeds %d bytes", srv.opts.MaxBody))
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body exceeds %d bytes", srv.maxBody()))
 			return
 		}
 		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
@@ -75,7 +75,7 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 // (so the session records an effective limit for the 6.6 clocks), while an
 // absent max_gz_bytes leaves the store default.
 func (srv *Server) createParams(req createReq) (session.CreateParams, error) {
-	caps := srv.opts.Caps
+	caps := srv.caps()
 	p := session.CreateParams{Label: req.Label, JoinersAdmin: req.JoinersAdmin, Password: req.Password}
 	if req.MaxGzBytes != nil {
 		v := *req.MaxGzBytes
@@ -123,7 +123,7 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
 		Name string `json:"name"`
 		Role string `json:"role"`
@@ -176,7 +176,7 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
 		Password string `json:"password"`
 		Name     string `json:"name"`
@@ -213,7 +213,7 @@ func (srv *Server) patchSession(w http.ResponseWriter, r *http.Request, s *sessi
 		writeError(w, http.StatusConflict, "session is not open")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, srv.opts.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
 		Password *string `json:"password"`
 	}
