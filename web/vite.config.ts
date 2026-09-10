@@ -26,7 +26,8 @@ function injectBase(): Plugin {
     configurePreviewServer(server) {
       server.middlewares.use((req, _res, next) => {
         const p = (req.url ?? "").split("?")[0];
-        const file = p === "/" || p === "/index.html" ? "index.html" : p === "/scan.html" ? "scan.html" : null;
+        const file =
+          p === "/" || p === "/index.html" ? "index.html" : p === "/scan.html" ? "scan.html" : p === "/admin.html" ? "admin.html" : null;
         if (!file) return next();
         try {
           const html = readFileSync(resolve("dist", file), "utf8");
@@ -40,11 +41,13 @@ function injectBase(): Plugin {
   };
 }
 
-/** Serves scan.html at /s/{sid} in dev and preview, as the tower does. */
+/** Serves scan.html at /s/{sid} and admin.html at /admin in dev and preview, as
+ *  the tower does. */
 function scanRoute(): Plugin {
   const rewrite = (server: ViteDevServer | { middlewares: ViteDevServer["middlewares"] }) => {
     server.middlewares.use((req, _res, next) => {
       if (req.url && /^\/s\/[^/?#]+\/?(\?.*)?$/.test(req.url)) req.url = "/scan.html";
+      else if (req.url && /^\/admin\/?(\?.*)?$/.test(req.url)) req.url = "/admin.html";
       next();
     });
   };
@@ -62,7 +65,7 @@ export default defineConfig({
   plugins: [scanRoute(), injectBase(), ...(ssl ? [basicSsl()] : [])],
   build: {
     rollupOptions: {
-      input: { tower: "index.html", scan: "scan.html" },
+      input: { tower: "index.html", scan: "scan.html", admin: "admin.html" },
     },
     target: "es2020",
     sourcemap: false,

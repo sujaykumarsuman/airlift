@@ -76,6 +76,20 @@ export interface Snapshot {
   expires_at: string;
 }
 
+/** One row of GET /api/admin/config (a setting's value, source and mutability). */
+export interface ConfigKey {
+  name: string;
+  value: string;
+  source: string;
+  live: boolean;
+}
+
+/** One session row in the admin list: the snapshot plus operator-only fields. */
+export interface AdminRow extends Snapshot {
+  label: string;
+  addresses: Record<string, string>;
+}
+
 export interface Info {
   version: string;
   public_url: string;

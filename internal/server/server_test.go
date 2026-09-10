@@ -1197,7 +1197,7 @@ func TestAdminDisabled(t *testing.T) {
 
 func TestStaticAndInfo(t *testing.T) {
 	h := start(t, func(o *Options) { o.Version = "test-1"; o.Caps = Caps{Sessions: 4, MaxGzBytes: 64 << 20} })
-	for _, p := range []string{"/", "/s/abc"} {
+	for _, p := range []string{"/", "/s/abc", "/admin"} {
 		resp, body := h.do(t, "GET", p, "", "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), "text/html") || !strings.Contains(string(body), "airlift") {
 			t.Fatalf("%s: %s %q", p, resp.Status, body)
@@ -1224,6 +1224,7 @@ func TestStaticAndInfo(t *testing.T) {
 	web := fstest.MapFS{
 		"index.html":           {Data: []byte("<!--airlift-base--><title>dash</title>")},
 		"scan.html":            {Data: []byte("<!--airlift-base--><title>scan</title>")},
+		"admin.html":           {Data: []byte(`<!--airlift-base--><title>airlift admin</title>`)},
 		"assets/app.js":        {Data: []byte("console.log(1)")},
 		"assets/app.css":       {Data: []byte("body{}")},
 		"sw.js":                {Data: []byte("self.x=1")},
@@ -1231,7 +1232,7 @@ func TestStaticAndInfo(t *testing.T) {
 		"icons/icon-192.png":   {Data: []byte("PNG")},
 	}
 	h2 := start(t, func(o *Options) { o.Web = web })
-	for p, want := range map[string]string{"/": "dash", "/s/xyz": "scan", "/assets/app.js": "console.log(1)",
+	for p, want := range map[string]string{"/": "dash", "/s/xyz": "scan", "/admin": `<base href="/">`, "/assets/app.js": "console.log(1)",
 		"/sw.js": "self.x=1", "/manifest.webmanifest": "airlift", "/icons/icon-192.png": "PNG"} {
 		resp, body := h2.do(t, "GET", p, "", "", nil)
 		if resp.StatusCode != 200 || !strings.Contains(string(body), want) {

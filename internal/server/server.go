@@ -137,6 +137,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("DELETE /api/admin/sessions/{sid}/clients/{cid}", srv.adminSess(srv.adminEvict))
 	m.HandleFunc("GET /api/admin/sessions/{sid}/download", srv.adminSess(srv.adminDownload))
 	m.HandleFunc("GET /s/{sid}", srv.page("scan.html", scanPlaceholder))
+	m.HandleFunc("GET /admin", srv.page("admin.html", adminPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
 	if srv.opts.Web != nil {
 		m.Handle("GET /assets/", http.FileServerFS(srv.opts.Web))
@@ -557,6 +558,10 @@ const dashboardPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSenti
 
 const scanPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift scan</title>
 <p>airlift scan page: the camera relay lives in the web build.</p>
+`
+
+const adminPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift admin</title>
+<p>airlift admin page: the operator console lives in the web build.</p>
 `
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

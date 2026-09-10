@@ -81,6 +81,24 @@ ul.paths { margin: 0.25rem 0 0.75rem; padding-left: 1.25rem; columns: 2; }
   ul.paths { columns: 1; }
 }
 
+/* ---- admin ---- */
+.create-options { display: grid; gap: 0.5rem; }
+.create-options label { display: grid; gap: 0.2rem; }
+.create-options input[type="text"], .create-options input[type="password"] {
+  font: inherit; padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--line); max-width: 24rem;
+}
+.admin-rows { display: grid; gap: 0.75rem; }
+.admin-row { border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem; }
+.admin-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; }
+.admin-row-head .clock { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.admin-row .controls { margin-top: 0.5rem; }
+.review { border-top: 1px solid var(--line); padding: 0.5rem 0; }
+.review:first-of-type { border-top: 0; }
+.clients { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; gap: 0.25rem; }
+.clients li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.clients li.off .who { color: var(--muted); }
+.clients .tags { color: var(--muted); font-size: 0.9em; }
+
 /* ---- scan ---- */
 .scan { background: #000; color: #fff; overflow: hidden; height: 100dvh; }
 .scan video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }

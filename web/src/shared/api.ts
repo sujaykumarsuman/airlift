@@ -1,4 +1,4 @@
-import type { Client, Created, CreateOptions, IngestResult, Info, Joined, Snapshot } from "./types";
+import type { Client, ConfigKey, Created, CreateOptions, IngestResult, Info, Joined, Snapshot } from "./types";
 
 export type FetchFn = typeof fetch;
 
@@ -202,6 +202,66 @@ export async function fetchDownload(
   const resp = await fetchFn(apiURL(`api/sessions/${sid}/download?${query}`), {
     headers: clientHeaders(token, clientId),
   });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+  return { blob: await resp.blob(), filename: parseFilename(resp.headers.get("Content-Disposition"), as) };
+}
+
+// ---- admin surface (ADR 0014): the admin_token is the Bearer on every call ----
+
+export function adminEventsURL(): string {
+  return apiURL("api/admin/events");
+}
+
+/** Probes the admin surface with a token; the config dump doubles as the login
+ *  check (200 = valid, 401 = wrong, 404 = admin disabled). */
+export function getAdminConfig(token: string, fetchFn: FetchFn = fetch): Promise<{ keys: ConfigKey[] }> {
+  return fetchFn(apiURL("api/admin/config"), { headers: clientHeaders(token), cache: "no-store" }).then((r) =>
+    expectJSON<{ keys: ConfigKey[] }>(r),
+  );
+}
+
+/** Merges live-key changes into the overrides file and returns the fresh dump. */
+export function patchAdminConfig(token: string, changes: Record<string, string>, fetchFn: FetchFn = fetch): Promise<{ keys: ConfigKey[] }> {
+  return fetchFn(apiURL("api/admin/config"), {
+    method: "PATCH",
+    headers: { ...clientHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ changes }),
+  }).then((r) => expectJSON<{ keys: ConfigKey[] }>(r));
+}
+
+async function adminAction(method: string, path: string, token: string, body: unknown, fetchFn: FetchFn): Promise<void> {
+  const resp = await fetchFn(apiURL(path), {
+    method,
+    headers: body === undefined ? clientHeaders(token) : { ...clientHeaders(token), "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
+/** Terminate a session: with a warning countdown, or immediately (now). */
+export function adminTerminate(token: string, sid: string, now: boolean, fetchFn: FetchFn = fetch): Promise<void> {
+  return adminAction("DELETE", `api/admin/sessions/${sid}${now ? "?now" : ""}`, token, undefined, fetchFn);
+}
+export function adminCancel(token: string, sid: string, fetchFn: FetchFn = fetch): Promise<void> {
+  return adminAction("POST", `api/admin/sessions/${sid}/cancel-termination`, token, undefined, fetchFn);
+}
+export function adminReview(token: string, sid: string, decision: "accept" | "reject", note: string, fetchFn: FetchFn = fetch): Promise<void> {
+  return adminAction("POST", `api/admin/sessions/${sid}/review`, token, { decision, note }, fetchFn);
+}
+export function adminEvict(token: string, sid: string, cid: string, fetchFn: FetchFn = fetch): Promise<void> {
+  return adminAction("DELETE", `api/admin/sessions/${sid}/clients/${cid}`, token, undefined, fetchFn);
+}
+
+/** Downloads a beam as the operator (no activity is marked). */
+export async function fetchAdminDownload(
+  token: string,
+  sid: string,
+  bid: string,
+  as: string,
+  fetchFn: FetchFn = fetch,
+): Promise<{ blob: Blob; filename: string }> {
+  const query = `beam=${encodeURIComponent(bid)}&as=${encodeURIComponent(as)}`;
+  const resp = await fetchFn(apiURL(`api/admin/sessions/${sid}/download?${query}`), { headers: clientHeaders(token) });
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
   return { blob: await resp.blob(), filename: parseFilename(resp.headers.get("Content-Disposition"), as) };
 }
