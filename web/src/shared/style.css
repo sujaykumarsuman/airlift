@@ -103,6 +103,9 @@ ul.paths { margin: 0.25rem 0 0.75rem; padding-left: 1.25rem; columns: 2; }
 .clients li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 .clients li.off .who { color: var(--muted); }
 .clients .tags { color: var(--muted); font-size: 0.9em; }
+.knocks { list-style: none; margin: 0.25rem 0 0; padding: 0; display: grid; gap: 0.35rem; }
+.knocks li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.knocks .who { font-weight: 500; }
 .settings { border-collapse: collapse; width: 100%; }
 .settings th { text-align: left; padding: 0.3rem 0.6rem 0.3rem 0; white-space: nowrap; font-weight: 600; vertical-align: top; }
 .settings td { padding: 0.3rem 0.4rem; vertical-align: top; }

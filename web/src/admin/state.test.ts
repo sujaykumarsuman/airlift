@@ -14,6 +14,7 @@ const row = (sid: string, status: Status, over: Partial<AdminRow> = {}): AdminRo
   expires_at: "2026-09-10T00:00:00Z",
   reopenable: false,
   has_password: false,
+  knocks: [],
   label: "",
   addresses: {},
   ...over,

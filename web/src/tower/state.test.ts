@@ -31,6 +31,7 @@ const place = (beams: Beam[]): Snapshot => ({
   expires_at: "2026-09-09T12:00:00Z",
   reopenable: false,
   has_password: false,
+  knocks: [],
 });
 
 test("empty place has no beam views", () => {

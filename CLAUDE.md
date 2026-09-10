@@ -135,9 +135,16 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
     password (`/join` → token, loaded on the device). Guessing an id grants
     nothing. The home page is Create (password + joiners-admin only) + Join-by-id;
     the snapshot carries `has_password`; the dashboard shows a Participants list and
-    keeps session controls separate from beam actions. Public-id-without-token
-    ("needs its link") becomes an admin **admission/knock** flow in stage 2.
-    (ADR 0020)
+    keeps session controls separate from beam actions. Opening a public id without
+    the token goes to the admission flow below. (ADR 0020)
+21. Admission (knock): a client with a public session's id but not its token
+    `POST …/knock {name?}` (public, rate-limited) → a pending request keyed by
+    address; a password/missing/non-live session 404s (like `/join`, so a bare id
+    reveals nothing). The knocker polls `GET …/knock` (pending/admitted-with-token/
+    denied); a session admin `POST …/knock/{id} {decision}` admits (poll returns
+    the token) or denies. The snapshot carries `knocks:[{id,name,at}]` (no address);
+    the dashboard shows Requests-to-join (Admit/Deny) and the knocker a
+    Waiting-to-be-let-in screen. The token is issued only on admit. (ADR 0021)
 
 ## Non-goals
 

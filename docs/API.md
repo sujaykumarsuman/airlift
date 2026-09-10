@@ -27,6 +27,9 @@ POST   /api/sessions/{sid}/extension  client → body {reason?}; 204; request mo
 GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes (409 while suspended)
 PATCH  /api/sessions/{sid}            s-admin → body {password} (set or, with "", clear)
 POST   /api/sessions/{sid}/max-age    s-admin → 200 {expires_at}; +1h before the max_age cap (ADR 0018)
+POST   /api/sessions/{sid}/knock      public → body {name?} → {id, status}; ask to be admitted (ADR 0021)
+GET    /api/sessions/{sid}/knock      public → {status: pending|admitted|denied|none, token?} (poll)
+POST   /api/sessions/{sid}/knock/{kid}  s-admin → body {decision:"admit"|"deny"}; resolve a pending knock
 DELETE /api/sessions/{sid}/clients/{cid}  s-admin → evict a client's address
 DELETE /api/sessions/{sid}/beams/{bid}    s-admin → remove a beam and its files
 DELETE /api/sessions/{sid}[?hard]     s-admin → soft-terminate (freeze, keep files), or ?hard purge now
@@ -77,7 +80,7 @@ address (`POST …/clients`, or minted by create/join). The id is rechecked
 against the caller's address on every call, so it is not a secret. There are
 four tiers:
 
-- **public** — no auth: create, join, `/api/info`, static pages.
+- **public** — no auth: create, join, knock + poll (ADR 0021), `/api/info`, pages.
 - **token** — a valid token, no client needed: register a client.
 - **client** — token + a registered, non-evicted client whose id matches the
   caller's address: snapshot, events, frames, ping, extension, download.
@@ -179,6 +182,7 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `expires_at` | RFC 3339 | the earliest applicable deadline (see Lifecycle): the OPEN clock, the `TERMINATING` warning, the `PENDING_REVIEW` review deadline, or the cleanup time |
 | `reopenable` | bool | true when the session was suspended by inactivity and opening its link would revive it (ADR 0018); while true, access is revoked (downloads `409`) |
 | `has_password` | bool | a join password is set, so the share link is the id alone (no token) and joiners enter the password (ADR 0020) |
+| `knocks` | object[] | pending admission requests `{id, name, at}` (no address), oldest first — a session admin admits/denies each (ADR 0021) |
 
 Each entry of `beams` is:
 

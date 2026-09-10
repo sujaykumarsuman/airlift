@@ -195,6 +195,38 @@ export async function postExtendMaxAge(
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
+/** Knock: ask a public session's admin to be let in — no token, no password (ADR
+ *  0021). 404 means the session needs its link or does not exist. */
+export function postKnock(sid: string, name: string, fetchFn: FetchFn = fetch): Promise<{ id: string; status: string }> {
+  return fetchFn(apiURL(`api/sessions/${sid}/knock`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).then((r) => expectJSON<{ id: string; status: string }>(r));
+}
+
+/** Poll a knock's admission state; `token` is present once admitted. */
+export function getKnockStatus(sid: string, fetchFn: FetchFn = fetch): Promise<{ status: string; token?: string }> {
+  return fetchFn(apiURL(`api/sessions/${sid}/knock`), { cache: "no-store" }).then((r) => expectJSON<{ status: string; token?: string }>(r));
+}
+
+/** Admit or deny a pending knock by id (session admin, ADR 0021). */
+export async function resolveKnock(
+  sid: string,
+  token: string,
+  clientId: string,
+  kid: string,
+  decision: "admit" | "deny",
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/knock/${kid}`), {
+    method: "POST",
+    headers: { ...clientHeaders(token, clientId), "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
 /** True for the 403 {error:"evicted"} an evicted address receives. */
 export function isEvicted(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 && err.message === "evicted";

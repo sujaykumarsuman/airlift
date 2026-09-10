@@ -2,8 +2,10 @@ package session
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sync"
@@ -197,6 +199,10 @@ type Session struct {
 	usedNames   map[string]bool
 	evicted     map[string]bool
 
+	knocks     map[string]*Knock // admission requests by id (ADR 0021)
+	knockAddr  map[string]string // address → knock id, for the poll
+	knockOrder []string          // knock ids in arrival order, for a stable snapshot
+
 	label        string
 	joinersAdmin bool
 
@@ -248,10 +254,30 @@ type Extension struct {
 	DecidedAt *time.Time `json:"decided_at,omitempty"`
 }
 
+// Knock is a pending admission request to a public (password-less) session from
+// a client that has the id but not the token (ADR 0021). The session admin admits
+// or denies it; on admit the knocker's poll receives the token. Addr is the
+// caller's address (never in the snapshot); Name is what they typed.
+type Knock struct {
+	ID    string
+	Addr  string
+	Name  string
+	At    time.Time
+	State string // "pending" | "admitted" | "denied"
+}
+
+// KnockView is the snapshot form of a pending knock: no address, so it carries no
+// PII; the id lets a session admin admit/deny it.
+type KnockView struct {
+	ID   string    `json:"id"`
+	Name string    `json:"name"`
+	At   time.Time `json:"at"`
+}
+
 // LifecycleEvent is one entry of the session's append-only lifecycle log.
 type LifecycleEvent struct {
 	At     time.Time `json:"at"`
-	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminating | termination_cancelled | terminated | extension_requested | reopened | rejected | max_age_extended
+	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminating | termination_cancelled | terminated | extension_requested | reopened | rejected | max_age_extended | knock | admitted | knock_denied
 	By     string    `json:"by,omitempty"`
 	Reason string    `json:"reason,omitempty"`
 	BID    string    `json:"bid,omitempty"`
@@ -556,6 +582,91 @@ func (s *Session) ExtendMaxAge(d time.Duration) bool {
 	}
 	s.maxAgeBonus += d
 	s.events = append(s.events, LifecycleEvent{At: s.now(), Event: "max_age_extended", By: "session admin"})
+	s.notifyLocked()
+	return true
+}
+
+const maxKnocks = 20 // pending-admission cap per session (ADR 0021)
+
+// randKnockID returns a short random id for a knock.
+func randKnockID() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// Knock records (or refreshes) a pending admission request from addr to a public,
+// live session (ADR 0021), returning its id. It fails for a password session
+// (those use the password), a non-live session, or at the pending cap.
+func (s *Session) Knock(addr, name string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.status.Live() || s.passHash != nil {
+		return "", false
+	}
+	if s.knocks == nil {
+		s.knocks, s.knockAddr = map[string]*Knock{}, map[string]string{}
+	}
+	now := s.now()
+	if id, ok := s.knockAddr[addr]; ok { // refresh this address's existing request
+		k := s.knocks[id]
+		k.Name, k.At = name, now
+		if k.State == "denied" {
+			k.State = "pending" // allow a fresh attempt after a denial
+		}
+		s.notifyLocked()
+		return id, true
+	}
+	pending := 0
+	for _, k := range s.knocks {
+		if k.State == "pending" {
+			pending++
+		}
+	}
+	if pending >= maxKnocks {
+		return "", false
+	}
+	id := randKnockID()
+	s.knocks[id] = &Knock{ID: id, Addr: addr, Name: name, At: now, State: "pending"}
+	s.knockAddr[addr] = id
+	s.knockOrder = append(s.knockOrder, id)
+	s.events = append(s.events, LifecycleEvent{At: now, Event: "knock", By: name})
+	s.notifyLocked()
+	return id, true
+}
+
+// KnockState is the admission state for addr's knock: "pending", "admitted" (with
+// the session token), "denied", or "none". A knocker polls this after knocking.
+func (s *Session) KnockState(addr string) (state, token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.knockAddr[addr]
+	if !ok {
+		return "none", ""
+	}
+	if k := s.knocks[id]; k.State == "admitted" {
+		return "admitted", s.Token
+	}
+	return s.knocks[id].State, ""
+}
+
+// ResolveKnock admits or denies a pending knock by id (session admin, ADR 0021).
+// Returns false if there is no such pending knock.
+func (s *Session) ResolveKnock(id string, admit bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := s.knocks[id]
+	if k == nil || k.State != "pending" {
+		return false
+	}
+	now := s.now()
+	if admit {
+		k.State = "admitted"
+		s.events = append(s.events, LifecycleEvent{At: now, Event: "admitted", By: k.Name})
+	} else {
+		k.State = "denied"
+		s.events = append(s.events, LifecycleEvent{At: now, Event: "knock_denied", By: k.Name})
+	}
 	s.notifyLocked()
 	return true
 }
@@ -1055,6 +1166,7 @@ type Snapshot struct {
 	ExpiresAt   time.Time        `json:"expires_at"`   // the earliest applicable deadline
 	Reopenable  bool             `json:"reopenable"`   // opening the link would revive an inactivity-suspended session (ADR 0018)
 	HasPassword bool             `json:"has_password"` // a join password is set, so the share link omits the token (ADR 0020)
+	Knocks      []KnockView      `json:"knocks"`       // pending admission requests, oldest first (ADR 0021)
 }
 
 // BeamSnapshot is one beam's state within a place.
@@ -1081,7 +1193,12 @@ func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, ExpiresAt: s.bindingDeadlineLocked(), Reopenable: s.reopenableLocked(), HasPassword: s.passHash != nil}
+	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, Knocks: []KnockView{}, ExpiresAt: s.bindingDeadlineLocked(), Reopenable: s.reopenableLocked(), HasPassword: s.passHash != nil}
+	for _, id := range s.knockOrder {
+		if k := s.knocks[id]; k != nil && k.State == "pending" {
+			snap.Knocks = append(snap.Knocks, KnockView{ID: k.ID, Name: k.Name, At: k.At})
+		}
+	}
 	if s.term != nil {
 		t := *s.term
 		snap.Terminated = &t

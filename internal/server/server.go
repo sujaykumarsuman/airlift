@@ -140,6 +140,9 @@ func (srv *Server) routes() {
 	m.HandleFunc("POST /api/sessions/{sid}/ping", srv.client(srv.ping))
 	m.HandleFunc("POST /api/sessions/{sid}/extension", srv.client(srv.extension))
 	m.HandleFunc("POST /api/sessions/{sid}/max-age", srv.sessionAdmin(srv.extendMaxAge))
+	m.HandleFunc("POST /api/sessions/{sid}/knock", srv.withSession(srv.knock))
+	m.HandleFunc("GET /api/sessions/{sid}/knock", srv.withSession(srv.knockPoll))
+	m.HandleFunc("POST /api/sessions/{sid}/knock/{kid}", srv.sessionAdmin(srv.knockResolve))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.client(srv.download))
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.sessionAdmin(srv.deleteSession))
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
@@ -380,6 +383,70 @@ func (srv *Server) extendMaxAge(w http.ResponseWriter, _ *http.Request, s *sessi
 	}
 	srv.opts.Logf("session %s max_age extended by an hour", s.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"expires_at": s.ExpiresAt()})
+}
+
+// knock records a pending admission request from a client that has a public
+// session's id but not its token (ADR 0021). A password session (or a missing/
+// non-live one) 404s — indistinguishable, like /join — so a bare id reveals
+// nothing. The knocker then polls GET …/knock until an admin admits it.
+func (srv *Server) knock(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	addr := srv.clientAddr(r)
+	if d, ok := srv.lim.allow(rlJoin, addr); !ok {
+		retryAfter(w, d)
+		return
+	}
+	if s.Evicted(addr) {
+		writeError(w, http.StatusForbidden, "evicted")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := decodeOptionalJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	id, ok := s.Knock(addr, req.Name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such session")
+		return
+	}
+	srv.opts.Logf("session %s knock", s.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "pending"})
+}
+
+// knockPoll reports this address's admission state: pending, admitted (with the
+// token), denied, or none. Public and cheap — a knocker polls it while it waits.
+func (srv *Server) knockPoll(w http.ResponseWriter, r *http.Request, s *session.Session) {
+	state, token := s.KnockState(srv.clientAddr(r))
+	resp := map[string]any{"status": state}
+	if state == "admitted" {
+		resp["token"] = token
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// knockResolve admits or denies a pending knock by id (session admin, ADR 0021).
+func (srv *Server) knockResolve(w http.ResponseWriter, r *http.Request, s *session.Session, _ *session.Client) {
+	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
+	var req struct {
+		Decision string `json:"decision"`
+	}
+	if err := decodeOptionalJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	if req.Decision != "admit" && req.Decision != "deny" {
+		writeError(w, http.StatusBadRequest, "decision must be \"admit\" or \"deny\"")
+		return
+	}
+	if !s.ResolveKnock(r.PathValue("kid"), req.Decision == "admit") {
+		writeError(w, http.StatusConflict, "no such pending request")
+		return
+	}
+	srv.opts.Logf("session %s knock %s", s.ID, req.Decision)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {

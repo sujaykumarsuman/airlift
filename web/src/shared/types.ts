@@ -50,6 +50,13 @@ export interface Termination {
   cleanup_at: string;
 }
 
+/** A pending admission request to a public session (ADR 0021); no address. */
+export interface KnockView {
+  id: string;
+  name: string;
+  at: string;
+}
+
 /** The five lifecycle states (ADR 0013/0014). Live() = OPEN | TERMINATING. */
 export type Status = "OPEN" | "TERMINATING" | "TERMINATED" | "PENDING_REVIEW" | "REJECTED";
 
@@ -76,6 +83,7 @@ export interface Snapshot {
   expires_at: string;
   reopenable: boolean; // suspended by inactivity — opening the link revives it (ADR 0018)
   has_password: boolean; // a join password is set — the share link omits the token (ADR 0020)
+  knocks: KnockView[]; // pending admission requests, oldest first (ADR 0021)
 }
 
 /** One row of GET /api/admin/config (a setting's value, source and mutability). */

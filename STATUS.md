@@ -184,9 +184,10 @@ past 30 min, End/Delete now, and a live hard-delete → 404.
 
 - **Phase 10 complete.**
 
-## Phase 11 — session URLs, human ids, password gate (stage 1 done, ADR 0020)
+## Phase 11 — session URLs, human ids, password gate, admission (done, ADR 0020/0021)
 
-Staged: stage 1 (this) is identity + joining; stage 2 is the admission/knock flow.
+Staged: stage 1 is identity + joining (ADR 0020); stage 2 is the admission/knock
+flow (ADR 0021).
 
 - **Human ids + URLs**: a session id is `xxx-xxx-xxx` (three lowercase triples,
   `Store.freshIDLocked`, `session.ValidID`); every session lives at `<base>/<sid>`
@@ -208,8 +209,18 @@ split); web tsc/eslint/vitest green (46). Verified in-browser: create → path U
 token-in-fragment stripped to storage; a password session's id-only link → password
 prompt → join; a public id without its token → "needs its link"; Participants list.
 
-- **Stage 2 (next)**: opening a public id without its token becomes an
-  admission/knock flow (admin admits → token issued).
+- **Stage 2 — admission/knock** (done, ADR 0021): opening a public id without its
+  token now goes to a knock flow — `POST …/knock {name?}` (public, rate-limited) →
+  pending request keyed by address (a password/missing session 404s, so a bare id
+  reveals nothing); the knocker polls `GET …/knock` (pending/admitted-with-token/
+  denied); a session admin `POST …/knock/{id} {decision}` admits (poll returns the
+  token) or denies. Snapshot carries `knocks:[{id,name,at}]` (no address). The
+  dashboard shows Requests-to-join (Admit/Deny) and the knocker a
+  Waiting-to-be-let-in screen. Go `-race` green (knock/admit/deny + password-404);
+  web green. Verified in-browser end-to-end: knock gate → waiting → admin admits →
+  the browser is let into the dashboard.
+
+- **Phase 11 complete.**
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 

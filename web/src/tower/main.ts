@@ -1,12 +1,12 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, joinSession, postExtension, postExtendMaxAge, postPing, registerClient } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, resolveKnock } from "../shared/api";
 import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { formatBytes, formatDuration } from "../shared/format";
 import { cleanupCountdown, expiryCountdown, instantMs, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { Beam, ClientSummary, CreateOptions, Snapshot, State, Verdict } from "../shared/types";
+import type { Beam, ClientSummary, CreateOptions, KnockView, Snapshot, State, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
 import { type BeamView, failedStage, initialView, reduce, tick, type View } from "./state";
 
@@ -63,6 +63,7 @@ let ticker: ReturnType<typeof setInterval> | null = null;
 let notice = "";
 let pinger: Pinger | null = null;
 let clocksClosed = false; // guards the one-shot re-render when the cleanup countdown ends
+let knockTimer: ReturnType<typeof setInterval> | null = null; // polls a pending knock (ADR 0021)
 
 // The app root, incl. any path prefix from the injected <base href>.
 const appBase = new URL("./", document.baseURI).toString();
@@ -147,7 +148,7 @@ async function probeGate(sid: string): Promise<void> {
       return;
     }
   }
-  renderNeedLink(sid);
+  renderKnockGate(sid); // public (or missing) — ask to be admitted (ADR 0021)
 }
 
 async function create(opts: CreateOptions = {}): Promise<void> {
@@ -230,14 +231,85 @@ async function passwordJoin(sid: string, password: string, name: string): Promis
   }
 }
 
-// A public session opened without its token (or a missing session): the token is
-// required, so point the visitor at the full link.
-function renderNeedLink(sid: string): void {
+// A public session opened without its token: ask the session admin to admit you
+// (ADR 0021). No token, no password — the admin is the gate.
+function renderKnockGate(sid: string): void {
   newButton.hidden = false;
   statusEl.innerHTML = "";
   sessionEl.innerHTML = html`<div class="card">
-    <h2>Session <code>${sid}</code></h2>
-    <p class="warn">${notice || "This session needs its full join link (the one with the access token), or it no longer exists."}</p>
+    <h2>Join <code>${sid}</code></h2>
+    <p>This session is invite-only from a bare id. Ask the session admin to let you in.</p>
+    <form id="knock-form" class="create-options">
+      <label>Your name <input id="knock-name" type="text" placeholder="so the admin knows who you are" /></label>
+      <p><button class="btn primary" type="submit">Ask to join</button></p>
+      ${notice ? html`<p class="warn">${notice}</p>` : ""}
+    </form>
+  </div>`.html;
+  $<HTMLFormElement>("#knock-form", sessionEl).addEventListener("submit", (e) => {
+    e.preventDefault();
+    void knock(sid, $<HTMLInputElement>("#knock-name", sessionEl).value.trim());
+  });
+}
+
+async function knock(sid: string, name: string): Promise<void> {
+  notice = "";
+  try {
+    await postKnock(sid, name);
+    renderWaiting(sid);
+    startKnockPoll(sid);
+  } catch (err) {
+    notice = err instanceof ApiError && err.status === 404 ? "That session needs its full link, or no longer exists." : err instanceof Error ? err.message : String(err);
+    renderKnockGate(sid);
+  }
+}
+
+function renderWaiting(sid: string): void {
+  newButton.hidden = false;
+  statusEl.innerHTML = "";
+  sessionEl.innerHTML = html`<div class="card">
+    <h2>Waiting to be let in</h2>
+    <p class="muted">Your request to join <code>${sid}</code> is with the session admin. This will update when they respond.</p>
+  </div>`.html;
+}
+
+function startKnockPoll(sid: string): void {
+  stopKnockPoll();
+  knockTimer = setInterval(() => void pollKnock(sid), 3000);
+}
+function stopKnockPoll(): void {
+  if (knockTimer !== null) {
+    clearInterval(knockTimer);
+    knockTimer = null;
+  }
+}
+
+async function pollKnock(sid: string): Promise<void> {
+  let res: { status: string; token?: string };
+  try {
+    res = await getKnockStatus(sid);
+  } catch {
+    return; // transient; the next tick retries
+  }
+  if (res.status === "admitted" && res.token) {
+    stopKnockPoll();
+    current = { sid, token: res.token, client_id: "", name: "", hasPassword: false };
+    saveStored(current);
+    await enterWithToken();
+  } else if (res.status === "denied") {
+    stopKnockPoll();
+    renderDenied(sid);
+  } else if (res.status === "none") {
+    stopKnockPoll();
+    renderKnockGate(sid); // the request was lost — ask again
+  }
+}
+
+function renderDenied(sid: string): void {
+  newButton.hidden = false;
+  statusEl.innerHTML = "";
+  sessionEl.innerHTML = html`<div class="card">
+    <h2>Not admitted</h2>
+    <p class="warn">The session admin declined your request to join <code>${sid}</code>.</p>
     <p><a class="btn" href="${appBase}">Home</a></p>
   </div>`.html;
 }
@@ -422,6 +494,12 @@ function renderStatus(): void {
       ${s.status !== "OPEN" && s.status !== "TERMINATING" ? terminatedPanel(s, Date.now()) : ""}
       <p class="section-label">Participants (${s.clients.length})</p>
       <ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>
+      ${
+        iAmAdmin && s.knocks.length
+          ? html`<p class="section-label">Requests to join (${s.knocks.length})</p>
+              <ul class="knocks">${s.knocks.map((k) => knockRow(k))}</ul>`
+          : ""
+      }
       ${iAmAdmin ? adminControls(s) : ""}
     </div>
     <div class="beams-head">
@@ -445,6 +523,12 @@ function renderStatus(): void {
   );
   statusEl.querySelectorAll<HTMLButtonElement>("[data-remove-beam]").forEach((btn) =>
     btn.addEventListener("click", () => void removeBeam(btn.dataset.removeBeam ?? "")),
+  );
+  statusEl.querySelectorAll<HTMLButtonElement>("[data-admit]").forEach((btn) =>
+    btn.addEventListener("click", () => void resolveKnockClick(btn.dataset.admit ?? "", "admit")),
+  );
+  statusEl.querySelectorAll<HTMLButtonElement>("[data-deny]").forEach((btn) =>
+    btn.addEventListener("click", () => void resolveKnockClick(btn.dataset.deny ?? "", "deny")),
   );
   statusEl.querySelector<HTMLFormElement>("#ext-form")?.addEventListener("submit", onExtensionSubmit);
   statusEl.querySelector<HTMLButtonElement>("#reopen-btn")?.addEventListener("click", onReopen);
@@ -635,6 +719,25 @@ function updateClocks(now: number): void {
     }
     const el = statusEl.querySelector<HTMLElement>("#cleanup");
     if (el) el.textContent = c.text;
+  }
+}
+
+/** One pending admission request; a session admin admits or denies it (ADR 0021). */
+function knockRow(k: KnockView): Raw {
+  return html`<li>
+    <span class="who">${k.name || "(anonymous)"}</span>
+    <button class="btn small primary" data-admit="${k.id}">Admit</button>
+    <button class="btn small" data-deny="${k.id}">Deny</button>
+  </li>`;
+}
+
+async function resolveKnockClick(kid: string, decision: "admit" | "deny"): Promise<void> {
+  if (!current || !kid) return;
+  try {
+    await resolveKnock(current.sid, current.token, current.client_id, kid, decision);
+  } catch (err) {
+    notice = `Could not ${decision} the request: ${err instanceof Error ? err.message : String(err)}`;
+    renderStatus();
   }
 }
 
