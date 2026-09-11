@@ -8,11 +8,17 @@
   </head>
   <body class="tower">
     <header class="bar">
-      <h1>airlift <span class="muted">tower</span></h1>
-      <button id="new-session" class="btn small" hidden>New session</button>
+      <span class="brand">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M6 6a9 9 0 0 0 0 12M18 6a9 9 0 0 1 0 12"/></svg>
+        airlift <span class="t2">tower</span>
+      </span>
+      <span class="bar-right"><button id="new-session" class="btn small" hidden><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> New session</button></span>
     </header>
-    <main id="app">
-      <section id="session"></section>
+    <main id="app" class="mode-home">
+      <div id="left">
+        <section id="session"></section>
+        <section id="place"></section>
+      </div>
       <section id="status"></section>
     </main>
     <script type="module" src="/src/tower/main.ts"></script>

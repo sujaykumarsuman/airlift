@@ -15,8 +15,10 @@
     <div id="hud">
       <div class="top">
         <div id="warning" class="warning-banner" hidden></div>
-        <div id="progress" class="big">…</div>
-        <div id="state" class="state"></div>
+        <div class="statusline">
+          <div id="progress" class="big">…</div>
+          <div id="state" class="state"></div>
+        </div>
         <canvas id="bitmap" hidden></canvas>
       </div>
       <div class="bottom">
@@ -25,7 +27,7 @@
         <form id="join-form" class="join-form" hidden>
           <input id="join-name" type="text" placeholder="your name (optional)" />
           <input id="join-password" type="password" placeholder="session password" />
-          <button id="join" class="btn primary" type="submit">Join</button>
+          <button id="join" class="btn primary" type="submit"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="3.4"/><path d="M10.4 12.6L20 3M17 6l2 2"/></svg> Join</button>
         </form>
         <div class="controls">
           <select id="camera" hidden></select>

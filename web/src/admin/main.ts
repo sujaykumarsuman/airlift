@@ -11,6 +11,7 @@ import {
   patchAdminConfig,
 } from "../shared/api";
 import { $, html, raw, type Raw } from "../shared/dom";
+import { icon } from "../shared/icons";
 import { cleanupCountdown, expiryCountdown, terminateCountdown } from "../shared/lifecycle";
 import { subscribe, type SSEStatus } from "../shared/sse";
 import type { AdminRow, ClientSummary, ConfigKey } from "../shared/types";
@@ -145,12 +146,13 @@ function renderLogin(message = ""): void {
   sessionsEl.innerHTML = "";
   settingsEl.innerHTML = "";
   loginEl.innerHTML = html`<div class="card">
-    <h2>Admin sign in</h2>
-    <p class="muted">Enter the tower's admin token to manage every session.</p>
+    <p class="section-label">${icon("lock")} Admin sign in</p>
+    <h2>Manage every session</h2>
+    <p class="muted">Enter the tower's admin token.</p>
     ${message ? html`<p class="warn">${message}</p>` : ""}
     <form id="login-form" class="create-options">
       <label>Admin token <input id="admin-token" type="password" placeholder="admin_token" autocomplete="off" /></label>
-      <p><button class="btn primary" type="submit">Sign in</button></p>
+      <p><button class="btn primary" type="submit">${icon("lock")} Sign in</button></p>
     </form>
   </div>`.html;
   $<HTMLFormElement>("#login-form", loginEl).addEventListener("submit", (e) => {
@@ -180,7 +182,7 @@ function renderReviews(): void {
     return;
   }
   reviewsEl.innerHTML = html`<div class="card">
-    <h2>Pending reviews <span class="badge">${view.pending.length}</span></h2>
+    <p class="section-label">${icon("bell")} Pending reviews <span class="count">${view.pending.length}</span></p>
     ${view.pending.map((s) => reviewCard(s))}
   </div>`.html;
   for (const s of view.pending) {
@@ -197,8 +199,8 @@ function reviewCard(s: AdminRow): Raw {
     </p>
     <div class="controls">
       <input id="note-${s.sid}" type="text" placeholder="note (optional)" />
-      <button id="accept-${s.sid}" class="btn small primary" type="button">Accept — reopen</button>
-      <button id="reject-${s.sid}" class="btn small" type="button">Reject</button>
+      <button id="accept-${s.sid}" class="btn small primary" type="button">${icon("check")} Accept — reopen</button>
+      <button id="reject-${s.sid}" class="btn small" type="button">${icon("cross")} Reject</button>
     </div>
   </div>`;
 }
@@ -213,8 +215,8 @@ function renderSessions(): void {
     ${notice ? html`<p class="warn">${notice}</p>` : ""}
     <div class="card">
       <div class="head">
-        <h2>Sessions <span class="badge">${view.rows.length}</span></h2>
-        <span class="muted">link ${connection}</span>
+        <span class="section-label" style="margin:0">${icon("beam")} Sessions <span class="count">${view.rows.length}</span></span>
+        <span class="muted" style="margin-left:auto">link ${connection}</span>
       </div>
       ${view.rows.length === 0
         ? html`<p class="muted">No sessions yet.</p>`
@@ -235,7 +237,7 @@ function sessionRow(s: AdminRow): Raw {
     ${s.clients.length ? html`<ul class="clients">${s.clients.map((c) => adminClientRow(s, c))}</ul>` : ""}
     ${downloadableBeams(s).length
       ? html`<div class="downloads">${downloadableBeams(s).flatMap((b) =>
-          b.downloads.map((d) => html`<button class="btn small" data-dl="${s.sid}" data-bid="${b.bid}" data-as="${d}">↓ ${b.name} · ${d}</button>`),
+          b.downloads.map((d) => html`<button class="btn small" data-dl="${s.sid}" data-bid="${b.bid}" data-as="${d}">${icon("download")} ${b.name} · ${d}</button>`),
         )}</div>`
       : ""}
   </div>`;
@@ -243,12 +245,12 @@ function sessionRow(s: AdminRow): Raw {
 
 function rowControls(s: AdminRow): Raw {
   if (s.status === "OPEN") {
-    return html`<button class="btn small" data-warn="${s.sid}">Terminate…</button
-      ><button class="btn small" data-now="${s.sid}">Terminate now</button>`;
+    return html`<button class="btn small" data-warn="${s.sid}">${icon("clock")} Terminate…</button
+      ><button class="btn small danger" data-now="${s.sid}">${icon("cross")} Terminate now</button>`;
   }
   if (s.status === "TERMINATING") {
-    return html`<button class="btn small primary" data-cancel="${s.sid}">Cancel</button
-      ><button class="btn small" data-now="${s.sid}">Terminate now</button>`;
+    return html`<button class="btn small primary" data-cancel="${s.sid}">${icon("reopen")} Cancel</button
+      ><button class="btn small danger" data-now="${s.sid}">${icon("cross")} Terminate now</button>`;
   }
   return raw("");
 }
@@ -258,7 +260,7 @@ function adminClientRow(s: AdminRow, c: ClientSummary): Raw {
   const tags = [addr, ...(c.session_admin ? ["admin"] : []), ...c.roles].filter(Boolean).join(" · ");
   return html`<li class="${c.connected ? "on" : "off"}">
     <span class="who">${c.name}</span>${tags ? html` <span class="tags">${tags}</span>` : ""}
-    <button class="btn small" data-evict="${s.sid}" data-cid="${c.client_id}">Evict</button>
+    <button class="btn small" data-evict="${s.sid}" data-cid="${c.client_id}">${icon("cross")} Evict</button>
   </li>`;
 }
 
@@ -341,7 +343,7 @@ function renderSettings(): void {
     return;
   }
   settingsEl.innerHTML = html`<div class="card">
-    <h2>Settings</h2>
+    <p class="section-label">${icon("settings")} Live config</p>
     <p class="muted">
       Live keys apply at once and persist to the tower's <code>overrides</code> file; restart-only keys are shown for
       reference. A key pinned by a flag or env var keeps that source until the pin is removed.
@@ -352,7 +354,7 @@ function renderSettings(): void {
           ${keys.map((k) => settingRow(k))}
         </tbody>
       </table>
-      <p><button class="btn primary" type="submit">Save changes</button> <span id="settings-status" class="muted"></span></p>
+      <p><button class="btn primary" type="submit">${icon("settings")} Save changes</button> <span id="settings-status" class="muted"></span></p>
     </form>
   </div>`.html;
   $<HTMLFormElement>("#settings-form", settingsEl).addEventListener("submit", (e) => void onSaveSettings(e));

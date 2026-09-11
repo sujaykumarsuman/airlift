@@ -222,6 +222,33 @@ prompt → join; a public id without its token → "needs its link"; Participant
 
 - **Phase 11 complete.**
 
+## Phase 12 — dark UI revamp (done)
+
+A presentation-only revamp — no protocol, API, or lifecycle change, so no ADR.
+The web UI is now one committed dark theme: near-black ground (`#0b0d10`), teal
+accent (`#35d0c0`), system sans with mono for machine text, and inline stroke
+symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
+
+- **Design canvas** authored with Claude Design (Home, Dashboard, Scanner, Admin,
+  States, Tokens) as the reference for the build; kept out of the repo.
+- **`web/src/shared/icons.ts`** (new): an `icon(name)` helper returning inline
+  SVG (`currentColor`, 1.75 stroke) — the single symbol set.
+- **`web/src/shared/style.css`** rewritten: dark tokens + every component (nav,
+  cards, sections, pills/badges, participants, knocks, beams, verdicts, the scan
+  HUD, the admin table). `[hidden]` made authoritative so the flex/grid rules do
+  not resurrect toggled controls.
+- **Tower** is now a two-column dashboard (share + session panel | beams): the
+  status render splits across a left `#place` and right `#status`, with a
+  `mode-home`/`mode-dash` switch on `#app`; the home/gate screens stay a single
+  centred column. Scanner HUD reshaped (status line + state pill, mono stats,
+  frosted controls); admin reskinned (sessions + live config). Symbols on every
+  action.
+- Verified in-browser against the mockups: Home, Dashboard (create → QR/link,
+  participants, End/Delete), Admin (sign-in → sessions + live config, token
+  masked), Scanner HUD. Go `-race` + web tsc/eslint/vitest (46) green.
+
+- **Phase 12 complete.**
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender
