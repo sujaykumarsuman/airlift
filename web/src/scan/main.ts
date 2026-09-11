@@ -1,6 +1,5 @@
 import "../shared/style.css";
 import { ApiError, eventsURL, joinSession, postExtension, postFrames, postPing, registerClient } from "../shared/api";
-import { decodeBitmap, drawBitmap } from "../shared/bitmap";
 import { $, html, raw } from "../shared/dom";
 import { cleanupCountdown, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
@@ -24,7 +23,8 @@ import { Relay, type RelayStats } from "./relay";
 
 const video = $<HTMLVideoElement>("#video");
 const frameCanvas = $<HTMLCanvasElement>("#frame");
-const bitmapCanvas = $<HTMLCanvasElement>("#bitmap");
+const coverageEl = $<HTMLElement>("#coverage");
+const coverageFill = $<HTMLElement>("#coverage-fill");
 const progressEl = $<HTMLElement>("#progress");
 const stateEl = $<HTMLElement>("#state");
 const statsEl = $<HTMLElement>("#stats");
@@ -366,10 +366,10 @@ function render(): void {
   stateEl.textContent = state.toLowerCase();
   stateEl.dataset.state = state;
   if (beam && total > 0) {
-    bitmapCanvas.hidden = false;
-    drawBitmap(bitmapCanvas, decodeBitmap(beam.bitmap, total), { cell: 6, gap: 1 });
+    coverageEl.hidden = false;
+    coverageFill.style.width = `${Math.min(100, (have / total) * 100).toFixed(1)}%`;
   } else {
-    bitmapCanvas.hidden = true;
+    coverageEl.hidden = true;
   }
   const parts: string[] = [];
   if (decoder) parts.push(decoder.name + (cameraLabel ? ` · ${cameraLabel}` : ""));

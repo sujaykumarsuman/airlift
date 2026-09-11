@@ -36,8 +36,8 @@ export function drawBitmap(canvas: HTMLCanvasElement, bits: Uint8Array, opts: Gr
   if (!ctx) return;
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, width, cssHeight);
-  const have = opts.have ?? "#1a7f37";
-  const missing = opts.missing ?? "#d0d7de";
+  const have = opts.have ?? "#35d0c0"; // accent
+  const missing = opts.missing ?? "#232832"; // a dark cell, visible on the near-black ground
   for (let i = 0; i < bits.length; i++) {
     ctx.fillStyle = bits[i] ? have : missing;
     ctx.fillRect((i % cols) * (cell + gap), Math.floor(i / cols) * (cell + gap), cell, cell);
