@@ -5,6 +5,11 @@ AIRLIFT   := airlift
 MODULE    := github.com/sujaykumarsuman/airlift
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
+# The version stamped into the binary (GET /api/info, the landing footer): the
+# nearest tag from git, or pass VERSION=v1.2.3 — the release workflow passes the tag.
+VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS   := -s -w -X $(MODULE).Version=$(VERSION)
+
 # Deployment (Phase 8, docs/HOSTING.md). VPS is an ssh host alias; DOMAIN is the
 # public hostname whose A record points at the VPS; PREFIX is the path airlift is
 # mounted under (Caddy strips it, ADR 0012); PUBLIC_URL is what the tower advertises.
@@ -36,7 +41,7 @@ web-test: web/node_modules
 ## ---- airlift (Go) ----
 airlift: web
 	mkdir -p $(BIN)
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN)/$(AIRLIFT) ./cmd/airlift
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o $(BIN)/$(AIRLIFT) ./cmd/airlift
 
 airlift-all: web
 	mkdir -p $(BIN)
@@ -44,13 +49,13 @@ airlift-all: web
 	  os=$${p%/*}; arch=$${p#*/}; ext=""; \
 	  [ "$$os" = windows ] && ext=".exe"; \
 	  echo "  $$os/$$arch"; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="-s -w" \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="$(LDFLAGS)" \
 	    -o $(BIN)/$(AIRLIFT)-$$os-$$arch$$ext ./cmd/airlift || exit 1; \
 	done
 
 airlift-linux: web
 	mkdir -p $(BIN)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" \
 	  -o $(BIN)/$(AIRLIFT)-linux-amd64 ./cmd/airlift
 
 ## ---- deploy (Phase 8; see docs/HOSTING.md) ----
