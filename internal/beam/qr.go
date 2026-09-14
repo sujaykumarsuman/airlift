@@ -65,10 +65,13 @@ func ChunkForVersion(version int, ecc string) (int, error) {
 		return 0, fmt.Errorf("--version-target must be 1..40, got %d", version)
 	}
 	v := coding.Version(version)
-	lo, hi := 0, 2300
+	// A chunk fits when its full DATA frame both fits the symbol and stays
+	// under the wire cap (proto.MaxFrameText, 4096 characters — 2712 bytes);
+	// version 40 at ECC L would otherwise hold 2846, which the tower rejects.
+	lo, hi := 0, MaxChunk
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
-		if alphaFits(textLen(proto.HeaderLen+mid), v, level) {
+		if chars := textLen(proto.HeaderLen + mid); chars <= proto.MaxFrameText && alphaFits(chars, v, level) {
 			lo = mid
 		} else {
 			hi = mid - 1

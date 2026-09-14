@@ -12,14 +12,14 @@ const ok = (frames: string[], completed: string[] = []): IngestResult => ({
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
-test("dedups by content and batches after 250 ms", async () => {
+test("dedups by content and batches after 100 ms", async () => {
   const post = vi.fn(async (frames: string[]) => ok(frames));
   const relay = new Relay({ post });
   expect(relay.push("A")).toBe(true);
   expect(relay.push("A")).toBe(false);
   expect(relay.push("B")).toBe(true);
   expect(relay.stats).toMatchObject({ seen: 3, unique: 2, buffered: 2, sent: 0 });
-  await vi.advanceTimersByTimeAsync(249);
+  await vi.advanceTimersByTimeAsync(99);
   expect(post).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);
   expect(post).toHaveBeenCalledTimes(1);
@@ -35,7 +35,7 @@ test("flushes immediately at 50 frames and keeps batches at 50", async () => {
   await vi.advanceTimersByTimeAsync(0);
   expect(post.mock.calls.map((c) => c[0].length)).toEqual([50, 50]);
   expect(relay.stats.buffered).toBe(20);
-  await vi.advanceTimersByTimeAsync(250);
+  await vi.advanceTimersByTimeAsync(100);
   expect(post.mock.calls.map((c) => c[0].length)).toEqual([50, 50, 20]);
   expect(relay.stats.sent).toBe(120);
 });
@@ -50,7 +50,7 @@ test("keeps buffering and retries with backoff; nothing is dropped", async () =>
   const relay = new Relay({ post, backoffMs: [500, 1000, 2000], onUpdate: (s) => updates.push(s.buffered) });
   relay.push("A");
   relay.push("B");
-  await vi.advanceTimersByTimeAsync(250);
+  await vi.advanceTimersByTimeAsync(100);
   expect(post).toHaveBeenCalledTimes(1);
   expect(relay.stats).toMatchObject({ failures: 1, lastError: "network", buffered: 2, sent: 0 });
   relay.push("C"); // arrives while waiting to retry
@@ -73,11 +73,11 @@ test("records completed beams but keeps relaying (a place holds many)", async ()
   const post = vi.fn(async (frames: string[]) => ok(frames, frames.includes("A") ? ["000000a1"] : []));
   const relay = new Relay({ post });
   relay.push("A");
-  await vi.advanceTimersByTimeAsync(250);
+  await vi.advanceTimersByTimeAsync(100);
   expect(relay.stats.completed).toEqual(["000000a1"]);
   // A beam finishing does not stop the relay: the next beam's frames still go.
   expect(relay.push("B")).toBe(true);
-  await vi.advanceTimersByTimeAsync(250);
+  await vi.advanceTimersByTimeAsync(100);
   expect(post).toHaveBeenCalledTimes(2);
   expect(post.mock.calls[1]?.[0]).toEqual(["B"]);
   expect(relay.stats.completed).toEqual(["000000a1"]); // not duplicated
@@ -101,7 +101,7 @@ test("resume re-arms a stopped relay for a reopened session, keeping the dedup s
   relay.resume();
   expect(relay.push("C")).toBe(true); // relaying again
   expect(relay.push("A")).toBe(false); // still remembered across the freeze
-  await vi.advanceTimersByTimeAsync(250);
+  await vi.advanceTimersByTimeAsync(100);
   expect(post).toHaveBeenCalledTimes(1);
   expect(post.mock.calls[0]?.[0]).toEqual(["A", "C"]); // the queued A plus the new C
 });

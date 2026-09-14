@@ -16,7 +16,8 @@ input file ──gzip──▶ blob ──chunk──▶ N chunks ──frame─
 - **gzip**: level 9, mtime zeroed, no filename. Deterministic for a given
   zlib, which is all that is needed: the receiver verifies against the
   `gz_sha256` carried in the manifest, never against a recomputed stream.
-- **chunk**: fixed payload size (`--chunk`, default 600 bytes); the last chunk
+- **chunk**: fixed payload size (`--chunk`, default 1311 bytes — the largest
+  that fits QR version 30 at ECC M); the last chunk
   is shorter. `N = ceil(gz_size / chunk)`, at least 1, at most 65535.
 - **frame**: header + payload, below.
 - **base45**: RFC 9285. Two bytes become three characters, least significant
@@ -105,7 +106,7 @@ transfer; small N needs more, which the default's surplus term covers.
 
 ## Loop schedule
 
-The player cycles frames at `--fps` (default 5):
+The player cycles frames at `--fps` (default 10):
 
 - **Sequential** (small payloads): `[M, D0 … D(N-1)]` repeating, with `M`
   re-inserted after every 20 data frames (`--manifest-every`) so a scanner

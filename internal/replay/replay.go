@@ -68,7 +68,7 @@ func Run(ctx context.Context, client *http.Client, base, sid, token string, dump
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	batch := 50 // a phone posts every 250 ms or 50 frames, whichever first
+	batch := 50 // a phone posts every 100 ms or 50 frames, whichever first; the simulator batches a quarter-second's worth
 	if opts.Rate > 0 {
 		batch = max(1, int(opts.Rate/4))
 	}

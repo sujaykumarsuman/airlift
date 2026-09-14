@@ -20,6 +20,7 @@ import {
 } from "./camera";
 import { activeKey, baselineIgnored, pickActive, relayCompleted, scanJustCompleted } from "./complete";
 import { createDecoder, startDecodeLoop, type Decoder, type LoopStats } from "./decoder";
+import { finderROI } from "./roi";
 import { resolveJoin } from "./join";
 import { Relay, type RelayStats } from "./relay";
 
@@ -399,7 +400,7 @@ function render(): void {
   }
   const parts: string[] = [];
   if (decoder) parts.push(decoder.name + (cameraLabel ? ` · ${cameraLabel}` : ""));
-  if (loopStats) parts.push(`${loopStats.decodesPerSec.toFixed(1)} decoded/s · ${loopStats.lastDecodeMs.toFixed(0)} ms`);
+  if (loopStats) parts.push(`${loopStats.decodesPerSec.toFixed(1)} decoded/s · ${loopStats.attemptsPerSec.toFixed(0)} tries/s · ${loopStats.lastDecodeMs.toFixed(0)} ms`);
   if (relayStats) {
     parts.push(`sent ${relayStats.sent} · new ${relayStats.accepted} · dup ${relayStats.dup + (relayStats.seen - relayStats.unique)} · bad ${relayStats.bad}`);
     if (relayStats.buffered > 0 || relayStats.failures > 0) {
@@ -477,10 +478,19 @@ async function startCamera(deviceId?: string): Promise<void> {
     await video.play();
     await fillCameraList();
     decoder ??= await createDecoder();
-    stopLoop = startDecodeLoop(video, decoder, frameCanvas, (text) => relay.push(text), (s) => {
-      loopStats = s;
-      render();
-    });
+    stopLoop = startDecodeLoop(
+      video,
+      decoder,
+      frameCanvas,
+      (text) => relay.push(text),
+      (s) => {
+        loopStats = s;
+        render();
+      },
+      // The decoder reads the viewfinder's crop of the frame (the video is
+      // object-fit: cover over the viewport, the finder a centred square).
+      () => (finderEl.hidden ? null : finderROI(video.videoWidth, video.videoHeight, video.clientWidth, video.clientHeight, finderEl.getBoundingClientRect())),
+    );
     if (role !== "relay") {
       stopEvents?.();
       stopEvents = subscribeProgress("relay");

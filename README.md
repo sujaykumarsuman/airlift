@@ -77,9 +77,12 @@ full-screen and point the phone at it.
 
 Every beam has a name, which the tower shows and which lets one session carry
 several beams. `beam` prints the chunk count, QR version, compression ratio and
-loop timing. Tuning flags: `--chunk` (payload bytes per frame, default 600, at
-most 2242 at ECC M), `--ecc L|M|Q|H`, `--fps`, `--manifest-every`, `--name`,
-`--format text|base64`, `--out FILE`, `--no-open`, `--seed`. The player is a
+loop timing. Tuning flags: `--chunk` (payload bytes per frame; the default is
+what QR version 30 holds at `--ecc`, 1311 at M; at most 2712), `--ecc L|M|Q|H`, `--fps` (default 10),
+`--manifest-every`, `--name`, `--format auto|text|base64` (auto bundles a
+folder as text when every file is text — about 30 % less gzip than base64 —
+and falls back to base64 when a file is binary or holds a boundary marker),
+`--out FILE`, `--no-open`, `--seed`. The player is a
 black page with only the QR bright (on a white quiet-zone tile) and on-screen
 controls; keys: space pause · ←/→ step · +/- fps · [/] size · f fullscreen ·
 h hide chrome.
@@ -100,21 +103,24 @@ carry more per frame but need more pixels per module on the camera, and a
 phone decodes small symbols more reliably. `--version-target V` picks the
 largest chunk for a version; these are the numbers at ECC M:
 
-| QR version | modules | bytes/frame | KB/s at 8 fps | KB/s at 12 fps | 1 MB gzip at 8 fps |
+| QR version | modules | bytes/frame | KB/s at 10 fps | KB/s at 15 fps | 1 MB gzip at 10 fps |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 57×57 | 189 | 1.5 | 2.2 | 11.6 min |
-| 15 | 77×77 | 382 | 3.0 | 4.5 | 5.7 min |
-| 20 | 97×97 | 628 | 4.9 | 7.4 | 3.5 min |
-| 25 | 117×117 | 949 | 7.4 | 11.1 | 2.3 min |
-| 30 | 137×137 | 1311 | 10.2 | 15.4 | 1.7 min |
-| 40 | 177×177 | 2242 | 17.5 | 26.3 | 1.0 min |
+| 10 | 57×57 | 189 | 1.8 | 2.8 | 9.2 min |
+| 15 | 77×77 | 382 | 3.7 | 5.6 | 4.6 min |
+| 20 | 97×97 | 628 | 6.1 | 9.2 | 2.8 min |
+| 25 | 117×117 | 949 | 9.3 | 13.9 | 1.8 min |
+| 30 | 137×137 | 1311 | 12.8 | 19.2 | 1.3 min |
+| 40 | 177×177 | 2242 | 21.9 | 32.8 | 0.8 min |
 
-Start with the default (600 bytes, version 20) at 5 fps. If the phone decodes
-every frame (its stats line shows the decode rate), raise `--fps` with the `+`
-key until it starts missing, then back off; if it misses at 5 fps, try a
-smaller version or move the phone closer. Larger modules matter more than more
-of them. `--ecc L` gains ~15 % capacity at the cost of glare tolerance;
-`--ecc Q` or `H` the reverse.
+The default is 1311 bytes (version 30, 137×137 modules) at 10 fps. The scanner
+decodes only what is inside its viewfinder, so fill the square; its stats line
+shows decoded/s against tries/s. If it decodes every frame, raise `--fps` with
+the `+` key until it starts missing, then back off — 12 and 15 sit cleanly on a
+60 Hz screen, 8 does not; if it misses at 10 fps, drop to 5 or to
+`--version-target 25`, or move the phone closer. Larger modules matter more
+than more of them. `--ecc L` gains about a quarter more capacity at the cost of
+glare tolerance; `--ecc Q` or `H` the reverse (the default chunk follows the
+ECC: a version-30 symbol either way).
 
 ### On the phone
 
@@ -197,6 +203,7 @@ make lint test    # everything the pre-commit gate runs
 make airlift      # builds web/dist then bin/airlift
 make airlift-all  # cross-compiles the release binaries into bin/
 make docs-shots   # regenerates the docs page's screenshots from the real app (headless Chrome)
+make scan-e2e     # scans a real beam with the real scanner, no phone: player frames → MJPEG → headless Chrome's fake camera → tower READY
 ```
 
 The binary is stamped with its version (`git describe --tags`, or the tag in the

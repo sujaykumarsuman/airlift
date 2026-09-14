@@ -213,3 +213,28 @@ func decodeArray(t *testing.T, html, name string, out any) {
 		t.Fatalf("%s is not JSON: %v", name, err)
 	}
 }
+
+// TestDefaultsAreVersion30: the default chunk is exactly what fits QR version
+// 30 at ECC M (the 2026-09-14 decode-speed pass), and the default frame rate
+// divides a 60 Hz refresh.
+func TestDefaultsAreVersion30(t *testing.T) {
+	want, err := ChunkForVersion(30, "M")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if DefaultChunk != want {
+		t.Fatalf("DefaultChunk = %d, want ChunkForVersion(30, M) = %d", DefaultChunk, want)
+	}
+	if 60%DefaultFPS != 0 {
+		t.Fatalf("DefaultFPS = %d does not divide 60", DefaultFPS)
+	}
+	// --version-target reaches the wire ceiling, not the symbol's: version 40 at
+	// ECC L would hold 2846 bytes, but 2712 is the most a 4096-character frame
+	// carries, and the encoder refuses more.
+	if got, err := ChunkForVersion(40, "L"); err != nil || got != MaxChunk {
+		t.Fatalf("ChunkForVersion(40, L) = %d, %v; want MaxChunk %d", got, err, MaxChunk)
+	}
+	if _, err := Encode(make([]byte, 5000), "big", MaxChunk+1, 1, ModeSequential, 0); err == nil {
+		t.Fatal("Encode accepted a chunk over the wire limit")
+	}
+}

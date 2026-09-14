@@ -18,7 +18,7 @@ DOMAIN     ?= projects.sujaykumar.dev
 PREFIX     ?= /airlift
 PUBLIC_URL ?= https://$(DOMAIN)$(PREFIX)
 
-.PHONY: all web airlift airlift-all airlift-linux docs-shots go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy
+.PHONY: all web airlift airlift-all airlift-linux docs-shots scan-e2e go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy
 
 all: web airlift
 
@@ -57,6 +57,12 @@ airlift-all: web
 # a demo beam, headless Chrome over CDP): web/public/docs/*.webp. Rebuild after.
 docs-shots: airlift
 	node web/tools/docs-shots.mjs
+
+# Drive a real beam through the real scanner without a phone: the player's
+# frames recorded into an MJPEG file and fed to headless Chrome as a fake camera
+# on the scan page of a throw-away tower (BEAM=folder to beam something else).
+scan-e2e: airlift
+	node web/tools/scan-e2e.mjs
 
 airlift-linux: web
 	mkdir -p $(BIN)

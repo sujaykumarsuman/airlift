@@ -161,3 +161,73 @@ func first(s string, n int) string {
 	}
 	return s
 }
+
+// TestBeamFormatAuto: a folder of text bundles as text (the smaller form); one
+// holding a binary file, or a text file with a boundary marker, falls back to
+// base64 so nothing is left out. --format text/base64 still force a format.
+func TestBeamFormatAuto(t *testing.T) {
+	beamIt := func(t *testing.T, dir string, extra ...string) string {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "page.html")
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"beam", dir, "--out", out, "--no-open"}, extra...)
+		if code := run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit %d\n%s", code, stderr.String())
+		}
+		return stdout.String()
+	}
+	textOnly := t.TempDir()
+	os.WriteFile(filepath.Join(textOnly, "a.txt"), []byte("plain text\n"), 0o644)
+	os.WriteFile(filepath.Join(textOnly, "b.md"), []byte("# notes\n"), 0o644)
+	if out := beamIt(t, textOnly); !strings.Contains(out, "bundle   text format") {
+		t.Fatalf("text-only folder should bundle as text:\n%s", out)
+	}
+	withBinary := t.TempDir()
+	os.WriteFile(filepath.Join(withBinary, "a.txt"), []byte("plain text\n"), 0o644)
+	os.WriteFile(filepath.Join(withBinary, "blob.bin"), []byte{0, 1, 2, 255, 0, 7}, 0o644)
+	if out := beamIt(t, withBinary); !strings.Contains(out, "bundle   base64 format") {
+		t.Fatalf("a binary file should force base64:\n%s", out)
+	}
+	withMarker := t.TempDir()
+	os.WriteFile(filepath.Join(withMarker, "a.txt"), []byte("text\n@@@FILE@@@ 1 x 644 y\nmore\n"), 0o644)
+	if out := beamIt(t, withMarker); !strings.Contains(out, "bundle   base64 format") {
+		t.Fatalf("a boundary marker should force base64:\n%s", out)
+	}
+	if out := beamIt(t, textOnly, "--format", "base64"); !strings.Contains(out, "bundle   base64 format") {
+		t.Fatalf("--format base64 should be honoured:\n%s", out)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"beam", withBinary, "--out", filepath.Join(t.TempDir(), "p.html"), "--no-open", "--format", "text"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("--format text on a folder with a binary still packs (dropping it): exit %d\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "bundle   text format") {
+		t.Fatalf("--format text should be honoured:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "skipped 1 binary file(s): blob.bin") {
+		t.Fatalf("the dropped binary should be named on stderr:\n%s", stderr.String())
+	}
+}
+
+// TestBeamDefaultChunkFollowsECC: the default symbol is version 30 at whatever
+// --ecc says, so --ecc H (which cannot hold 1311 bytes) still beams.
+func TestBeamDefaultChunkFollowsECC(t *testing.T) {
+	work := t.TempDir()
+	src := filepath.Join(work, "blob.bin")
+	// incompressible bytes, so the beam has full chunks and renders at the default version
+	data := make([]byte, 8000)
+	x := uint32(1)
+	for i := range data {
+		x = x*1664525 + 1013904223
+		data[i] = byte(x >> 24)
+	}
+	os.WriteFile(src, data, 0o644)
+	for _, tc := range []struct{ ecc, want string }{{"H", "× 702 bytes"}, {"L", "× 1662 bytes"}, {"M", "× 1311 bytes"}} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"beam", src, "--out", filepath.Join(work, tc.ecc+".html"), "--no-open", "--ecc", tc.ecc}, &stdout, &stderr); code != 0 {
+			t.Fatalf("--ecc %s: exit %d\n%s", tc.ecc, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), tc.want) || !strings.Contains(stdout.String(), "version 30 ") {
+			t.Fatalf("--ecc %s should beam at version 30 (%s):\n%s", tc.ecc, tc.want, stdout.String())
+		}
+	}
+}

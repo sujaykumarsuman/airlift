@@ -51,8 +51,9 @@ nor the end marker.
 - **text** is human-readable and copy-paste-friendly but skips binary files (a
   file with a NUL byte or invalid UTF-8) and refuses one whose content has a
   line starting with a boundary marker — beam with `--format base64`.
-- **base64** (the beam default) survives whitespace and line-ending mangling
-  and carries binaries.
+- **base64** survives whitespace and line-ending mangling and carries
+  binaries. `airlift beam` defaults to `--format auto`: text when every file
+  is text and none holds a boundary marker, else base64.
 
 ## What unpacking guarantees
 

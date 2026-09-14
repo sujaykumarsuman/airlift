@@ -366,6 +366,37 @@ new runtime dep — CLAUDE.md holds).
   fit-to-viewport, ambiguous facts and a two-up beam grid were dropped on their
   evidence). Verified in-browser at 375 / 768 / 1000 / 1400 with overflow probes.
 
+- **Decode-speed pass (2026-09-14)**, from a four-angle research sweep (the
+  pipeline quantified from the code: 600 B × 5 fps ≈ 2.9 KB/s, the phone decoding
+  one whole 4K frame at a time on the main thread, the tower and relay nowhere
+  near a limit). Defaults: chunk 600 → **1311** (QR version 30, 137×137), fps 5 →
+  **10** (a divisor of 60 Hz — 8 alternated frame lengths), `--format` **auto**
+  (text when every file is text and none holds a boundary marker, else base64 —
+  ~30 % less gzip for source trees; `packBundle` in `cmd/airlift/beam.go`, the
+  summary prints the format). the default chunk follows `--ecc` (a
+  version-30 symbol either way, so `--ecc H` still beams); `ChunkForVersion` and
+  `Encode` now cap chunks at the wire limit (`MaxChunk` 2712 — a 4096-character
+  frame; `--version-target 40 --ecc L` used to be able to build a beam the tower
+  rejected as too long). Scanner: the decoder reads
+  only the viewfinder's crop of the frame (`web/src/scan/roi.ts` maps the finder's
+  CSS rect through object-fit: cover, tested), scaled to ≤1024 px (native path:
+  `createImageBitmap` crop → `BarcodeDetector.detect`; zxing: 9-arg drawImage), while the crop
+  has been dry for a second, every other attempt reads the whole frame (so a
+  code held outside the square still scans at half rate, and the crop resumes
+  the moment it hits); the loop registers the next
+  `requestVideoFrameCallback` up front and keeps two decodes in flight; the camera
+  asks for 1080p, not 4K; the HUD shows decoded/s · tries/s · ms; the relay
+  flushes every 100 ms. Measured on `docs/adr`: 184 frames / 36.8 s per pass →
+  **24 frames / 2.4 s per pass**. New dev tool `make scan-e2e`
+  (`web/tools/scan-e2e.mjs`): records the player's frames into an MJPEG and feeds
+  it to headless Chrome as a fake camera on the real scan page of a throw-away
+  tower — the whole chain without a phone; it reaches READY in ~3.5 s at ~30
+  decodes/s (BarcodeDetector, 23 ms each). Still to confirm on the Android: that
+  the 137-module symbol decodes at the phone's distance (fall back with
+  `--version-target 25` if not) and how many decoded/s it reports at 10 fps.
+  README/docs/PROTOCOL/CLAUDE.md updated (the README's "ECC L ~15 %" was wrong;
+  it is ~30 %).
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.

@@ -17,7 +17,7 @@ export interface RelayStats {
 
 export interface RelayOptions {
   post: (frames: string[]) => Promise<IngestResult>;
-  flushMs?: number; // default 250
+  flushMs?: number; // default 100
   maxBatch?: number; // default 50
   backoffMs?: number[]; // retry delays after failures
   onUpdate?: (stats: RelayStats) => void;
@@ -26,7 +26,7 @@ export interface RelayOptions {
 const defaultBackoff = [500, 1000, 2000, 4000, 5000];
 
 /**
- * The stateless relay: dedup by string hash, batch every 250 ms or 50
+ * The stateless relay: dedup by string hash, batch every 100 ms or 50
  * frames, POST, and on failure keep buffering and retry with backoff. A place
  * may hold many beams, so the relay never latches "done" — it keeps feeding
  * whatever the camera decodes until stop(); the tower sorts frames into beams.
@@ -55,7 +55,7 @@ export class Relay {
   private readonly backoff: number[];
 
   constructor(private readonly opts: RelayOptions) {
-    this.flushMs = opts.flushMs ?? 250;
+    this.flushMs = opts.flushMs ?? 100;
     this.maxBatch = opts.maxBatch ?? 50;
     this.backoff = opts.backoffMs ?? defaultBackoff;
   }
@@ -124,7 +124,8 @@ export class Relay {
   }
 
   /** Sends one batch, then more only while full batches are waiting; a
-   *  partial remainder waits for the next tick so POSTs stay ≤ 4/s. */
+   *  partial remainder waits for the next tick so POSTs stay ≤ 10/s (the
+ *  tower meters 30 POSTs a second per address). */
   private async drain(): Promise<void> {
     let first = true;
     while (!this.stopped && this.queue.length > 0 && (first || this.queue.length >= this.maxBatch)) {

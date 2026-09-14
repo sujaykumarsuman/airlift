@@ -3,15 +3,17 @@ export function listCameras(): Promise<MediaDeviceInfo[]> {
 }
 
 /**
- * Opens a camera: the given device, else the rear camera; the highest
- * resolution on offer; continuous focus where the track supports it.
+ * Opens a camera: the given device, else the rear camera; 1080p, which is
+ * plenty for a version-30 symbol filling the viewfinder (~5 px per module)
+ * and a quarter of the pixels of 4K for every frame the decoder reads;
+ * continuous focus where the track supports it.
  */
 export async function openCamera(deviceId?: string): Promise<MediaStream> {
   const video: MediaTrackConstraints = deviceId
     ? { deviceId: { exact: deviceId } }
     : { facingMode: { ideal: "environment" } };
-  video.width = { ideal: 4096 };
-  video.height = { ideal: 2160 };
+  video.width = { ideal: 1920 };
+  video.height = { ideal: 1080 };
   const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
   await applyContinuousFocus(stream);
   return stream;

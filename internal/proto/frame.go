@@ -16,8 +16,10 @@ const (
 	HeaderLen = 18
 	// MaxChunks is the u16 ceiling on the number of source chunks.
 	MaxChunks = 0xFFFF
-	// MaxFrameText is longer than any frame that fits QR version 40 (3420
-	// characters); longer strings are rejected before decoding.
+	// MaxFrameText is the wire cap; longer strings are rejected before decoding.
+	// It is longer than any frame at ECC M (version 40 holds 3420 characters
+	// there); at ECC L version 40 holds 4296, so the encoder caps chunks at
+	// beam.MaxChunk (2712 bytes).
 	MaxFrameText = 4096
 )
 

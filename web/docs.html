@@ -82,23 +82,24 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
           <p>Several paths are bundled together and need a name — <code>--name</code>, or a <code>name:</code> line in a list file:</p>
           <div class="cmd"><code>airlift beam --files-from list.txt      # list.txt: "name: evidence" then one path per line</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
           <h3>What it prints</h3>
-          <pre><code>  gzip          40870 bytes   42.4 % of input
-  chunks           69 × 600 bytes
-  mode     fountain (175 packets, LT/robust soliton)
-  qr       version 20 (97×97 modules), ECC M, alphanumeric
-  loop            184 frames   manifest every 20   36.8 s per pass at 5 fps
-  session  0xbc7ce2dd
-  output   2.5 MB</code></pre>
+          <pre><code>  bundle   text format
+  gzip          28591 bytes   39.5 % of input
+  chunks           22 × 1311 bytes
+  mode     sequential
+  qr       version 30 (137×137 modules), ECC M, alphanumeric
+  loop             24 frames   manifest every 20   2.4 s per pass at 10 fps
+  session  0x82c2bb47
+  output   654.4 KB</code></pre>
           <p>Small beams (under ~24 chunks) play their chunks in order and repeat; larger ones switch to a <em>fountain</em> code automatically, so every pass produces fresh packets and a missed frame never means waiting for the same one to come round. You do not choose — the mode is picked from the size.</p>
           <h3>Options</h3>
           <table class="opts">
             <tr><th><code>--name NAME</code></th><td>The beam's name (the tower shows it). Required for several files.</td></tr>
-            <tr><th><code>--fps N</code></th><td>Initial frames per second, 1–60 (default 5). Raise it once the scanner reports more decodes/s than that.</td></tr>
-            <tr><th><code>--chunk BYTES</code></th><td>Payload bytes per frame (default 600, at most 2242 at ECC M). Bigger chunks mean fewer frames but denser codes.</td></tr>
+            <tr><th><code>--fps N</code></th><td>Initial frames per second, 1–60 (default 10). Raise it once the scanner reports more decoded/s than that; 12 and 15 sit cleanly on a 60 Hz screen.</td></tr>
+            <tr><th><code>--chunk BYTES</code></th><td>Payload bytes per frame (default: what QR version 30 holds at <code>--ecc</code>, 1311 at M; at most 2712). Bigger chunks mean fewer frames but denser codes.</td></tr>
             <tr><th><code>--version-target V</code></th><td>Pick the largest chunk that fits QR version V (1–40) instead of <code>--chunk</code>.</td></tr>
             <tr><th><code>--ecc L|M|Q|H</code></th><td>QR error correction (default M). Higher survives glare better, at fewer bytes per frame.</td></tr>
             <tr><th><code>--manifest-every K</code></th><td>Re-insert the manifest frame every K frames (default 20), so a scanner that starts mid-loop learns the beam quickly.</td></tr>
-            <tr><th><code>--format base64|text</code></th><td>Bundle format for folders (default base64).</td></tr>
+            <tr><th><code>--format auto|text|base64</code></th><td>Bundle format for folders. <code>auto</code> (the default) bundles as text — about 30 % less to send — when every file is text and none holds a boundary marker, else as base64.</td></tr>
             <tr><th><code>--out FILE</code> · <code>--no-open</code></th><td>Where to write the page (default <code>&lt;name&gt;.html</code>), and whether to open it.</td></tr>
           </table>
         </section>

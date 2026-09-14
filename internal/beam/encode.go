@@ -12,8 +12,19 @@ import (
 	"github.com/sujaykumarsuman/airlift/internal/verify"
 )
 
-// DefaultChunk is the sender's default payload size in bytes.
-const DefaultChunk = 600
+// DefaultChunk is the sender's default payload size in bytes: the largest
+// chunk that fits QR version 30 at ECC M (ChunkForVersion(30, "M"), a 137-module
+// symbol). It was 600 (version 20) until the 2026-09-14 decode-speed pass; the
+// frozen vectors still say 600 explicitly. DefaultFPS is the player's initial
+// frame rate: 10 is a divisor of a 60 Hz refresh, so every frame is on screen
+// for the same six refreshes (8 alternated eight and seven and tore more camera
+// frames). MaxChunk is the largest payload whose full DATA frame stays under
+// the wire cap, proto.MaxFrameText (4096 base45 characters).
+const (
+	DefaultChunk = 1311
+	DefaultFPS   = 10
+	MaxChunk     = 2712
+)
 
 // Dump is the {sender_session, manifest, frames[, fountain]} structure
 // (docs/PROTOCOL.md): the internal fixture format the frozen testdata/vectors/
@@ -85,6 +96,9 @@ func NewSession(seed *int64) uint32 {
 func Encode(data []byte, name string, chunk int, sender uint32, mode Mode, packets int) (*Dump, error) {
 	if chunk < 1 || chunk > 0xFFFF {
 		return nil, fmt.Errorf("chunk must be 1..65535, got %d", chunk)
+	}
+	if chunk > MaxChunk {
+		return nil, fmt.Errorf("chunk %d makes %d-character frames; the wire limit is %d characters (%d bytes)", chunk, textLen(proto.HeaderLen+chunk), proto.MaxFrameText, MaxChunk)
 	}
 	blob, err := compress(data)
 	if err != nil {

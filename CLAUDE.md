@@ -69,6 +69,10 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
   SVG symbol set), `shared/chunks.ts` (tally chunk marks + minimap, tested),
   `shared/motion.ts` (the one entry-animation hook), `shared/copy.ts` (copy
   buttons), `shared/style.css` (tokens + every component).
+- `web/tools/scan-e2e.mjs` (`make scan-e2e`) — the scanner's end-to-end check
+  without a phone: records the beam player's frames into an MJPEG, feeds it to
+  headless Chrome as a fake camera on the real scan page of a throw-away tower,
+  and waits for READY. Run it for any encoder/scanner change.
 - `web/tools/docs-shots.mjs` (`make docs-shots`) — regenerates the docs
   screenshots from the real app with headless Chrome over CDP; rebuild after.
 
@@ -131,7 +135,8 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
     and stay downloadable. A session admin extends the cap an hour at a time
     (`POST …/max-age`, the dashboard "+1 h"). Defaults: `idle_ttl` 30m (the
     everyone-left grace), `terminated_ttl` 1h (the reopen window). Beam default fps
-    5. (ADR 0018)
+    5 (10 since the 2026-09-14 decode-speed pass, with chunk 1311 = QR version 30
+    and `--format auto`). (ADR 0018)
 19. Shared session, scan on demand: the join link/QR opens the shared dashboard
     (`…/#s=<sid>&t=<token>`) — every client watches/downloads there and opens the
     scanner on demand via a *Scan a beam* button; the scanner self-stops on READY
