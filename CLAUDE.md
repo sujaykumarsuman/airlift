@@ -170,7 +170,13 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
     participant. A resume from another address is refused (the id is public). The
     dashboard's scan link carries `&c=<client_id>` so the scanner resumes the
     dashboard's client. Eviction still bars the address, except a session admin
-    evicting a client at their own address drops only that client. (ADR 0022)
+    evicting a client at their own address drops only that client. Amended
+    2026-09-14: identity is a **resume key** (returned by create/join/register,
+    kept in localStorage, sent as `X-Airlift-Client-Key` on every client-tier
+    call and as `resume_key` on a resume) — it resumes and re-binds from any
+    address, a keyless call passes only from the bound address; a client idle
+    with no stream for 10 min is parked (hidden, kept) until its next keyed
+    call. (ADR 0022)
 
 ## Non-goals
 

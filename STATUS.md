@@ -397,6 +397,22 @@ new runtime dep — CLAUDE.md holds).
   README/docs/PROTOCOL/CLAUDE.md updated (the README's "ECC L ~15 %" was wrong;
   it is ~30 %).
 
+- **Resume key (2026-09-14, ADR 0022 amended)**, from a phone run: every screen
+  sleep changed the phone's address, the same-address resume was refused, and each
+  reload left a dangling participant. A client now carries a random 128-bit
+  `resume_key` (create/join/register replies; never in a snapshot): the device
+  keeps it in localStorage (the dashboard's identity moved from sessionStorage to
+  localStorage, so a discarded tab or a re-scanned QR is the same participant) and
+  sends it as `X-Airlift-Client-Key` on every client-tier call and as `resume_key`
+  on a resume — `Session.VerifyClient` accepts a matching key from any address and
+  re-binds the client there; keyless calls pass only from the bound address (old
+  pages). The scanner takes the dashboard's key from its stored record when the
+  link names its client. Idle clients (no stream, no activity for
+  `ClientIdleTTL` 10 min) are parked by the sweep — hidden from the list, record
+  kept — and un-parked by their next keyed call. Session + server tests cover the
+  key across addresses, the wrong key, the keyless fallback, the snapshot never
+  leaking it, and parking/un-parking.
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.

@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { ApiError, eventsURL, joinSession, postExtension, postFrames, postPing, registerClient } from "../shared/api";
+import { ApiError, eventsURL, joinSession, postExtension, postFrames, postPing, registerClient, rememberClientKey } from "../shared/api";
 import { decodeBitmap } from "../shared/bitmap";
 import { renderChunkMarks } from "../shared/chunks";
 import { $, html, raw } from "../shared/dom";
@@ -49,6 +49,36 @@ function safeStorage(): Storage | null {
 }
 const basePath = new URL(document.baseURI).pathname.replace(/\/$/, "");
 const join = resolveJoin(location.pathname, location.hash, safeStorage(), basePath);
+
+// The identity this device holds for the session (ADR 0022, amended): the
+// dashboard's record when the link named its client (`c=`), else the scanner's
+// own from a previous visit. Both carry the client's resume key, so a phone back
+// from sleep on a new address is still the same participant.
+interface Identity {
+  client_id?: string;
+  resumeKey?: string;
+}
+function readIdentity(key: string): Identity {
+  try {
+    return (JSON.parse(safeStorage()?.getItem(key) ?? "null") as Identity | null) ?? {};
+  } catch {
+    return {};
+  }
+}
+function heldIdentity(sid: string, urlClient: string | undefined): Identity {
+  const dash = readIdentity(`airlift.session.${sid}`);
+  if (urlClient) return { client_id: urlClient, resumeKey: dash.client_id === urlClient ? dash.resumeKey : undefined };
+  if (dash.client_id) return dash;
+  return readIdentity(`airlift.scan.${sid}`);
+}
+function rememberIdentity(sid: string, client_id: string, resumeKey: string | undefined): void {
+  rememberClientKey(client_id, resumeKey);
+  try {
+    safeStorage()?.setItem(`airlift.scan.${sid}`, JSON.stringify({ client_id, resumeKey }));
+  } catch {
+    /* storage unavailable: the tower still knows us by address for this visit */
+  }
+}
 if (join.redirect) history.replaceState(null, "", new URL(join.redirect, document.baseURI).toString());
 if (join.error !== undefined) {
   progressEl.textContent = "✗";
@@ -324,9 +354,11 @@ function onReopen(): void {
     btn.disabled = true;
     btn.textContent = "Reopening…";
   }
-  void registerClient(sid, token, { role: "relay", resume: clientID || join.client })
+  const held = heldIdentity(sid, clientID || join.client);
+  void registerClient(sid, token, { role: "relay", resume: held.client_id, resumeKey: held.resumeKey })
     .then((c) => {
       clientID = c.client_id;
+      rememberIdentity(sid, c.client_id, c.resume_key);
     })
     .catch((err) => {
       if (btn) {
@@ -567,9 +599,11 @@ async function init(): Promise<void> {
 // register binds a client to this address and starts watching + scanning.
 async function register(): Promise<void> {
   try {
-    const c = await registerClient(sid, token, { role: "relay", resume: join.client });
+    const held = heldIdentity(sid, join.client);
+    const c = await registerClient(sid, token, { role: "relay", resume: held.client_id, resumeKey: held.resumeKey });
     clientID = c.client_id;
     ownName = c.name;
+    rememberIdentity(sid, c.client_id, c.resume_key);
   } catch (err) {
     message = err instanceof Error ? err.message : String(err);
     render();
@@ -592,6 +626,7 @@ joinForm.addEventListener("submit", (e) => {
       token = j.token;
       clientID = j.client_id;
       ownName = j.name;
+      rememberIdentity(sid, j.client_id, j.resume_key);
       joinForm.hidden = true;
       message = "";
       stopEvents = subscribeProgress("viewer");

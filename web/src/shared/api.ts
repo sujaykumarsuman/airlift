@@ -24,9 +24,26 @@ export class ApiError extends Error {
 
 /** Every authenticated call carries the token and, once registered, the client
  *  id (ADR 0017). */
+/** The resume keys this page holds, by client id: a client's proof of identity
+ *  on every client-tier call (ADR 0022, amended), so a phone that comes back on
+ *  a new address is still itself. Pages restore it from storage on load. */
+const resumeKeys = new Map<string, string>();
+
+export function rememberClientKey(clientId: string, key: string | undefined): void {
+  if (clientId && key) resumeKeys.set(clientId, key);
+}
+
+export function clientKey(clientId: string | undefined): string | undefined {
+  return clientId ? resumeKeys.get(clientId) : undefined;
+}
+
 export function clientHeaders(token: string, clientId?: string): Record<string, string> {
   const h: Record<string, string> = { Authorization: `Bearer ${token}` };
-  if (clientId) h["X-Airlift-Client"] = clientId;
+  if (clientId) {
+    h["X-Airlift-Client"] = clientId;
+    const key = resumeKeys.get(clientId);
+    if (key) h["X-Airlift-Client-Key"] = key;
+  }
   return h;
 }
 
@@ -54,24 +71,36 @@ export function createSession(opts: CreateOptions = {}, fetchFn: FetchFn = fetch
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
-  }).then((r) => expectJSON<Created>(r));
+  }).then(async (r) => {
+    const c = await expectJSON<Created>(r);
+    rememberClientKey(c.client_id, c.resume_key);
+    return c;
+  });
 }
 
 /** Registers a client for this device. `resume` (a client id this device holds)
- *  keeps that identity on a reload or a second tab — the tower honours it only
- *  from the same address (ADR 0022). */
+ *  with its `resumeKey` keeps that identity on a reload, a second tab, or a
+ *  return from sleep on a new address; without a key the tower honours the id
+ *  only from the same address (ADR 0022). The reply's key is remembered. */
 export function registerClient(
   sid: string,
   token: string,
-  opts: { name?: string; role?: string; resume?: string } = {},
+  opts: { name?: string; role?: string; resume?: string; resumeKey?: string } = {},
   fetchFn: FetchFn = fetch,
 ): Promise<Client> {
-  const { resume, ...body } = opts;
+  const { resume, resumeKey, ...rest } = opts;
+  const body: Record<string, string> = { ...rest };
+  const key = resumeKey ?? clientKey(resume);
+  if (resume && key) body.resume_key = key;
   return fetchFn(apiURL(`api/sessions/${sid}/clients`), {
     method: "POST",
     headers: { ...clientHeaders(token, resume), "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  }).then((r) => expectJSON<Client>(r));
+  }).then(async (r) => {
+    const c = await expectJSON<Client>(r);
+    rememberClientKey(c.client_id, c.resume_key);
+    return c;
+  });
 }
 
 /** Joins a password-protected session (no token needed); returns a token. */
@@ -84,7 +113,11 @@ export function joinSession(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  }).then((r) => expectJSON<Joined>(r));
+  }).then(async (r) => {
+    const j = await expectJSON<Joined>(r);
+    rememberClientKey(j.client_id, j.resume_key);
+    return j;
+  });
 }
 
 export function getSnapshot(sid: string, token: string, clientId?: string, fetchFn: FetchFn = fetch): Promise<Snapshot> {

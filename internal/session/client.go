@@ -2,10 +2,18 @@ package session
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"strconv"
 	"time"
 )
+
+// ClientIdleTTL is how long a client may sit with no open stream and no
+// activity before it is parked — hidden from the participants list until the
+// device comes back with its resume key (ADR 0022, amended). A parked client
+// keeps its name, admin flag and key; nothing about it is forgotten.
+const ClientIdleTTL = 10 * time.Minute
 
 // Role is a stream's role within a session.
 type Role string
@@ -19,18 +27,45 @@ const (
 // Valid reports whether r is a known role.
 func (r Role) Valid() bool { return r == RoleRelay || r == RoleViewer }
 
-// Client is one participant — one device — recording the address it registered
-// from (ADR 0022; ADR 0017 keyed clients by address, which folded every device
-// behind one NAT into a single participant). A client may hold several streams.
-// The id is not a secret — every authenticated call rechecks it against the
-// caller's address — so it can travel in a header and appear in the snapshot.
+// Client is one participant — one device (ADR 0022; ADR 0017 keyed clients by
+// address, which folded every device behind one NAT into a single participant).
+// A client may hold several streams. The id is not a secret — it appears in the
+// snapshot — so identity rests on the resume key: a random secret minted with
+// the client, held by the device, presented on every client-tier call and on a
+// resume. It proves possession whatever the address, which a phone changes
+// every time its screen sleeps. Addr is the address the device last spoke from
+// (eviction bars it); a call without a key is still accepted from that address,
+// for pages built before the key existed.
 type Client struct {
 	ID           string
 	Name         string
 	Addr         string
 	SessionAdmin bool
+	key          string
 	createdAt    time.Time
 	lastActive   time.Time
+	parkedAt     time.Time // non-zero while parked (idle with no stream; hidden)
+}
+
+// ResumeKey is the secret the device holds; it goes in the register/join/create
+// replies and nowhere else.
+func (c *Client) ResumeKey() string { return c.key }
+
+// matches reports whether a caller at addr presenting key is this client: the
+// key decides when one is given; without one, the address does (pre-key pages).
+func (c *Client) matches(addr, key string) bool {
+	if key != "" {
+		return subtle.ConstantTimeCompare([]byte(key), []byte(c.key)) == 1
+	}
+	return c.Addr == addr
+}
+
+func newResumeKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // ClientSnapshot is one client in the place document.
@@ -44,26 +79,27 @@ type ClientSnapshot struct {
 }
 
 // RegisterClient returns a client for the caller at addr. When resume names one
-// of this session's clients bound to the SAME address, that client is returned —
-// the proposed name is ignored and admin may only UPGRADE it, never downgrade —
-// so a reload or a second tab keeps its identity. Any other call mints a new
-// client with a unique name: two devices behind one address are two
-// participants (ADR 0022). A resume from a different address is not honoured
-// (the id is public in the snapshot; the address check is what stops one
-// participant taking over another). It refuses (ok=false) an evicted address —
-// the check is atomic with the insert, so a concurrent eviction cannot re-admit
-// the address.
-func (s *Session) RegisterClient(addr, proposed string, admin bool, resume string) (*Client, bool) {
+// of this session's clients and the caller proves it is that device — the
+// client's resume key, or (for pages without one) the same address — that
+// client is returned, re-bound to addr and un-parked; the proposed name is
+// ignored and admin may only UPGRADE it, never downgrade — so a reload, a second
+// tab, or a phone back from sleep on a new address keeps its identity. Any other
+// call mints a new client with a unique name and a fresh key: two devices behind
+// one address are two participants (ADR 0022). A resume with a wrong key or,
+// keyless, from another address is not honoured (the id is public in the
+// snapshot). It refuses (ok=false) an evicted address — the check is atomic with
+// the insert, so a concurrent eviction cannot re-admit the address.
+func (s *Session) RegisterClient(addr, proposed string, admin bool, resume, key string) (*Client, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.evicted[addr] {
 		return nil, false
 	}
-	if c, ok := s.clients[resume]; ok && resume != "" && c.Addr == addr {
+	if c, ok := s.clients[resume]; ok && resume != "" && c.matches(addr, key) {
 		if admin {
 			c.SessionAdmin = true
 		}
-		c.lastActive = s.now()
+		s.touchLocked(c, addr)
 		s.notifyLocked()
 		return c, true
 	}
@@ -72,6 +108,7 @@ func (s *Session) RegisterClient(addr, proposed string, admin bool, resume strin
 		Name:         s.uniqueNameLocked(proposed),
 		Addr:         addr,
 		SessionAdmin: admin,
+		key:          newResumeKey(),
 		createdAt:    s.now(),
 		lastActive:   s.now(),
 	}
@@ -101,6 +138,85 @@ func (s *Session) mintClientIDLocked() string {
 			return id
 		}
 	}
+}
+
+// touchLocked records a device speaking from addr: the address is re-bound (so
+// eviction bars where the device is now), the client is un-parked, and its
+// last-active refreshed.
+func (s *Session) touchLocked(c *Client, addr string) {
+	c.Addr = addr
+	c.lastActive = s.now()
+	if !c.parkedAt.IsZero() {
+		c.parkedAt = time.Time{}
+	}
+}
+
+// VerifyClient is the client-tier check: the caller at addr presenting key is
+// client c. A key that matches re-binds the client to addr (and un-parks it);
+// a keyless call passes only from the bound address.
+func (s *Session) VerifyClient(c *Client, addr, key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !c.matches(addr, key) {
+		return false
+	}
+	visible := c.Addr != addr || !c.parkedAt.IsZero()
+	s.touchLocked(c, addr) // the device spoke: the client's own clock, not the session's
+	if visible {
+		s.notifyLocked()
+	}
+	return true
+}
+
+// connectedLocked is the set of clients with at least one open stream.
+func (s *Session) connectedLocked() map[string]bool {
+	connected := map[string]bool{}
+	for sub := range s.subs {
+		if sub.client != nil {
+			connected[sub.client.ID] = true
+		}
+	}
+	return connected
+}
+
+// ParkIdleClients hides every client that has had no open stream and no
+// activity for ClientIdleTTL, so a phone that went to sleep and came back as a
+// new address does not leave its old self in the list; the record stays, and
+// the device un-parks it the moment it speaks again with its key. Reports
+// whether anything changed (a notification then goes out).
+func (s *Session) ParkIdleClients(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	connected := s.connectedLocked()
+	changed := false
+	for _, c := range s.clients {
+		if !c.parkedAt.IsZero() || connected[c.ID] || now.Sub(c.lastActive) < ClientIdleTTL {
+			continue
+		}
+		c.parkedAt = now
+		changed = true
+	}
+	if changed {
+		s.notifyLocked()
+	}
+	return changed
+}
+
+// AllClients lists every client the session has seen, parked ones included, for
+// the session.json receipt (the snapshot shows only the un-parked).
+func (s *Session) AllClients() []ClientSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	connected := s.connectedLocked()
+	out := []ClientSnapshot{}
+	for _, id := range s.clientOrder {
+		c := s.clients[id]
+		if c == nil {
+			continue
+		}
+		out = append(out, ClientSnapshot{ID: c.ID, Name: c.Name, Roles: []string{}, SessionAdmin: c.SessionAdmin, Connected: connected[id], LastActive: c.lastActive})
+	}
+	return out
 }
 
 // ClientByID returns a registered client.

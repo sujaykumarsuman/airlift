@@ -54,7 +54,7 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	c, ok := s.RegisterClient(addr, "", true, "") // the creator is the first session admin
+	c, ok := s.RegisterClient(addr, "", true, "", "") // the creator is the first session admin
 	if !ok {
 		writeError(w, http.StatusForbidden, "evicted")
 		return
@@ -66,6 +66,7 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		"expires_at": s.ExpiresAt(),
 		"client_id":  c.ID,
 		"name":       c.Name,
+		"resume_key": c.ResumeKey(),
 	})
 }
 
@@ -111,8 +112,10 @@ func clampTTL(name string, secs *int64, capD time.Duration) (time.Duration, erro
 }
 
 // registerClient mints a client for the caller's device, or returns the one an
-// X-Airlift-Client header names when it is bound to the caller's address
-// (ADR 0022: a reload keeps its identity; a second device is a second client).
+// X-Airlift-Client header names when the body's resume_key is that client's (or,
+// keyless, when it is bound to the caller's address) — ADR 0022: a reload, or a
+// phone back from sleep on a new address, keeps its identity; a second device is
+// a second client.
 func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *session.Session) {
 	addr := srv.clientAddr(r)
 	if s.Evicted(addr) {
@@ -121,8 +124,9 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
-		Name string `json:"name"`
-		Role string `json:"role"`
+		Name      string `json:"name"`
+		Role      string `json:"role"`
+		ResumeKey string `json:"resume_key"`
 	}
 	if err := decodeOptionalJSON(r.Body, &req); err != nil {
 		var tooBig *http.MaxBytesError
@@ -138,18 +142,26 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		return
 	}
 	// A token/QR joiner is a session admin iff the session was created that way.
-	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin(), r.Header.Get("X-Airlift-Client"))
+	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin(), r.Header.Get("X-Airlift-Client"), req.ResumeKey)
 	if !ok {
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
 	srv.reopenOnOpen(s, c)
-	writeJSON(w, http.StatusOK, map[string]any{
+	reply := map[string]any{
 		"client_id":     c.ID,
 		"name":          c.Name,
 		"session_admin": s.ClientIsAdmin(c),
 		"roles":         []string{},
-	})
+	}
+	// The key goes to a fresh client or to a device that proved it already holds
+	// it — never to a keyless resume, which the bound address alone let through
+	// (that path exists for pages without a key and must not escalate a shared
+	// address into a permanent identity).
+	if c.ID != r.Header.Get("X-Airlift-Client") || req.ResumeKey != "" {
+		reply["resume_key"] = c.ResumeKey()
+	}
+	writeJSON(w, http.StatusOK, reply)
 }
 
 // reopenOnOpen revives a session suspended by inactivity when a client opens its
@@ -202,16 +214,17 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		writeError(w, http.StatusUnauthorized, "wrong password")
 		return
 	}
-	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin(), "")
+	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin(), "", "")
 	if !ok {
 		writeError(w, http.StatusForbidden, "evicted")
 		return
 	}
 	srv.reopenOnOpen(s, c)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":     s.Token,
-		"client_id": c.ID,
-		"name":      c.Name,
+		"token":      s.Token,
+		"client_id":  c.ID,
+		"name":       c.Name,
+		"resume_key": c.ResumeKey(),
 	})
 }
 
@@ -252,7 +265,9 @@ func (srv *Server) evictClient(w http.ResponseWriter, r *http.Request, s *sessio
 		writeError(w, http.StatusBadRequest, "cannot evict yourself")
 		return
 	}
-	if _, ok := s.EvictClientByID(cid, c.Addr); !ok {
+	// The admin's address is this request's — c.Addr is re-bound by keyed calls
+	// from the admin's other tabs and must not be read outside the session lock.
+	if _, ok := s.EvictClientByID(cid, srv.clientAddr(r)); !ok {
 		writeError(w, http.StatusNotFound, "no such client")
 		return
 	}

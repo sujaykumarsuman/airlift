@@ -72,6 +72,7 @@ type created struct {
 	ExpiresAt time.Time `json:"expires_at"`
 	ClientID  string    `json:"client_id"`
 	Name      string    `json:"name"`
+	ResumeKey string    `json:"resume_key"`
 }
 
 func (h *harness) create(t *testing.T) created {
@@ -2232,5 +2233,109 @@ func TestSweepRemovesSessionData(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("session dir survived cleanup: %v", err)
+	}
+}
+
+// TestClientResumeKeyOverHTTP: the resume key (ADR 0022, amended) is the
+// device's identity on the client tier and on a resume, whatever its address; a
+// keyless call is honoured only from the bound address; a wrong key is a
+// stranger; the snapshot never carries the key.
+func TestClientResumeKeyOverHTTP(t *testing.T) {
+	h := start(t, func(o *Options) { o.TrustedProxies = ParseTrustedProxies([]string{"127.0.0.1", "::1"}) })
+	c := h.create(t) // the creator, from loopback
+	if len(c.ResumeKey) < 20 {
+		t.Fatalf("create reply without a resume key: %+v", c)
+	}
+	call := func(xff, key string) (int, string) {
+		req, _ := http.NewRequest("GET", h.ts.URL+"/api/sessions/"+c.SID, nil)
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("X-Airlift-Client", c.ClientID)
+		if xff != "" {
+			req.Header.Set("X-Forwarded-For", xff)
+		}
+		if key != "" {
+			req.Header.Set("X-Airlift-Client-Key", key)
+		}
+		resp, err := h.ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	// The key passes from a new address and re-binds the client there.
+	if code, body := call("2.2.2.2", c.ResumeKey); code != 200 {
+		t.Fatalf("keyed call from a new address: %d %s", code, body)
+	} else if strings.Contains(body, c.ResumeKey) {
+		t.Fatal("the snapshot leaks the resume key")
+	}
+	// Keyless: only from the address the client is now bound to.
+	if code, _ := call("", ""); code != http.StatusForbidden {
+		t.Fatalf("keyless call from the old address: %d, want 403", code)
+	}
+	if code, _ := call("2.2.2.2", ""); code != 200 {
+		t.Fatalf("keyless call from the bound address: %d, want 200", code)
+	}
+	if code, _ := call("2.2.2.2", "not-the-key"); code != http.StatusForbidden {
+		t.Fatalf("wrong key: %d, want 403", code)
+	}
+	// A resume by key from yet another address is the same client; a wrong key mints a new one.
+	register := func(xff, key string) string {
+		body := []byte(`{"role":"viewer","resume_key":"` + key + `"}`)
+		resp, out := h.doXFF(t, "POST", "/api/sessions/"+c.SID+"/clients", c.Token, c.ClientID, xff, body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("register from %s: %s %s", xff, resp.Status, out)
+		}
+		var r struct {
+			ClientID  string `json:"client_id"`
+			ResumeKey string `json:"resume_key"`
+		}
+		if err := json.Unmarshal(out, &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.ResumeKey == "" {
+			t.Fatalf("register reply without a key: %s", out)
+		}
+		return r.ClientID
+	}
+	if id := register("4.4.4.4", c.ResumeKey); id != c.ClientID {
+		t.Fatalf("resume by key gave %s, want %s", id, c.ClientID)
+	}
+	if id := register("4.4.4.4", "nope"); id == c.ClientID {
+		t.Fatal("a wrong key resumed the creator")
+	}
+	// The creator is bound to 4.4.4.4 now, so the snapshot needs the key (or that address).
+	code, body := call("5.5.5.5", c.ResumeKey)
+	if code != 200 {
+		t.Fatalf("snapshot by key: %d %s", code, body)
+	}
+	var snap session.Snapshot
+	if err := json.Unmarshal([]byte(body), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Clients) != 2 {
+		t.Fatalf("clients %+v", snap.Clients)
+	}
+}
+
+// TestKeylessResumeKeepsTheKeyPrivate: a resume proved only by the bound
+// address (a page without a key) gets its client back but not the key.
+func TestKeylessResumeKeepsTheKeyPrivate(t *testing.T) {
+	h := start(t, nil)
+	c := h.create(t)
+	resp, body := h.do(t, "POST", "/api/sessions/"+c.SID+"/clients", c.Token, c.ClientID, []byte(`{"role":"viewer"}`))
+	if resp.StatusCode != 200 {
+		t.Fatalf("keyless resume: %s %s", resp.Status, body)
+	}
+	var r map[string]any
+	if err := json.Unmarshal(body, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r["client_id"] != c.ClientID {
+		t.Fatalf("keyless resume from the bound address should return the client: %s", body)
+	}
+	if _, leaked := r["resume_key"]; leaked {
+		t.Fatalf("a keyless resume must not hand out the key: %s", body)
 	}
 }

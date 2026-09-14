@@ -433,29 +433,29 @@ func TestHeldSurvivesOtherManifest(t *testing.T) {
 func TestClientRegistryAndEviction(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	s, _ := st.Create()
-	a, _ := s.RegisterClient("10.0.0.1", "alice", true, "")
+	a, _ := s.RegisterClient("10.0.0.1", "alice", true, "", "")
 	if a.Name != "alice" || !a.SessionAdmin {
 		t.Fatalf("first client %+v", a)
 	}
 	// A second registration from the same address is a second device, so a
 	// second client (ADR 0022) — the two share a NAT, not an identity.
-	bob, _ := s.RegisterClient("10.0.0.1", "bob", false, "")
+	bob, _ := s.RegisterClient("10.0.0.1", "bob", false, "", "")
 	if bob == a || bob.Name != "bob" || bob.SessionAdmin {
 		t.Fatalf("second device %+v", bob)
 	}
 	// Resuming by id from the same address returns the same client; the proposed
 	// name is ignored; admin upgrades but never downgrades.
-	again, _ := s.RegisterClient("10.0.0.1", "carol", false, a.ID)
+	again, _ := s.RegisterClient("10.0.0.1", "carol", false, a.ID, "")
 	if again != a || again.Name != "alice" || !again.SessionAdmin {
 		t.Fatalf("resume %+v", again)
 	}
 	// A resume from another address is not honoured: the id is public.
-	imp, _ := s.RegisterClient("10.0.0.2", "mallory", false, a.ID)
+	imp, _ := s.RegisterClient("10.0.0.2", "mallory", false, a.ID, "")
 	if imp == a || imp.Name != "mallory" || imp.SessionAdmin {
 		t.Fatalf("resume from another address %+v", imp)
 	}
 	// A duplicate name is suffixed.
-	b, _ := s.RegisterClient("10.0.0.2", "alice", false, "")
+	b, _ := s.RegisterClient("10.0.0.2", "alice", false, "", "")
 	if b == a || b.Name != "alice 2" {
 		t.Fatalf("duplicate name %+v", b)
 	}
@@ -477,7 +477,7 @@ func TestClientRegistryAndEviction(t *testing.T) {
 	if _, ok := s.ClientByID(imp.ID); ok {
 		t.Fatal("evicted address's other client still present")
 	}
-	if _, ok := s.RegisterClient("10.0.0.2", "x", false, ""); ok {
+	if _, ok := s.RegisterClient("10.0.0.2", "x", false, "", ""); ok {
 		t.Fatal("registration from an evicted address")
 	}
 	// alice evicts bob, who shares her address: only bob goes, the address stays
@@ -492,7 +492,7 @@ func TestClientRegistryAndEviction(t *testing.T) {
 		t.Fatalf("clients after evictions %+v", snap)
 	}
 	// An airlift-admin eviction (no evictor address) always bars the address.
-	c, _ := s.RegisterClient("10.0.0.3", "dave", false, "")
+	c, _ := s.RegisterClient("10.0.0.3", "dave", false, "", "")
 	if _, ok := s.EvictClientByID(c.ID, ""); !ok || !s.Evicted("10.0.0.3") {
 		t.Fatal("admin evict should bar the address")
 	}
@@ -758,5 +758,112 @@ func TestIngestFountainValidation(t *testing.T) {
 	}
 	if bs := s.Snapshot().Beams[0]; bs.Total != int(manifest.Total) || bs.Have > int(manifest.Total) {
 		t.Fatalf("beam %+v", bs)
+	}
+}
+
+// TestResumeKeyAcrossAddresses: the resume key is the identity (ADR 0022,
+// amended) — it resumes and re-binds from any address, a wrong key is a
+// stranger, and a keyless call is honoured only from the bound address.
+func TestResumeKeyAcrossAddresses(t *testing.T) {
+	st, _ := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	a, _ := s.RegisterClient("10.0.0.1", "alice", true, "", "")
+	if len(a.ResumeKey()) < 20 {
+		t.Fatalf("resume key %q", a.ResumeKey())
+	}
+	back, ok := s.RegisterClient("10.0.0.9", "ignored", false, a.ID, a.ResumeKey())
+	if !ok || back != a || a.Addr != "10.0.0.9" || a.Name != "alice" || !a.SessionAdmin {
+		t.Fatalf("resume by key from a new address: ok=%v %+v", ok, back)
+	}
+	if imp, _ := s.RegisterClient("10.0.0.9", "mallory", false, a.ID, "not-the-key"); imp == a {
+		t.Fatal("a wrong key resumed the client")
+	}
+	if again, _ := s.RegisterClient("10.0.0.9", "x", false, a.ID, ""); again != a {
+		t.Fatal("a keyless resume from the bound address should still work")
+	}
+	if other, _ := s.RegisterClient("10.0.0.2", "x", false, a.ID, ""); other == a {
+		t.Fatal("a keyless resume from elsewhere must not")
+	}
+	// The client tier: a matching key passes from anywhere and re-binds.
+	if !s.VerifyClient(a, "10.0.0.7", a.ResumeKey()) || a.Addr != "10.0.0.7" {
+		t.Fatalf("verify by key: addr %q", a.Addr)
+	}
+	if s.VerifyClient(a, "10.0.0.8", "") || s.VerifyClient(a, "10.0.0.7", "bad") {
+		t.Fatal("verify accepted a keyless call from elsewhere or a wrong key")
+	}
+	if !s.VerifyClient(a, "10.0.0.7", "") {
+		t.Fatal("verify refused a keyless call from the bound address")
+	}
+	// The key is never in the place document.
+	blob, _ := json.Marshal(s.Snapshot())
+	if strings.Contains(string(blob), a.ResumeKey()) {
+		t.Fatal("the snapshot leaks the resume key")
+	}
+}
+
+// TestIdleClientsPark: a client with no stream and no activity for
+// ClientIdleTTL leaves the list, and comes back — name, admin flag and all —
+// the moment its device speaks with the key.
+func TestIdleClientsPark(t *testing.T) {
+	st, c := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	a, _ := s.RegisterClient("10.0.0.1", "alice", true, "", "")
+	s.RegisterClient("10.0.0.2", "bob", false, "", "")
+	if s.ParkIdleClients(c.t.Add(ClientIdleTTL - time.Second)) {
+		t.Fatal("parked too early")
+	}
+	c.t = c.t.Add(ClientIdleTTL + time.Second)
+	if !s.ParkIdleClients(c.t) {
+		t.Fatal("nothing parked")
+	}
+	if n := len(s.Snapshot().Clients); n != 0 {
+		t.Fatalf("%d clients shown after parking, want 0", n)
+	}
+	if !s.VerifyClient(a, "10.0.0.5", a.ResumeKey()) {
+		t.Fatal("verify")
+	}
+	snap := s.Snapshot().Clients
+	if len(snap) != 1 || snap[0].Name != "alice" || !snap[0].SessionAdmin || snap[0].ID != a.ID {
+		t.Fatalf("un-parked client %+v", snap)
+	}
+	// A register with the key un-parks too; bob stays parked.
+	c.t = c.t.Add(ClientIdleTTL + time.Second)
+	s.ParkIdleClients(c.t)
+	if back, _ := s.RegisterClient("10.0.0.6", "", false, a.ID, a.ResumeKey()); back != a {
+		t.Fatal("register did not un-park")
+	}
+	if snap := s.Snapshot().Clients; len(snap) != 1 || snap[0].Name != "alice" {
+		t.Fatalf("after re-register %+v", snap)
+	}
+}
+
+// TestParkedClientComesBackWithStream: a stream is presence — a client parked
+// just before it subscribes is un-parked by the subscribe, and the receipt
+// (AllClients) lists parked clients that the snapshot hides.
+func TestParkedClientComesBackWithStream(t *testing.T) {
+	st, c := newStore(t, time.Hour, 32)
+	s, _ := st.Create()
+	a, _ := s.RegisterClient("10.0.0.1", "alice", true, "", "")
+	c.t = c.t.Add(ClientIdleTTL + time.Second)
+	s.ParkIdleClients(c.t)
+	if len(s.Snapshot().Clients) != 0 {
+		t.Fatal("not parked")
+	}
+	if all := s.AllClients(); len(all) != 1 || all[0].Name != "alice" {
+		t.Fatalf("AllClients hides the parked client: %+v", all)
+	}
+	sub := s.Subscribe(a, RoleViewer)
+	defer s.Unsubscribe(sub)
+	if snap := s.Snapshot().Clients; len(snap) != 1 || !snap[0].Connected {
+		t.Fatalf("subscribe did not un-park: %+v", snap)
+	}
+	// A verified call from the bound address refreshes the client's clock, so
+	// the next sweep leaves it alone.
+	s.Unsubscribe(sub)
+	if !s.VerifyClient(a, "10.0.0.1", "") {
+		t.Fatal("verify")
+	}
+	if s.ParkIdleClients(c.t.Add(ClientIdleTTL - time.Second)) {
+		t.Fatal("parked a client that just spoke")
 	}
 }

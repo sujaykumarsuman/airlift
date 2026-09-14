@@ -263,8 +263,9 @@ func (srv *Server) tokenOnly(h sessionHandler) http.HandlerFunc {
 }
 
 // client is the tier for what a registered participant does: a valid token plus
-// an X-Airlift-Client id that matches the caller's (non-evicted) address. A hit
-// refreshes the TTL and the client's last-active.
+// an X-Airlift-Client id proved by its X-Airlift-Client-Key (or, keyless, by the
+// caller's bound address), from a non-evicted address. A key that matches
+// re-binds the client to the caller's address (a phone back from sleep).
 func (srv *Server) client(h clientHandler) http.HandlerFunc {
 	return srv.withSession(func(w http.ResponseWriter, r *http.Request, s *session.Session) {
 		if !srv.checkToken(w, r, s) {
@@ -280,8 +281,8 @@ func (srv *Server) client(h clientHandler) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "register a client first")
 			return
 		}
-		if c.Addr != addr {
-			writeError(w, http.StatusForbidden, "client id does not match your address")
+		if !s.VerifyClient(c, addr, r.Header.Get("X-Airlift-Client-Key")) {
+			writeError(w, http.StatusForbidden, "client id does not match your key or address")
 			return
 		}
 		// Presence alone is not activity: only a frames POST with progress, a

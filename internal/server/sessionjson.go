@@ -60,7 +60,7 @@ func (srv *Server) writeSessionJSON(s *session.Session) {
 		Status:     snap.Status,
 		Terminated: snap.Terminated,
 		CreatedAt:  s.CreatedAt,
-		Clients:    snap.Clients,
+		Clients:    s.AllClients(), // parked ones too: the receipt records everyone seen
 		Events:     s.LifecycleLog(),
 		Senders:    []uint32{},
 		Beams:      []sessionBeamRef{},

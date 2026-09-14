@@ -786,6 +786,11 @@ func (s *Session) Subscribe(client *Client, role Role) *Subscriber {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subs[sub] = struct{}{}
+	// A stream is presence: a client parked between the tier check and this
+	// subscribe (the sweep runs on its own clock) comes back into the list.
+	if client != nil && !client.parkedAt.IsZero() {
+		client.parkedAt = time.Time{}
+	}
 	// Wake the OTHER streams about the new presence; the new stream gets its
 	// first snapshot from the handler's initial send, not a self-signal.
 	s.notifyOthersLocked(sub)
@@ -1211,15 +1216,15 @@ func (s *Session) Snapshot() Snapshot {
 		snap.Extension = &e
 	}
 	// One pass over the streams: count relays and fold each client's open
-	// streams into its connected flag and role set.
-	connected := map[string]bool{}
+	// streams into its connected flag and role set. A parked client (idle, no
+	// stream, ClientIdleTTL) is left out until its device speaks again.
+	connected := s.connectedLocked()
 	roleSet := map[string]map[Role]bool{}
 	for sub := range s.subs {
 		if sub.role == RoleRelay {
 			snap.Relays++
 		}
 		if sub.client != nil {
-			connected[sub.client.ID] = true
 			if roleSet[sub.client.ID] == nil {
 				roleSet[sub.client.ID] = map[Role]bool{}
 			}
@@ -1228,7 +1233,7 @@ func (s *Session) Snapshot() Snapshot {
 	}
 	for _, id := range s.clientOrder {
 		c := s.clients[id]
-		if c == nil {
+		if c == nil || !c.parkedAt.IsZero() {
 			continue
 		}
 		roles := []string{}

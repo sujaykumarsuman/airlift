@@ -41,6 +41,26 @@ address is what a misbehaving stranger cannot easily change).
   eviction always bars.
 - Rate limits stay per address (ADR 0017).
 
+## Amendment (2026-09-14): the resume key
+
+The address turned out to be a poor stand-in for "the same device": a phone's
+address changes whenever its screen sleeps (carrier NAT, rotating IPv6
+privacy addresses, Wi-Fi to cellular), so the resume was refused and every
+reload minted a new participant, which then lingered. Identity now rests on a
+**resume key**: a random 128-bit secret minted with the client and returned
+only in the create/join/register replies, held by the device (localStorage)
+and presented as `X-Airlift-Client-Key` on every client-tier call and as
+`resume_key` on a resume. A matching key proves the device whatever the
+address and re-binds the client to it (so eviction still bars where the device
+is now); a keyless call is honoured only from the bound address, for pages
+built before the key — and a keyless resume never returns the key, so a
+shared address cannot be turned into a permanent identity. The public id is no longer what stops a takeover — the
+key is. A client with no open stream and no activity for `ClientIdleTTL`
+(10 min) is *parked*: hidden from the participants list, its record kept, and
+un-parked by its next keyed call — so nothing dangles, and nothing is lost.
+The dashboard's scan link still carries `c=`; the scanner takes the key from
+the dashboard's stored record on the same device.
+
 ## Consequences
 
 - `Session.RegisterClient(addr, name, admin, resume)`;

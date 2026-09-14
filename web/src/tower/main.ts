@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getInfo, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, resolveKnock } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getInfo, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, rememberClientKey, resolveKnock } from "../shared/api";
 import { decodeBitmap } from "../shared/bitmap";
 import { renderChunkMarks } from "../shared/chunks";
 import { bindCopyButtons } from "../shared/copy";
@@ -20,29 +20,44 @@ interface Stored {
   client_id: string;
   name: string;
   hasPassword: boolean; // how this device got in: password join, or a token link
+  resumeKey?: string; // the client's proof of identity (ADR 0022, amended)
 }
 
+// The identity lives in localStorage — per origin, so a discarded tab or the
+// link opened again from the QR is still the same participant — with a read of
+// the older per-tab sessionStorage record so an open page carries over.
 const storageKey = (sid: string): string => `airlift.session.${sid}`;
+// Even reading `window.localStorage` throws where site data is blocked, so the
+// accessors run inside the try.
 function loadStored(sid: string): Stored | null {
-  try {
-    const raw = sessionStorage.getItem(storageKey(sid));
-    return raw ? (JSON.parse(raw) as Stored) : null;
-  } catch {
-    return null;
+  for (const which of ["localStorage", "sessionStorage"] as const) {
+    try {
+      const raw = window[which].getItem(storageKey(sid));
+      if (raw) {
+        const s = JSON.parse(raw) as Stored;
+        rememberClientKey(s.client_id, s.resumeKey);
+        return s;
+      }
+    } catch {
+      /* storage unavailable or corrupt: try the next, else start fresh */
+    }
   }
+  return null;
 }
 function saveStored(s: Stored): void {
   try {
-    sessionStorage.setItem(storageKey(s.sid), JSON.stringify(s));
+    localStorage.setItem(storageKey(s.sid), JSON.stringify(s));
   } catch {
     /* private mode: the URL still carries enough to rejoin a public session */
   }
 }
 function clearStored(sid: string): void {
-  try {
-    sessionStorage.removeItem(storageKey(sid));
-  } catch {
-    /* ignore */
+  for (const which of ["localStorage", "sessionStorage"] as const) {
+    try {
+      window[which].removeItem(storageKey(sid));
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -188,7 +203,7 @@ async function boot(): Promise<void> {
   const stored = loadStored(sid);
   const token = frag || stored?.token || "";
   if (frag) history.replaceState(null, "", location.pathname); // drop the token from the URL bar
-  current = { sid, token, client_id: stored?.client_id ?? "", name: stored?.name ?? "", hasPassword: stored?.hasPassword ?? false };
+  current = { sid, token, client_id: stored?.client_id ?? "", name: stored?.name ?? "", hasPassword: stored?.hasPassword ?? false, resumeKey: stored?.resumeKey };
   if (token) await enterWithToken();
   else await probeGate(sid);
 }
@@ -197,9 +212,12 @@ async function boot(): Promise<void> {
 async function enterWithToken(): Promise<void> {
   if (!current) return;
   try {
-    const cl = await registerClient(current.sid, current.token, { role: "viewer", resume: current.client_id || undefined });
+    // The stored name rides along so a client the tower has since forgotten
+    // (a restart) comes back under the same name.
+    const cl = await registerClient(current.sid, current.token, { role: "viewer", resume: current.client_id || undefined, resumeKey: current.resumeKey, name: current.name || undefined });
     current.client_id = cl.client_id;
     current.name = cl.name;
+    current.resumeKey = cl.resume_key;
     saveStored(current);
     attach(current);
   } catch (err) {
@@ -236,7 +254,7 @@ async function create(opts: CreateOptions = {}): Promise<void> {
   notice = "";
   try {
     const c = await createSession(opts);
-    current = { sid: c.sid, token: c.token, client_id: c.client_id, name: c.name, hasPassword: !!opts.password };
+    current = { sid: c.sid, token: c.token, client_id: c.client_id, name: c.name, hasPassword: !!opts.password, resumeKey: c.resume_key };
     saveStored(current);
     history.pushState(null, "", new URL(c.sid, appBase).toString()); // move to …/<sid>
     attach(current);
@@ -342,7 +360,7 @@ async function passwordJoin(sid: string, password: string, name: string): Promis
   notice = "";
   try {
     const j = await joinSession(sid, { password, name: name || undefined });
-    current = { sid, token: j.token, client_id: j.client_id, name: j.name, hasPassword: true };
+    current = { sid, token: j.token, client_id: j.client_id, name: j.name, hasPassword: true, resumeKey: j.resume_key };
     saveStored(current);
     attach(current);
   } catch (err) {
@@ -733,9 +751,13 @@ function onReopen(): void {
     btn.disabled = true;
     btn.textContent = "Reopening…";
   }
-  void registerClient(current.sid, current.token, { role: "viewer", resume: current.client_id || undefined })
+  void registerClient(current.sid, current.token, { role: "viewer", resume: current.client_id || undefined, resumeKey: current.resumeKey, name: current.name || undefined })
     .then((c) => {
-      if (current) current.client_id = c.client_id;
+      if (current) {
+        current.client_id = c.client_id;
+        current.resumeKey = c.resume_key;
+        saveStored(current);
+      }
     })
     .catch((err) => {
       if (btn) {

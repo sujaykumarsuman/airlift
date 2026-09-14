@@ -58,7 +58,7 @@
           <h3>What a session holds while it lives</h3>
           <ul>
             <li>A random session id and token.</li>
-            <li>For each participating device: a random client id; a name — generated (like <em>brave badger</em>) or the one you typed; which roles the device is using (viewer, relay); and the network address it connects from, used for rate limiting and eviction. Addresses are visible only to the operator's admin console, never to other participants.</li>
+            <li>For each participating device: a random client id and a random resume key (the device's proof that it is that participant, never shown to anyone); a name — generated (like <em>brave badger</em>) or the one you typed; which roles the device is using (viewer, relay); and the network address it last connected from, used for rate limiting and eviction. Addresses are visible only to the operator's admin console, never to other participants.</li>
             <li>The relayed QR frames and the files reassembled from them, written under the tower's data directory so they can be verified and downloaded, plus a small session receipt.</li>
           </ul>
           <h3>How long</h3>
@@ -69,7 +69,7 @@
             <li>Every session and file is wiped whenever the tower restarts — there is no persistence, by design. Rate-limit counters live in memory and expire on their own.</li>
           </ul>
           <h3>On your device</h3>
-          <p>The dashboard keeps the current session's id, token and client id in the browser's <code>sessionStorage</code> (tab-scoped, gone when the tab closes). The scanner remembers the last session it joined in <code>localStorage</code> so its home-screen shortcut can reopen it. No cookies are set. Clearing the site's data removes both.</p>
+          <p>The dashboard keeps each session it has opened — the session's id, token, your participant id and name, and a random <em>resume key</em> that proves this device is that participant — in the browser's <code>localStorage</code>, so a reload or a re-scanned link is still you. The scanner keeps the same identity and the last session it joined, so its home-screen shortcut can reopen it. Nothing there identifies you or the device beyond the session. No cookies are set. Clearing the site's data removes it all; the tower forgets the session on its own schedule regardless.</p>
           <h3>The camera</h3>
           <p>The scanner reads QR codes on the phone itself; only the decoded text of each frame is sent to the tower. No video or images ever leave the device. The beam page shown on the air-gapped machine is a fully offline file and contacts nothing.</p>
           <h3>Logs, analytics, third parties</h3>

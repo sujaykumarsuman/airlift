@@ -120,6 +120,7 @@ export interface Created {
   expires_at: string;
   client_id: string;
   name: string;
+  resume_key: string; // the device's proof of identity (ADR 0022, amended); never in a snapshot
 }
 
 /** Options for POST /api/sessions; every field is optional. */
@@ -137,6 +138,7 @@ export interface Client {
   name: string;
   session_admin: boolean;
   roles: string[];
+  resume_key: string;
 }
 
 /** The response to a password join (POST .../join). */
@@ -144,6 +146,7 @@ export interface Joined {
   token: string;
   client_id: string;
   name: string;
+  resume_key: string;
 }
 
 export interface IngestResult {

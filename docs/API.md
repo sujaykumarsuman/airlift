@@ -14,9 +14,9 @@ client), *a-admin* (the airlift admin, `admin_token`).
 ```
 POST   /api/sessions                  public → body {label?,password?,joiners_admin?,
                                                max_gz_bytes?,idle_ttl?}
-                                             → {sid, token, client_id, name, join_url, expires_at}
-POST   /api/sessions/{sid}/join       public → body {password, name?} → {token, client_id, name}
-POST   /api/sessions/{sid}/clients    token  → body {name?, role?} → {client_id, name, session_admin, roles}
+                                             → {sid, token, client_id, name, resume_key, join_url, expires_at}
+POST   /api/sessions/{sid}/join       public → body {password, name?} → {token, client_id, name, resume_key}
+POST   /api/sessions/{sid}/clients    token  → body {name?, role?, resume_key?} → {client_id, name, session_admin, roles, resume_key}
                                              (reopens a session suspended by inactivity — ADR 0018)
 GET    /api/sessions/{sid}            client → place snapshot
 GET    /api/sessions/{sid}/events     client → SSE place snapshots
@@ -77,18 +77,27 @@ rides in the **fragment** (`…/<sid>#t=<token>`) so it never reaches server log
 by entering the password.
 
 Beyond the token, most calls also carry a **client id** in the
-`X-Airlift-Client` header. A client is one participant — one device
-(`POST …/clients`, or minted by create/join). Registering mints a new client
-unless the request's `X-Airlift-Client` names one of the session's clients
-bound to the caller's address, which is then returned (ADR 0022): a reload keeps
-its identity, a second device behind the same NAT is a second participant, and a
-resume from elsewhere is refused. The id is rechecked against the caller's
-address on every call, so it is not a secret. There are four tiers:
+`X-Airlift-Client` header and its **resume key** in `X-Airlift-Client-Key`. A
+client is one participant — one device (`POST …/clients`, or minted by
+create/join); every reply that mints or resumes one returns `resume_key`, a
+random secret the device keeps (localStorage) and that never appears in a
+snapshot. Registering mints a new client unless the request's `X-Airlift-Client`
+names one of the session's clients and the body's `resume_key` is that client's
+(or, for pages without a key, the caller's address is the one it is bound to),
+which is then returned and re-bound to the caller's address (ADR 0022, amended;
+a keyless resume gets the client back but not its key):
+a reload, a second tab, or a phone back from sleep on a new address keeps its
+identity; a second device is a second participant; a wrong key is a stranger.
+The same check guards every client-tier call, so the id itself is not a secret.
+A client with no open stream and no activity for 10 minutes is **parked** —
+left out of the snapshot's `clients` — and returns, name and admin flag intact,
+the moment its device speaks again with the key. There are four tiers:
 
 - **public** — no auth: create, join, knock + poll (ADR 0021), `/api/info`, pages.
 - **token** — a valid token, no client needed: register a client.
-- **client** — token + a registered, non-evicted client whose id matches the
-  caller's address: snapshot, events, frames, ping, extension, download.
+- **client** — token + a registered, non-evicted client proved by its key (or,
+  keyless, by its bound address): snapshot, events, frames, ping, extension,
+  download.
 - **s-admin** (session admin) — a client that is a session admin: delete the
   session, evict a client, set the password, remove a beam, extend the max_age cap.
 - **a-admin** (airlift admin) — the operator, holding the tower's `admin_token`
@@ -165,7 +174,7 @@ prints it, with a terminal QR code, to stdout. `idle_ttl` sets the idle grace (s
 Lifecycle).
 
 When a password is set the session is also joinable without a token: `POST
-/api/sessions/{sid}/join {password, name}` → `{token, client_id, name}` (a `404`
+/api/sessions/{sid}/join {password, name}` → `{token, client_id, name, resume_key}` (a `404`
 when no password is set). `PATCH /api/sessions/{sid} {password}` sets or (with
 `""`) clears it. Passwords are salted SHA-256 in memory, never stored in
 plaintext or logged.
