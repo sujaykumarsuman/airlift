@@ -390,7 +390,7 @@ ul.paths code { color: var(--fg); }
 .docs .toc a:hover { color: var(--fg); background: var(--surface-2); }
 .docs .toc a.on { color: var(--accent); background: var(--accent-soft); }
 .docs article { max-width: 760px; min-width: 0; }
-.docs article section { padding: 1.5rem 0; border-bottom: 1px solid var(--border); }
+.docs article section { padding: 1.5rem 0; border-bottom: 1px solid var(--border); scroll-margin-top: 72px; }
 .docs article section:first-child { padding-top: 0.5rem; }
 .docs article section:last-child { border-bottom: 0; }
 .docs h1 { font-size: 2rem; letter-spacing: -0.02em; margin: 0 0 0.5rem; }

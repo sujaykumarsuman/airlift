@@ -934,7 +934,6 @@ function resultCard(b: Beam): Raw {
         (d) => html`<button class="btn primary" data-beam="${b.bid}" data-download="${d}">${icon("download")} ${DOWNLOAD_LABELS[d] ?? d}</button>`,
       )}
     </p>
-    ${b.saved_path ? html`<p>Written to <code>${b.saved_path}</code></p>` : ""}
     ${b.error ? html`<p class="warn">${b.error}</p>` : ""}
   </div>`;
 }

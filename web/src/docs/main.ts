@@ -6,25 +6,33 @@ import { enter } from "../shared/motion";
 // contents pointing at the section in view.
 bindCopyButtons(document);
 
-const links = [...document.querySelectorAll<HTMLAnchorElement>(".toc a[href^='#']")];
+// The TOC links are `docs#section`, not `#section`: the tower injects a
+// <base href> into every page, against which a bare fragment would resolve to
+// the home page. Same-document fragment navigation still just scrolls.
+const fragment = (a: HTMLAnchorElement): string => a.getAttribute("href")?.split("#")[1] ?? "";
+const links = [...document.querySelectorAll<HTMLAnchorElement>(".toc a[href*='#']")];
 const sections = links
-  .map((a) => document.getElementById(a.getAttribute("href")!.slice(1)))
+  .map((a) => document.getElementById(fragment(a)))
   .filter((el): el is HTMLElement => el !== null);
-if ("IntersectionObserver" in window && sections.length) {
-  const visible = new Set<string>();
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting) visible.add(e.target.id);
-        else visible.delete(e.target.id);
-      }
-      // the first section (in document order) that is in view is the current one
-      const current = sections.find((s) => visible.has(s.id))?.id;
-      for (const a of links) a.classList.toggle("on", a.getAttribute("href") === `#${current}`);
-    },
-    { rootMargin: "-56px 0px -60% 0px", threshold: 0 },
-  );
-  for (const s of sections) io.observe(s);
+
+// The current section is the last one whose top has passed the sticky nav —
+// deterministic after a jump, unlike "first section intersecting the viewport",
+// which still counts the sliver of the previous section left above the fold.
+const NAV_PX = 80;
+function sync(): void {
+  let current = sections[0]?.id ?? "";
+  for (const s of sections) {
+    if (s.getBoundingClientRect().top <= NAV_PX) current = s.id;
+  }
+  // At the very bottom the last section may be too short to reach the nav.
+  const atEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
+  if (atEnd && sections.length) current = sections[sections.length - 1]!.id;
+  for (const a of links) a.classList.toggle("on", fragment(a) === current);
 }
+// Eight rects per scroll event is nothing, so no throttling — and no rAF, which
+// never fires in a background tab. hashchange covers a TOC click directly.
+addEventListener("scroll", sync, { passive: true });
+addEventListener("hashchange", sync);
+sync();
 
 enter(document.querySelector<HTMLElement>("main") ?? document.body);
