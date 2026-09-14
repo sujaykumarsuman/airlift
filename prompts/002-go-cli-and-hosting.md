@@ -426,12 +426,31 @@ Exit: the hosted dashboard reaches READY through replay over the internet;
 the admin page manages it; `careerdock` is gone from the VPS and safe on
 the laptop; nothing sensitive in the repo. Commit.
 
-## Before going public (ask the operator, do not decide)
+## Phases 9–12 (executed after this plan, from operator feedback)
 
-- Licence file (MIT is the obvious default for personal tooling).
-- Whether `deploy/` should carry the real domain as the example value.
-- Whether the release workflow should build on tag only, or also on `main`.
+- **Phase 9** — reopen-by-link for sessions suspended by inactivity; session-admin
+  +1 h max-age grants (ADR 0018).
+- **Phase 10** — the shared session dashboard, the scanner opened on demand and
+  self-stopping, presence-keeps-alive, hard delete (ADR 0019).
+- **Phase 11** — human session ids at `/<sid>`, the token/password gate, admission
+  by knock (ADR 0020, ADR 0021).
+- **Phase 12** — the dark, symbol-led UI (a Claude Design canvas as the
+  reference), responsive layout, tally chunk marks, the scanner viewfinder and
+  completion fixes, a client per device (ADR 0022), the dark beam player, the
+  landing + docs pages with real screenshots, motion; the repo went public and
+  v0.1.0 / v0.1.1 were released with stamped versions.
+
+`STATUS.md` has the detail; CLAUDE.md's locked-decision list is the summary.
+
+## Before going public (resolved 2026-09-14)
+
+The repo went public on the operator's instruction after a secrets scan.
+Decided: `deploy/` and the Makefile carry the real domain as the default
+(personal tooling); the release workflow builds on `v*` tags only. Still open
+for the operator: a licence file (none yet; MIT is the obvious default).
 
 ## Start
 
-Read the documents named at the top. Execute Phase 5. Stop for review.
+Phases 5–12 are done. Read the documents named at the top and `STATUS.md` for
+what remains (hardware runs still outstanding, open questions). Stop for review
+after each phase.

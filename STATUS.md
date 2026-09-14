@@ -222,15 +222,20 @@ prompt → join; a public id without its token → "needs its link"; Participant
 
 - **Phase 11 complete.**
 
-## Phase 12 — dark UI revamp (done)
+## Phase 12 — dark UI revamp, landing + docs, first releases (done)
 
-A presentation-only revamp — no protocol, API, or lifecycle change, so no ADR.
-The web UI is now one committed dark theme: near-black ground (`#0b0d10`), teal
-accent (`#35d0c0`), system sans with mono for machine text, and inline stroke
-symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
+Started as a presentation-only revamp; grew one locked decision (ADR 0022, a
+client per device) and the first releases. The web UI is one committed dark
+theme: near-black ground (`#0b0d10`), teal accent (`#35d0c0`), system sans with
+mono for machine text, and inline stroke symbols throughout (no icon font, no
+new runtime dep — CLAUDE.md holds).
 
-- **Design canvas** authored with Claude Design (Home, Dashboard, Scanner, Admin,
-  States, Tokens) as the reference for the build; kept out of the repo.
+- **Design canvas** authored with Claude Design as the reference for the build —
+  https://claude.ai/code/artifact/0f31932b-724c-4e9c-8eac-cb4f7dae9f96 (Version 7:
+  Main, Landing, Home, Dashboard, DashMobile, Scan, ChunkMarks, Beam, Motion,
+  Docs, States, Admin, Tokens). Its working `.dc.html` files are not in the repo;
+  to change it, extract from the artifact with the design skill's
+  `seed-canvas.mjs --extract`, edit, re-seed, republish.
 - **`web/src/shared/icons.ts`** (new): an `icon(name)` helper returning inline
   SVG (`currentColor`, 1.75 stroke) — the single symbol set.
 - **`web/src/shared/style.css`** rewritten: dark tokens + every component (nav,
@@ -292,9 +297,31 @@ symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
   install → make a beam → show it → receive it → sessions → tips → reference, with
   real screenshots captured headlessly from the running tower
   (`web/public/docs/*.webp`, embedded in the binary; `GET /docs` and `/docs/`
-  routes). The repo is public; releases are `airlift-<os>-<arch>` from `v*` tags.
+  routes). Regenerate the screenshots with `make docs-shots`
+  (`web/tools/docs-shots.mjs`: throw-away tower + demo beam + headless Chrome).
+  The docs' TOC links are `docs#section` — a bare `#fragment` resolves against
+  the injected `<base href>` to the home page. The beam card no longer shows the
+  tower's on-disk path.
+- **Repo public; releases**: the repo went public on 2026-09-14 (secrets scan
+  first). **v0.1.0** and **v0.1.1** are released from `v*` tags — the workflow
+  builds `airlift-<os>-<arch>` for darwin/arm64+amd64, linux/amd64+arm64,
+  windows/amd64 plus `SHA256SUMS`; `releases/latest` → v0.1.1. The binary is
+  stamped with `VERSION` (`git describe --tags` by default, the tag in the
+  workflow; `-X github.com/sujaykumarsuman/airlift.Version=…`) and reports it at
+  `/api/info` and in the landing footer. `make deploy` prints the version and
+  notes an untagged HEAD — the live tower runs **v0.1.1** from the tag.
+- **Hardware validation (2026-09-14)**: Mac + Android over the hosted tower — a
+  3-chunk sequential beam and a 69-chunk fountain repobundle (`docs/adr`, 184
+  frames) both received and verified byte-for-byte, downloaded from the
+  dashboard; two devices in one session (which surfaced the client-per-address
+  collapse → ADR 0022); the small beam surfaced the completion race → the
+  `completed_beams` path. Still to run on a real camera: the `completed_beams`
+  overlay for a tiny beam (verified by unit tests + a headless round-trip only),
+  a ~1 MB bundle at ≥ 8 fps, and two phones relaying one beam.
 
-- **Phase 12 complete.**
+- **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
+  exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
+  "Open questions" and the hardware items above for what remains.
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
@@ -322,10 +349,12 @@ symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
 
 ## Pending — hardware validation
 
-- Hardware, still outstanding from Phase 3/4 (now over the hosted, TLS tower at
-  `projects.sujaykumar.dev`): Mac + Android, scan the join QR, scan `beam.html`
-  off the monitor, compare the zip download with the source; then a 1 MB bundle
-  in fountain mode at ≥ 8 fps, and two phones on one session.
+- Done (2026-09-10 and 2026-09-14, over the hosted TLS tower at
+  `projects.sujaykumar.dev`): Mac + Android, join QR → dashboard, `Scan a beam`
+  off the monitor, sequential and fountain beams, downloads verified against
+  the source, two devices in one session. Still outstanding: a ~1 MB bundle in
+  fountain mode at ≥ 8 fps, two phones relaying one beam, and a real-camera run
+  of a tiny beam to see the `completed_beams` completion overlay (Phase 12).
 - The per-session `max_age` override deferred from Phase 7 shipped in Phase 9 as a
   session-admin **+1 h** grant (`POST …/max-age`, ADR 0018), not an airlift-admin
   override.

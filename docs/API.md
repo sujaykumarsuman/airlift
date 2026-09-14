@@ -45,10 +45,11 @@ POST   /api/admin/sessions/{sid}/review  a-admin → body {decision:"accept"|"re
 DELETE /api/admin/sessions/{sid}/clients/{cid}  a-admin → evict a client
 GET    /api/admin/sessions/{sid}/download?beam=<bid>&as=…  a-admin → bytes (no activity marked)
 
-GET    /                              home: create a session, or join by id
+GET    /                              home: the landing — create a session, or join by id
 GET    /{sid}                         session dashboard (ADR 0020; 404 if {sid} is mis-shaped)
-GET    /s/{sid}                       scan page (token arrives in #t=)
+GET    /s/{sid}                       scan page (token arrives in #t=, the dashboard's client id in &c=)
 GET    /admin                         admin console (sign in with admin_token)
+GET    /docs                          docs walkthrough (static; its screenshots under /docs/*.webp)
 ```
 
 `GET /api/info` is unauthenticated (the pages call it before any session
@@ -401,14 +402,17 @@ survive a tower restart — a non-goal.)
 
 ## Static
 
-`GET /` serves the dashboard entry, `GET /s/{sid}` the scan entry, and
-`/assets/…` the Vite build output, all from the embedded `web/dist`; until
-the UI is built they are placeholders. The two HTML pages are served with a
-`<base href>` carrying the configured path prefix injected into their head.
-`/sw.js`, `/manifest.webmanifest` and `/icons/…` make the scan page installable
-and offline-first on the phone; the service worker never touches `/api/`. The
-dashboard also accepts `/#s={sid}&t={token}` so a second device can watch an
-existing session; it keeps its own session in `sessionStorage` across reloads.
+`GET /` serves the tower entry (the landing; the same page is the session
+dashboard at `GET /{sid}`), `GET /s/{sid}` the scan entry, `GET /admin` the
+admin console, `GET /docs` the docs page (its screenshots under `/docs/…`), and
+`/assets/…` the Vite build output, all from the embedded `web/dist`; until the
+UI is built they are placeholders. Every HTML page is served with a `<base href>`
+carrying the configured path prefix injected into its head — which is why
+in-page links are written `page#fragment`, never a bare `#fragment`. `/sw.js`,
+`/manifest.webmanifest` and `/icons/…` make the scan page installable and
+offline-first on the phone; the service worker never touches `/api/`. A session
+lives at `/{sid}` with its token in the fragment (`#t=…`, ADR 0020); the
+dashboard keeps what it needs per session in `sessionStorage` across reloads.
 
 ## Replay (internal)
 

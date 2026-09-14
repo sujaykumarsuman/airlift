@@ -74,7 +74,13 @@ to the live host in the `Makefile`.
 ## Updating
 
 Push a new build with `make deploy`. The web UI is embedded in the binary, so
-there is nothing else to copy. Sessions are memory-only, so a restart drops any
+there is nothing else to copy. The binary is stamped with `VERSION` (`git
+describe --tags` by default), which the tower reports at `/api/info` and in the
+landing footer — so **deploy from a tag**: cut the release first
+(`git tag -a vX.Y.Z -m "…" && git push origin vX.Y.Z`; the release workflow
+builds and publishes `airlift-<os>-<arch>`), then `make deploy`. An untagged
+HEAD still deploys, but `make deploy` says so and the tower reports something
+like `v0.1.1-3-gabc1234`. Sessions are memory-only, so a restart drops any
 in-flight transfer (expected — see the non-goals in `CLAUDE.md`).
 
 ## Configuration

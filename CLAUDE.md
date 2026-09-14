@@ -22,8 +22,10 @@ format), `docs/API.md` (HTTP API), `docs/adr/` (locked decisions), `STATUS.md`
   Its player JS stays inline in the Go-emitted HTML. The beam is *not* a
   session participant and never talks to tower — that is what preserves the
   air gap.
-- **Tower** — the Go binary on the operator's laptop (the Mac). It hosts the
-  session and the `web/` UI on the LAN. Exactly one per session.
+- **Tower** — the Go binary that hosts sessions and the `web/` UI: on the
+  operator's laptop for a LAN run, or — the deployed form — on the VPS behind
+  Caddy TLS at `projects.sujaykumar.dev/airlift` (Phase 8, `docs/HOSTING.md`).
+  Exactly one per session.
 - **Dashboard** — the shared session view (the `tower` page). The join link/QR
   opens it (ADR 0019), so **every client lands here**: watch progress, download
   results, invite others. Multiple clients share one session.
@@ -57,8 +59,16 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
 - `internal/replay` — the simulated scanner (loop, loss, reordering, batched
   POSTs) that drives a tower without a camera; internal, for the dev loop and
   the end-to-end tests.
-- `web/` — vanilla TypeScript + Vite, entries `scan` (phone) and `tower`
-  (dashboard). No framework. Embedded into the Go binary via `embed.go`.
+- `web/` — vanilla TypeScript + Vite, four entries: `tower` (`index.html` — the
+  landing + the session dashboard), `scan` (the phone scanner), `admin` (the
+  operator console) and `docs` (`docs.html`, static walkthrough with real
+  screenshots in `web/public/docs/*.webp`). No framework. Embedded into the Go
+  binary via `embed.go`. Shared modules of note: `shared/icons.ts` (the inline
+  SVG symbol set), `shared/chunks.ts` (tally chunk marks + minimap, tested),
+  `shared/motion.ts` (the one entry-animation hook), `shared/copy.ts` (copy
+  buttons), `shared/style.css` (tokens + every component).
+- `web/tools/docs-shots.mjs` (`make docs-shots`) — regenerates the docs
+  screenshots from the real app with headless Chrome over CDP; rebuild after.
 
 ## Locked decisions (summary — each has an ADR in `docs/adr/`; do not revisit)
 
@@ -167,7 +177,8 @@ overturned by prompt 002: the tower is a hosted, multi-user service. Hosting
 transport landed in ADR 0012; the multi-beam place in ADR 0015; the open
 multi-user access layer in ADR 0017; the session lifecycle in ADR 0013; and the
 admin surface, review flow and runtime overrides in ADR 0014. The VPS deployment
-is the remaining step.)
+landed in Phase 8 and the tower has been live and hardware-validated since; the
+repo is public and releases are cut from `v*` tags.)
 
 ## Conventions
 
@@ -198,6 +209,26 @@ is the remaining step.)
 - The fountain packet construction is a cross-language contract (ADR 0009):
   it lives in `internal/proto/fountain.go`, keeps its arithmetic free of fused
   multiply-add, and is checked seed-by-seed against the frozen vectors.
+- Releases: tag `vX.Y.Z` on `main` → the release workflow builds
+  `airlift-<os>-<arch>` (+ `.exe`, `SHA256SUMS`) and publishes a GitHub release;
+  the landing's download links point at `releases/latest`. The binary is stamped
+  with `VERSION` (`git describe --tags`, or the tag in the workflow) and reports
+  it at `GET /api/info` and in the landing footer. **Deploy from a tag**: `make
+  deploy` prints the version and notes an untagged HEAD — tag first (after any
+  post-release fixes, cut the next patch) so the live tower shows a clean version.
+- Web UI: one committed dark theme (tokens in `shared/style.css`), symbols are
+  inline SVG from `shared/icons.ts` (no icon font, no CDN), motion is CSS on the
+  shared tokens with `prefers-reduced-motion` honoured, layout is mobile-first
+  (the dashboard splits at ≥1000px). Two gotchas the pages must respect: the
+  tower injects `<base href>` into every page, so in-page links are
+  `page#fragment`, never bare `#fragment`; and `[hidden]` is made authoritative
+  with `!important` because components set their own `display`. Verify UI work
+  in-browser at several widths; `airliftScan.demo(total, have)` previews the
+  scanner HUD without a camera, and `internal/replay` / the frozen vectors drive a
+  real beam through a local tower.
+- The design reference is a Claude Design canvas (link in `STATUS.md`); its
+  working files are not in the repo — re-seed from the artifact (`--extract`) to
+  change it. It records intent; the code is the truth.
 - `STATUS.md` updated at the end of every phase: done / next / open questions.
 - British English in docs.
 - Tokens are never logged.

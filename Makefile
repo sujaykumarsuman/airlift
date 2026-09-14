@@ -18,7 +18,7 @@ DOMAIN     ?= projects.sujaykumar.dev
 PREFIX     ?= /airlift
 PUBLIC_URL ?= https://$(DOMAIN)$(PREFIX)
 
-.PHONY: all web airlift airlift-all airlift-linux go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy
+.PHONY: all web airlift airlift-all airlift-linux docs-shots go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy
 
 all: web airlift
 
@@ -52,6 +52,11 @@ airlift-all: web
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="$(LDFLAGS)" \
 	    -o $(BIN)/$(AIRLIFT)-$$os-$$arch$$ext ./cmd/airlift || exit 1; \
 	done
+
+# Regenerate the docs page's screenshots from the real app (a throw-away tower,
+# a demo beam, headless Chrome over CDP): web/public/docs/*.webp. Rebuild after.
+docs-shots: airlift
+	node web/tools/docs-shots.mjs
 
 airlift-linux: web
 	mkdir -p $(BIN)

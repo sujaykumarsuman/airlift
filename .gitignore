@@ -12,3 +12,7 @@ web/dist/*
 # Local artefacts
 *.local
 .DS_Store
+
+# Generated beams (`airlift beam` output) and local hardware test runs
+*.beam.html
+test-run/*.html
