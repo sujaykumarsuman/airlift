@@ -1,5 +1,7 @@
 import "../shared/style.css";
 import { ApiError, eventsURL, joinSession, postExtension, postFrames, postPing, registerClient } from "../shared/api";
+import { decodeBitmap } from "../shared/bitmap";
+import { renderChunkMarks } from "../shared/chunks";
 import { $, html, raw } from "../shared/dom";
 import { cleanupCountdown, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
@@ -23,8 +25,8 @@ import { Relay, type RelayStats } from "./relay";
 
 const video = $<HTMLVideoElement>("#video");
 const frameCanvas = $<HTMLCanvasElement>("#frame");
-const coverageEl = $<HTMLElement>("#coverage");
-const coverageFill = $<HTMLElement>("#coverage-fill");
+const chunksEl = $<HTMLElement>("#chunks");
+const finderEl = $<HTMLElement>("#finder");
 const progressEl = $<HTMLElement>("#progress");
 const stateEl = $<HTMLElement>("#state");
 const statsEl = $<HTMLElement>("#stats");
@@ -177,6 +179,7 @@ function updateChrome(): void {
   const showOverlay = overlayActive() || scanComplete;
   hudEl.hidden = showOverlay;
   endedEl.hidden = !showOverlay;
+  finderEl.hidden = showOverlay || !stream; // the square viewfinder frames a live camera only
   if (showOverlay) {
     const key = overlayActive() ? overlayStateKey() : "COMPLETE";
     if (key !== overlayKey) {
@@ -366,10 +369,10 @@ function render(): void {
   stateEl.textContent = state.toLowerCase();
   stateEl.dataset.state = state;
   if (beam && total > 0) {
-    coverageEl.hidden = false;
-    coverageFill.style.width = `${Math.min(100, (have / total) * 100).toFixed(1)}%`;
+    chunksEl.hidden = false; // unhide first: the marks size themselves to the row's width
+    renderChunkMarks(chunksEl, beam.bid, decodeBitmap(beam.bitmap, total));
   } else {
-    coverageEl.hidden = true;
+    chunksEl.hidden = true;
   }
   const parts: string[] = [];
   if (decoder) parts.push(decoder.name + (cameraLabel ? ` · ${cameraLabel}` : ""));
@@ -573,4 +576,15 @@ void init();
 (window as unknown as { airliftScan: unknown }).airliftScan = {
   relay,
   inject: (texts: string[]) => texts.map((t) => relay.push(t)),
+  // Preview the HUD for a beam of `total` chunks with `have` received (spread evenly).
+  demo: (total: number, have: number) => {
+    const bits = new Uint8Array(total);
+    for (let i = 0; i < Math.min(have, total); i++) bits[Math.floor((i * total) / Math.max(1, have))] = 1;
+    progressEl.textContent = `${have} / ${total}`;
+    stateEl.textContent = "receiving";
+    stateEl.dataset.state = "RECEIVING";
+    chunksEl.hidden = false;
+    finderEl.hidden = false;
+    renderChunkMarks(chunksEl, "demo", bits);
+  },
 };

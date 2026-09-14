@@ -246,6 +246,18 @@ symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
 - Verified in-browser against the mockups: Home, Dashboard (create → QR/link,
   participants, End/Delete), Admin (sign-in → sessions + live config, token
   masked), Scanner HUD. Go `-race` + web tsc/eslint/vitest (46) green.
+- **Responsive pass**: mobile-first (one column; the dashboard splits at ≥1000px),
+  nav and content on one container, the share card's nested grids (which let the
+  join URL overflow the card) made flex. The progress-bar `.bar` rule collided with
+  the nav `<header class="bar">` and clipped it to 8px — removed.
+- **Chunk marks** (`web/src/shared/chunks.ts`, tested): one thin tally tick per
+  chunk, a row per page (as many as fit the width), a tappable minimap of page
+  pills (grouped past 48), a pager line; the view follows the newest chunk unless
+  a tap pins a page for 8 s. Replaces the square grid on the dashboard and the
+  bar on the scanner; `drawBitmap` is gone. The scanner gained a square
+  viewfinder with a darkened surround and corner brackets (visual guide only —
+  the decoder still reads the whole frame). `airliftScan.demo(total, have)`
+  previews the HUD without a camera.
 
 - **Phase 12 complete.**
 

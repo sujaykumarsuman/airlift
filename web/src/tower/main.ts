@@ -1,6 +1,7 @@
 import "../shared/style.css";
 import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, resolveKnock } from "../shared/api";
-import { decodeBitmap, drawBitmap } from "../shared/bitmap";
+import { decodeBitmap } from "../shared/bitmap";
+import { renderChunkMarks } from "../shared/chunks";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { icon } from "../shared/icons";
 import { formatBytes, formatDuration } from "../shared/format";
@@ -546,7 +547,7 @@ function renderStatus(): void {
   for (const bv of view.beams) {
     const b = bv.beam;
     if (b.total > 0) {
-      drawBitmap($<HTMLCanvasElement>(`#grid-${b.bid}`, statusEl), decodeBitmap(b.bitmap, b.total), { cell: 10, gap: 2 });
+      renderChunkMarks($<HTMLElement>(`#grid-${b.bid}`, statusEl), b.bid, decodeBitmap(b.bitmap, b.total));
     }
   }
   // Beam actions live in the right column; everything else in the left.
@@ -801,14 +802,13 @@ function beamCard(bv: BeamView, iAmAdmin: boolean): Raw {
     </div>
     <div class="progress">
       <div class="big">${b.total > 0 ? `${b.have} / ${b.total}` : "— / —"}</div>
-      <div class="bar"><div class="fill" style="width: ${bv.pct.toFixed(1)}%"></div></div>
+      <div id="grid-${b.bid}" class="chunks" ${b.total > 0 ? "" : raw("hidden")}></div>
       <div class="metrics">
         <span><b>${b.fps.toFixed(1)}</b> fps decoded</span>
         <span>elapsed <b>${formatDuration(bv.elapsedMs)}</b></span>
         <span>ETA <b>${bv.etaSec === null ? "—" : formatDuration(bv.etaSec * 1000)}</b></span>
       </div>
     </div>
-    <canvas id="grid-${b.bid}" class="grid" ${b.total > 0 ? "" : raw("hidden")}></canvas>
     ${b.state === "READY" ? resultCard(b) : ""}
     ${b.state === "FAILED" ? failedCard(b) : ""}
   </div>`;

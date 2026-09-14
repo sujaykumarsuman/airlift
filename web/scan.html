@@ -12,6 +12,7 @@
   <body class="scan">
     <video id="video" playsinline muted autoplay></video>
     <canvas id="frame" hidden></canvas>
+    <div id="finder" class="finder" hidden><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
     <div id="hud">
       <div class="top">
         <div id="warning" class="warning-banner" hidden></div>
@@ -19,7 +20,7 @@
           <div id="progress" class="big">…</div>
           <div id="state" class="state"></div>
         </div>
-        <div id="coverage" class="coverage" hidden><div id="coverage-fill" class="fill"></div></div>
+        <div id="chunks" class="chunks" hidden></div>
       </div>
       <div class="bottom">
         <div id="stats" class="stats"></div>

@@ -174,11 +174,24 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
 .card.beam .head strong { flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
 .card.beam .head .muted { font-family: var(--mono); font-size: 0.78rem; }
 .progress .big { font-size: 2rem; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-.bar { height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: 0.5rem 0 0.75rem; }
-.bar .fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width 0.2s linear; }
 .metrics { display: flex; flex-wrap: wrap; gap: 1.25rem; color: var(--muted); font-size: 0.85rem; }
 .metrics b { color: var(--fg); font-variant-numeric: tabular-nums; font-weight: 600; }
-canvas.grid { display: block; width: 100%; margin-top: 0.75rem; border-radius: 4px; }
+
+/* chunk marks: a page of tally ticks, a minimap of page pills, a pager line.
+   (No `.bar` progress rule here — that class is the nav header's.) */
+.chunks { --chunk-off: #2a3039; display: block; }
+.chunks .tally { display: flex; gap: 4px; height: 14px; }
+.chunks .tally i { flex: 1 1 3px; max-width: 16px; min-width: 2px; height: 14px; border-radius: 2px; background: var(--chunk-off); }
+.chunks .tally.paged i { flex: 0 1 3px; } /* fixed pitch, but shrink a hair before ever overflowing */
+.chunks .tally i.on { background: var(--accent); }
+.chunks .tally i.new { background: #fff; box-shadow: 0 0 8px rgba(53, 208, 192, 0.9); }
+.chunks .mini { display: flex; gap: 3px; height: 6px; margin-top: 8px; }
+.chunks .mini b { flex: 1; border-radius: 3px; background: var(--chunk-off); cursor: pointer; }
+.chunks .mini b.full { background: var(--accent); }
+.chunks .mini b.cur { outline: 1px solid var(--accent); outline-offset: 1px; }
+.chunks .pager { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 7px; font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.chunks .pager b { color: var(--fg); font-weight: 500; }
+.card.beam .chunks { margin: 0.45rem 0 0.85rem; }
 
 /* results */
 .result { margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
@@ -237,8 +250,22 @@ ul.paths code { color: var(--fg); }
 .scan .state:empty { display: none; }
 .scan .state[data-state="READY"] { color: var(--ok); background: rgba(70, 196, 106, 0.14); border-color: rgba(70, 196, 106, 0.34); }
 .scan .state[data-state="FAILED"] { color: var(--bad); background: rgba(242, 85, 90, 0.14); border-color: rgba(242, 85, 90, 0.34); }
-.scan .coverage { height: 6px; margin-top: 0.85rem; border-radius: 999px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
-.scan .coverage .fill { height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width 0.25s ease; }
+.scan .chunks { --chunk-off: rgba(255, 255, 255, 0.16); margin-top: 0.8rem; }
+.scan .chunks .pager { color: #aab2bb; }
+.scan .chunks .pager b { color: #fff; }
+/* the square viewfinder: a window on the camera, everything outside it darkened */
+.scan video { z-index: 0; }
+#hud { z-index: 2; }
+.scan .finder {
+  position: fixed; left: 50%; top: 50%; width: min(78vw, 44vh); aspect-ratio: 1;
+  transform: translate(-50%, -50%); border-radius: 16px; pointer-events: none; z-index: 1;
+  box-shadow: 0 0 0 200vmax rgba(0, 0, 0, 0.58);
+}
+.scan .finder i { position: absolute; width: 26px; height: 26px; border: 2.5px solid var(--accent); }
+.scan .finder i.tl { left: -1px; top: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 16px; }
+.scan .finder i.tr { right: -1px; top: -1px; border-left: 0; border-bottom: 0; border-top-right-radius: 16px; }
+.scan .finder i.bl { left: -1px; bottom: -1px; border-right: 0; border-top: 0; border-bottom-left-radius: 16px; }
+.scan .finder i.br { right: -1px; bottom: -1px; border-left: 0; border-top: 0; border-bottom-right-radius: 16px; }
 .scan .stats { display: flex; flex-wrap: wrap; gap: 0.2rem 0.85rem; font-family: var(--mono); font-size: 0.72rem; color: #c4ccd4; font-variant-numeric: tabular-nums; }
 .scan .message { font-size: 1rem; min-height: 1.4rem; color: var(--fg); }
 .scan .controls { display: flex; gap: 0.6rem; align-items: center; }
