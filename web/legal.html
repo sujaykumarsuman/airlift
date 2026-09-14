@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--airlift-base-->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>airlift legal</title>
+  </head>
+  <body class="tower docs-page">
+    <header class="bar">
+      <div class="bar-inner">
+        <a class="brand" href="./">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M6 6a9 9 0 0 0 0 12M18 6a9 9 0 0 1 0 12"/></svg>
+          airlift <span class="t2">legal</span>
+        </a>
+        <span class="bar-right">
+          <a class="btn small" href="./"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-6.5 8 6.5"/><path d="M6 9.5V19h12V9.5"/></svg> Tower</a>
+          <a class="btn small" href="docs">Docs</a>
+          <a class="btn small" href="https://github.com/sujaykumarsuman/airlift">GitHub</a>
+        </span>
+      </div>
+    </header>
+
+    <main class="docs">
+      <aside class="toc">
+        <p class="section-label">On this page</p>
+        <a href="legal#licence" class="on">Licence</a>
+        <a href="legal#terms">Terms of use</a>
+        <a href="legal#privacy">Privacy</a>
+      </aside>
+
+      <article>
+        <section id="licence">
+          <h1>Licence, terms and privacy</h1>
+          <p class="lede">airlift is a personal project, published as free software. This page says what you may do with the software, what using the hosted tower at <code>projects.sujaykumar.dev/airlift</code> means, and — because the tower is built to be ephemeral — exactly what it handles and for how long. Last updated 14 September 2026.</p>
+          <h2>Licence</h2>
+          <p>The software — the <code>airlift</code> binary, its source and this web UI — is released under the <strong>MIT Licence</strong>, copyright © 2026 Sujay Kumar. You may use, copy, modify, merge, publish, distribute, sublicense and sell copies of it, for any purpose, provided the copyright and permission notice stays with it. It comes <strong>without warranty of any kind</strong>. The full text is in <a href="https://github.com/sujaykumarsuman/airlift/blob/main/LICENSE"><code>LICENSE</code></a> in the repository.</p>
+          <p>Running your own tower is entirely yours to do under that licence; the terms and privacy notes below apply only to the instance hosted here.</p>
+        </section>
+
+        <section id="terms">
+          <h2>Terms of use</h2>
+          <ul>
+            <li><b>What it is.</b> The hosted tower is run by the author, free of charge, as a convenience for moving files out of an air-gapped machine. It is provided <em>as is</em>: there is no guarantee of availability, capacity, speed or continuity, and it may be changed, paused or shut down at any time without notice.</li>
+            <li><b>What you may do.</b> Create a session, share it, scan beams into it and download the results — for content you have the right to transfer and share. Do not use it for anything unlawful, to move content you are not entitled to, or in ways that harm other people or the service itself. Abusive traffic is rate-limited; a session admin or the operator may evict a participant or end a session.</li>
+            <li><b>Sessions are shared.</b> Anyone who holds a public session's link, knows a password session's id and password, or is admitted to it by a session admin can see and download every beam in that session. You decide whom you share with; the tower cannot tell a guest from a friend.</li>
+            <li><b>Ephemeral by design.</b> Nothing is meant to persist. A session and everything in it is removed on the schedule described under Privacy, and all sessions are wiped whenever the tower restarts. Download what you need while the session lives; there is no recovery afterwards.</li>
+            <li><b>No liability.</b> To the extent the law allows, the author is not liable for any loss — of data, time, or anything else — arising from using or being unable to use the service. If you need guarantees, run your own tower.</li>
+            <li><b>Questions.</b> Open an issue at the <a href="https://github.com/sujaykumarsuman/airlift">GitHub repository</a>.</li>
+          </ul>
+        </section>
+
+        <section id="privacy">
+          <h2>Privacy</h2>
+          <p>The short version: there are no accounts, so there is nothing about you to keep; what a session holds exists only for the session's short life and is then deleted; nothing is shared with anyone; no tracking of any kind.</p>
+          <h3>No accounts, no login</h3>
+          <p>You never sign up or sign in. A session's optional join password is kept only as a salted hash in the tower's memory for the life of that session — it is never written to disk or logged. The operator's own admin token is the operator's secret, not visitor data.</p>
+          <h3>What a session holds while it lives</h3>
+          <ul>
+            <li>A random session id and token.</li>
+            <li>For each participating device: a random client id; a name — generated (like <em>brave badger</em>) or the one you typed; which roles the device is using (viewer, relay); and the network address it connects from, used for rate limiting and eviction. Addresses are visible only to the operator's admin console, never to other participants.</li>
+            <li>The relayed QR frames and the files reassembled from them, written under the tower's data directory so they can be verified and downloaded, plus a small session receipt.</li>
+          </ul>
+          <h3>How long</h3>
+          <ul>
+            <li>A session lives while anyone is connected, up to <strong>24 hours</strong>; a session admin can extend it an hour at a time.</li>
+            <li>If everyone leaves, it is suspended after <strong>30 minutes</strong> and deleted an hour after that (reopening the link within the hour brings it back, timers reset).</li>
+            <li><em>End session</em> keeps the downloads for an hour, then removes them. <em>Delete now</em> removes the session and its files immediately.</li>
+            <li>Every session and file is wiped whenever the tower restarts — there is no persistence, by design. Rate-limit counters live in memory and expire on their own.</li>
+          </ul>
+          <h3>On your device</h3>
+          <p>The dashboard keeps the current session's id, token and client id in the browser's <code>sessionStorage</code> (tab-scoped, gone when the tab closes). The scanner remembers the last session it joined in <code>localStorage</code> so its home-screen shortcut can reopen it. No cookies are set. Clearing the site's data removes both.</p>
+          <h3>The camera</h3>
+          <p>The scanner reads QR codes on the phone itself; only the decoded text of each frame is sent to the tower. No video or images ever leave the device. The beam page shown on the air-gapped machine is a fully offline file and contacts nothing.</p>
+          <h3>Logs, analytics, third parties</h3>
+          <ul>
+            <li>The tower's log records session-level events — a session created, reopened, ended; a beam ready or failed; an eviction — by session id. It never records tokens, passwords, addresses or file contents. The TLS proxy in front of it keeps no access log.</li>
+            <li>No analytics, no tracking pixels, no advertising. Every script, style, font and image is served by the tower itself; nothing loads from third-party servers.</li>
+            <li>Session contents are not shared with anyone. The operator can, in principle, see a live session's files on the server and its participants' addresses through the admin console; they are not looked at in the ordinary course of things and are gone with the session.</li>
+          </ul>
+          <h3>Your rights</h3>
+          <p>Because nothing is retained beyond a session, deletion is in your hands: <em>Delete now</em> as a session admin, or simply let the session expire. For anything else, open an issue at the <a href="https://github.com/sujaykumarsuman/airlift">GitHub repository</a>.</p>
+        </section>
+      </article>
+    </main>
+    <script type="module" src="/src/docs/main.ts"></script>
+  </body>
+</html>

@@ -208,3 +208,9 @@ tower shows a clean version.
 `go test` covers the whole pipeline end to end — bundle a tree, beam it, relay
 the frames through loss into a real tower, and check the restored tree — so no
 camera or phone is needed to exercise the transfer.
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE). The hosted tower's terms of use and privacy
+notes are at [projects.sujaykumar.dev/airlift/legal](https://projects.sujaykumar.dev/airlift/legal)
+(`web/legal.html`): no accounts, nothing stored beyond a session's short life.

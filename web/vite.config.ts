@@ -35,7 +35,9 @@ function injectBase(): Plugin {
                 ? "admin.html"
                 : p === "/docs.html"
                   ? "docs.html"
-                  : null;
+                  : p === "/legal.html"
+                    ? "legal.html"
+                    : null;
         if (!file) return next();
         try {
           const html = readFileSync(resolve("dist", file), "utf8");
@@ -57,6 +59,7 @@ function scanRoute(): Plugin {
       if (req.url && /^\/s\/[^/?#]+\/?(\?.*)?$/.test(req.url)) req.url = "/scan.html";
       else if (req.url && /^\/admin\/?(\?.*)?$/.test(req.url)) req.url = "/admin.html";
       else if (req.url && /^\/docs\/?(\?.*)?$/.test(req.url)) req.url = "/docs.html";
+      else if (req.url && /^\/legal\/?(\?.*)?$/.test(req.url)) req.url = "/legal.html";
       next();
     });
   };
@@ -74,7 +77,7 @@ export default defineConfig({
   plugins: [scanRoute(), injectBase(), ...(ssl ? [basicSsl()] : [])],
   build: {
     rollupOptions: {
-      input: { tower: "index.html", scan: "scan.html", admin: "admin.html", docs: "docs.html" },
+      input: { tower: "index.html", scan: "scan.html", admin: "admin.html", docs: "docs.html", legal: "legal.html" },
     },
     target: "es2020",
     sourcemap: false,

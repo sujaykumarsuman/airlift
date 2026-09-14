@@ -50,6 +50,7 @@ GET    /{sid}                         session dashboard (ADR 0020; 404 if {sid} 
 GET    /s/{sid}                       scan page (token arrives in #t=, the dashboard's client id in &c=)
 GET    /admin                         admin console (sign in with admin_token)
 GET    /docs                          docs walkthrough (static; its screenshots under /docs/*.webp)
+GET    /legal                         MIT licence, terms of use, privacy notes (static)
 ```
 
 `GET /api/info` is unauthenticated (the pages call it before any session

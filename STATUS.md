@@ -319,6 +319,12 @@ new runtime dep — CLAUDE.md holds).
   overlay for a tiny beam (verified by unit tests + a headless round-trip only),
   a ~1 MB bundle at ≥ 8 fps, and two phones relaying one beam.
 
+- **Licence + legal page**: `LICENSE` (MIT, 2026 Sujay Kumar); `/legal`
+  (`web/legal.html`) carries the licence note, terms of use and privacy notes for
+  the hosted tower — written to what the tower really does (no accounts, nothing
+  kept beyond a session, wiped on restart); linked from the landing footer and
+  the docs nav. The sample beams in `test-run/` are kept in the repo.
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.

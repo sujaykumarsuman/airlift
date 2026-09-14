@@ -160,6 +160,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("GET /s/{sid}", srv.sessionPage("scan.html", scanPlaceholder))
 	m.HandleFunc("GET /admin", srv.page("admin.html", adminPlaceholder))
 	m.HandleFunc("GET /docs", srv.page("docs.html", docsPlaceholder))
+	m.HandleFunc("GET /legal", srv.page("legal.html", legalPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
 	// A session lives at its own path `<base>/<sid>` (ADR 0020); the dashboard page
 	// reads the sid from the URL. This wildcard is the least specific route, so the
@@ -687,6 +688,10 @@ func (srv *Server) sessionPage(file, placeholder string) http.HandlerFunc {
 		inner(w, r)
 	}
 }
+
+const legalPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift legal</title>
+<p>airlift is MIT-licensed. The terms and privacy notes arrive with the web build.</p>
+`
 
 const docsPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift docs</title>
 <p>The docs arrive with the web build. Until then: <code>airlift beam PATH</code> makes a beam; the tower's dashboard receives it.</p>

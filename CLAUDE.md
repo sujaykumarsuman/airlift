@@ -59,10 +59,12 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
 - `internal/replay` — the simulated scanner (loop, loss, reordering, batched
   POSTs) that drives a tower without a camera; internal, for the dev loop and
   the end-to-end tests.
-- `web/` — vanilla TypeScript + Vite, four entries: `tower` (`index.html` — the
+- `web/` — vanilla TypeScript + Vite, five entries: `tower` (`index.html` — the
   landing + the session dashboard), `scan` (the phone scanner), `admin` (the
-  operator console) and `docs` (`docs.html`, static walkthrough with real
-  screenshots in `web/public/docs/*.webp`). No framework. Embedded into the Go
+  operator console), `docs` (`docs.html`, static walkthrough with real
+  screenshots in `web/public/docs/*.webp`) and `legal` (`legal.html`: the MIT
+  licence, terms of use and privacy notes for the hosted tower — keep it true
+  to what the tower actually stores). No framework. Embedded into the Go
   binary via `embed.go`. Shared modules of note: `shared/icons.ts` (the inline
   SVG symbol set), `shared/chunks.ts` (tally chunk marks + minimap, tested),
   `shared/motion.ts` (the one entry-animation hook), `shared/copy.ts` (copy
