@@ -83,9 +83,12 @@ input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var
   position: sticky; top: 0; z-index: 5; backdrop-filter: blur(8px);
 }
 .bar-inner {
-  max-width: 1160px; margin: 0 auto; height: 56px; padding: 0 1.25rem;
-  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  max-width: 1120px; margin: 0 auto; height: 56px; padding: 0 clamp(1rem, 4vw, 1.5rem);
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
 }
+/* On the home/gate screens the content is a centred narrow column; narrow the nav
+   to match so the brand sits above the column, not floating at the window edge. */
+body:has(#app.mode-home) .bar-inner { max-width: 540px; }
 .brand { display: flex; align-items: center; gap: 0.55rem; min-width: 0; font-size: 0.95rem; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
 .brand .ic { width: 22px; height: 22px; color: var(--accent); }
 .brand .t2 { color: var(--muted); font-weight: 500; }
@@ -97,17 +100,18 @@ input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var
 .card.bad { border-color: #4a2a2e; }
 .url { word-break: break-all; }
 
-/* ---- layout: home vs dashboard ---- */
-.tower main { max-width: 1160px; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
+/* ---- layout: home vs dashboard (mobile-first) ---- */
+.tower main { max-width: 1120px; margin: 0 auto; padding: 1.5rem clamp(1rem, 4vw, 1.5rem) 3rem; }
 .tower main.mode-home { max-width: 540px; }
 .tower main.mode-home #left { display: grid; gap: 1rem; }
 .tower main.mode-home #status, .tower main.mode-home #place:empty { display: none; }
-.tower main.mode-dash { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 1.25rem; align-items: start; }
-/* grid children must be allowed to shrink below their content's min-content,
-   or a long filename/hash in a beam card widens the track and the page scrolls. */
+/* Default is one column; the dashboard splits into share/session + beams only
+   once there is room for both (≥1000px). Grid children carry min-width:0 so a
+   long filename or hash wraps instead of widening the track and scrolling. */
+.tower main.mode-dash { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.25rem; align-items: start; }
 #left, #status { min-width: 0; }
 #left { display: flex; flex-direction: column; gap: 1.25rem; }
-@media (max-width: 860px) { .tower main.mode-dash { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 1000px) { .tower main.mode-dash { grid-template-columns: 340px minmax(0, 1fr); } }
 
 /* create / join forms */
 .create-options { display: grid; gap: 0.85rem; }
@@ -118,9 +122,11 @@ input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var
 input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem; }
 
 /* ---- tower dashboard ---- */
-.card.join { display: grid; justify-items: center; gap: 0.9rem; text-align: center; }
+/* flex, not grid: a grid auto-column sizes to the (nowrap) URL's max-content and
+   overflows the card; flex column + min-width:0 on the URL lets it ellipsize. */
+.card.join { display: flex; flex-direction: column; align-items: center; gap: 0.9rem; text-align: center; }
 .card.join canvas { width: 190px; height: 190px; image-rendering: pixelated; background: #e9edf1; border-radius: 10px; padding: 10px; }
-.card.join .join-text { display: grid; gap: 0.55rem; justify-items: center; width: 100%; }
+.card.join .join-text { display: flex; flex-direction: column; align-items: center; gap: 0.55rem; width: 100%; min-width: 0; }
 .card.join h2 { margin: 0; }
 .card.join .url { flex: 1; min-width: 0; font-family: var(--mono); font-size: 0.72rem; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px; padding: 0.5rem 0.6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card.join .linkrow { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
@@ -191,8 +197,7 @@ ul.paths code { color: var(--fg); }
 @media (max-width: 640px) { ul.paths { columns: 1; } }
 
 /* ---- admin ---- */
-.admin { }
-.admin main { max-width: 1080px; }
+.admin main { max-width: 1120px; }
 .admin-rows { display: grid; gap: 0.85rem; }
 .admin-row { border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem; background: var(--surface-2); }
 .admin-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
