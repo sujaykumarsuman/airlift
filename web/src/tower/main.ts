@@ -58,11 +58,28 @@ const sessionEl = $<HTMLElement>("#session");
 const placeEl = $<HTMLElement>("#place"); // session panel (left column, below the share card)
 const statusEl = $<HTMLElement>("#status"); // beams (right column)
 const newButton = $<HTMLButtonElement>("#new-session");
+// The session-admin actions live in the nav: a power button opening End / Delete.
+const menuEl = $<HTMLElement>("#session-menu");
+const powerBtn = $<HTMLButtonElement>("#power");
+const endBtn = $<HTMLButtonElement>("#end-btn");
+const delBtn = $<HTMLButtonElement>("#del-btn");
 
 // The layout is a single centred column for the home/gate screens and a two-column
 // dashboard (share + participants | beams) once a session is attached (ADR 0019).
 function setMode(mode: "home" | "dash"): void {
   appEl.className = mode === "home" ? "mode-home" : "mode-dash";
+  if (mode === "home") showMenu(false, false);
+}
+
+// showMenu shows the power menu to a session admin; End only while the session is live.
+function showMenu(admin: boolean, live: boolean): void {
+  menuEl.hidden = !admin;
+  endBtn.hidden = !live;
+  if (!admin) closeMenu();
+}
+function closeMenu(): void {
+  menuEl.classList.remove("open");
+  powerBtn.setAttribute("aria-expanded", "false");
 }
 
 let current: Stored | null = null;
@@ -89,7 +106,9 @@ function joinLink(sid: string, token: string, hasPassword: boolean): string {
 // The scanner for this session, opened on demand by the Scan button (carries the
 // token — the dashboard already holds it).
 function scanLink(s: Stored): string {
-  return new URL(`s/${s.sid}#t=${s.token}`, appBase).toString();
+  // `c=` lets the scanner resume this device's client, so one device is one
+  // participant with both roles rather than two entries (ADR 0022).
+  return new URL(`s/${s.sid}#t=${s.token}${s.client_id ? `&c=${s.client_id}` : ""}`, appBase).toString();
 }
 
 // The session id from the current path ("" on the home page).
@@ -126,7 +145,7 @@ async function boot(): Promise<void> {
 async function enterWithToken(): Promise<void> {
   if (!current) return;
   try {
-    const cl = await registerClient(current.sid, current.token, { role: "viewer" });
+    const cl = await registerClient(current.sid, current.token, { role: "viewer", resume: current.client_id || undefined });
     current.client_id = cl.client_id;
     current.name = cl.name;
     saveStored(current);
@@ -514,7 +533,8 @@ function renderStatus(): void {
   const relays = `${s.relays} ${s.relays === 1 ? "relay" : "relays"}`;
   const live = s.status === "OPEN" || s.status === "TERMINATING";
   const iAmAdmin = !!current && s.clients.some((cl) => cl.client_id === current!.client_id && cl.session_admin);
-  // LEFT column: the session panel (people, requests, controls, lifecycle).
+  showMenu(iAmAdmin, live);
+  // LEFT column: the session panel (people, requests, lifecycle).
   placeEl.innerHTML = html`
     <div class="card place${s.status === "OPEN" ? "" : " terminated"}">
       <div class="head">
@@ -531,7 +551,6 @@ function renderStatus(): void {
               <ul class="knocks">${s.knocks.map((k) => knockRow(k))}</ul>`
           : ""
       }
-      ${iAmAdmin ? adminControls(s) : ""}
     </div>`.html;
   // RIGHT column: the beams.
   statusEl.innerHTML = html`
@@ -569,17 +588,6 @@ function renderStatus(): void {
   placeEl.querySelector<HTMLFormElement>("#ext-form")?.addEventListener("submit", onExtensionSubmit);
   placeEl.querySelector<HTMLButtonElement>("#reopen-btn")?.addEventListener("click", onReopen);
   placeEl.querySelector<HTMLButtonElement>("#extend-btn")?.addEventListener("click", onExtend);
-  placeEl.querySelector<HTMLButtonElement>("#end-btn")?.addEventListener("click", onEndSession);
-  placeEl.querySelector<HTMLButtonElement>("#del-btn")?.addEventListener("click", onHardDelete);
-}
-
-/** Session-admin controls: end the session gracefully, or hard-delete it now. */
-function adminControls(s: Snapshot): Raw {
-  const live = s.status === "OPEN" || s.status === "TERMINATING";
-  return html`<p class="controls">
-    ${live ? html`<button class="btn small" id="end-btn" type="button">${icon("clock")} End session</button>` : ""}
-    <button class="btn small danger" id="del-btn" type="button">${icon("trash")} Delete now</button>
-  </p>`;
 }
 
 // onEndSession soft-terminates: the session freezes but its downloads stay for the
@@ -622,7 +630,7 @@ function onReopen(): void {
     btn.disabled = true;
     btn.textContent = "Reopening…";
   }
-  void registerClient(current.sid, current.token, { role: "viewer" })
+  void registerClient(current.sid, current.token, { role: "viewer", resume: current.client_id || undefined })
     .then((c) => {
       if (current) current.client_id = c.client_id;
     })
@@ -867,5 +875,24 @@ function failedCard(b: Beam): Raw {
 // "New session" simply returns to the home page, where you can create or join one.
 newButton.addEventListener("click", () => {
   location.href = appBase;
+});
+// The power menu: toggle on the button, close on an action or a click elsewhere.
+powerBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = menuEl.classList.toggle("open");
+  powerBtn.setAttribute("aria-expanded", String(open));
+});
+menuEl.addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("click", closeMenu);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeMenu();
+});
+endBtn.addEventListener("click", () => {
+  closeMenu();
+  onEndSession();
+});
+delBtn.addEventListener("click", () => {
+  closeMenu();
+  onHardDelete();
 });
 void boot();

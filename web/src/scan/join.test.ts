@@ -7,6 +7,13 @@ test("parses sid from the path and the token from the fragment", () => {
     token: "IArmTtXFjcbAMpWOwO6NAg",
   });
   expect(parseJoin("/s/abc/", "#t=IArmTtXFjcbAMpWOwO6NAg&x=1")).toEqual({ sid: "abc", token: "IArmTtXFjcbAMpWOwO6NAg" });
+  // c= is the dashboard's client id for the scanner to resume (ADR 0022); anything else is ignored.
+  expect(parseJoin("/s/abc", "#t=IArmTtXFjcbAMpWOwO6NAg&c=0123456789abcdef")).toEqual({
+    sid: "abc",
+    token: "IArmTtXFjcbAMpWOwO6NAg",
+    client: "0123456789abcdef",
+  });
+  expect(parseJoin("/s/abc", "#t=IArmTtXFjcbAMpWOwO6NAg&c=nope").client).toBeUndefined();
 });
 
 test("rejects a missing sid, and offers a password join when the token is absent", () => {

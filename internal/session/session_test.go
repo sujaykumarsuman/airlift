@@ -433,39 +433,70 @@ func TestHeldSurvivesOtherManifest(t *testing.T) {
 func TestClientRegistryAndEviction(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	s, _ := st.Create()
-	a, _ := s.RegisterClient("10.0.0.1", "alice", true)
+	a, _ := s.RegisterClient("10.0.0.1", "alice", true, "")
 	if a.Name != "alice" || !a.SessionAdmin {
 		t.Fatalf("first client %+v", a)
 	}
-	// Same address returns the same client; a proposed name is ignored; admin
-	// upgrades but never downgrades.
-	again, _ := s.RegisterClient("10.0.0.1", "bob", false)
-	if again != a || again.Name != "alice" || !again.SessionAdmin {
-		t.Fatalf("re-register %+v", again)
+	// A second registration from the same address is a second device, so a
+	// second client (ADR 0022) — the two share a NAT, not an identity.
+	bob, _ := s.RegisterClient("10.0.0.1", "bob", false, "")
+	if bob == a || bob.Name != "bob" || bob.SessionAdmin {
+		t.Fatalf("second device %+v", bob)
 	}
-	// A different address is a different client; a duplicate name is suffixed.
-	b, _ := s.RegisterClient("10.0.0.2", "alice", false)
+	// Resuming by id from the same address returns the same client; the proposed
+	// name is ignored; admin upgrades but never downgrades.
+	again, _ := s.RegisterClient("10.0.0.1", "carol", false, a.ID)
+	if again != a || again.Name != "alice" || !again.SessionAdmin {
+		t.Fatalf("resume %+v", again)
+	}
+	// A resume from another address is not honoured: the id is public.
+	imp, _ := s.RegisterClient("10.0.0.2", "mallory", false, a.ID)
+	if imp == a || imp.Name != "mallory" || imp.SessionAdmin {
+		t.Fatalf("resume from another address %+v", imp)
+	}
+	// A duplicate name is suffixed.
+	b, _ := s.RegisterClient("10.0.0.2", "alice", false, "")
 	if b == a || b.Name != "alice 2" {
-		t.Fatalf("second client %+v", b)
+		t.Fatalf("duplicate name %+v", b)
 	}
 	if _, ok := s.ClientByID(a.ID); !ok {
 		t.Fatal("ClientByID")
 	}
-	if s.Snapshot().Clients[0].Name != "alice" || len(s.Snapshot().Clients) != 2 {
-		t.Fatalf("clients %+v", s.Snapshot().Clients)
+	if snap := s.Snapshot().Clients; snap[0].Name != "alice" || len(snap) != 4 {
+		t.Fatalf("clients %+v", snap)
 	}
-	// Evicting b's address removes b and bars the address.
-	addr, ok := s.EvictClientByID(b.ID)
+	// alice (10.0.0.1) evicts b (10.0.0.2): the address is barred and everyone
+	// there — b and mallory — goes with it.
+	addr, ok := s.EvictClientByID(b.ID, a.Addr)
 	if !ok || addr != "10.0.0.2" || !s.Evicted("10.0.0.2") {
 		t.Fatalf("evict %v %v", addr, ok)
 	}
 	if _, ok := s.ClientByID(b.ID); ok {
 		t.Fatal("evicted client still present")
 	}
-	if len(s.Snapshot().Clients) != 1 {
-		t.Fatal("evicted client still listed")
+	if _, ok := s.ClientByID(imp.ID); ok {
+		t.Fatal("evicted address's other client still present")
 	}
-	if _, ok := s.EvictClientByID("nope"); ok {
+	if _, ok := s.RegisterClient("10.0.0.2", "x", false, ""); ok {
+		t.Fatal("registration from an evicted address")
+	}
+	// alice evicts bob, who shares her address: only bob goes, the address stays
+	// open (barring it would evict alice too).
+	if addr, ok := s.EvictClientByID(bob.ID, a.Addr); !ok || addr != "10.0.0.1" || s.Evicted("10.0.0.1") {
+		t.Fatalf("same-address evict %v %v evicted=%v", addr, ok, s.Evicted("10.0.0.1"))
+	}
+	if _, ok := s.ClientByID(bob.ID); ok {
+		t.Fatal("bob still present")
+	}
+	if snap := s.Snapshot().Clients; len(snap) != 1 || snap[0].Name != "alice" {
+		t.Fatalf("clients after evictions %+v", snap)
+	}
+	// An airlift-admin eviction (no evictor address) always bars the address.
+	c, _ := s.RegisterClient("10.0.0.3", "dave", false, "")
+	if _, ok := s.EvictClientByID(c.ID, ""); !ok || !s.Evicted("10.0.0.3") {
+		t.Fatal("admin evict should bar the address")
+	}
+	if _, ok := s.EvictClientByID("nope", ""); ok {
 		t.Fatal("evicting an unknown client")
 	}
 }

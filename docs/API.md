@@ -75,10 +75,13 @@ rides in the **fragment** (`…/<sid>#t=<token>`) so it never reaches server log
 by entering the password.
 
 Beyond the token, most calls also carry a **client id** in the
-`X-Airlift-Client` header. A client is one participant, registered once per
-address (`POST …/clients`, or minted by create/join). The id is rechecked
-against the caller's address on every call, so it is not a secret. There are
-four tiers:
+`X-Airlift-Client` header. A client is one participant — one device
+(`POST …/clients`, or minted by create/join). Registering mints a new client
+unless the request's `X-Airlift-Client` names one of the session's clients
+bound to the caller's address, which is then returned (ADR 0022): a reload keeps
+its identity, a second device behind the same NAT is a second participant, and a
+resume from elsewhere is refused. The id is rechecked against the caller's
+address on every call, so it is not a secret. There are four tiers:
 
 - **public** — no auth: create, join, knock + poll (ADR 0021), `/api/info`, pages.
 - **token** — a valid token, no client needed: register a client.

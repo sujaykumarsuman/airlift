@@ -57,17 +57,20 @@ export function createSession(opts: CreateOptions = {}, fetchFn: FetchFn = fetch
   }).then((r) => expectJSON<Created>(r));
 }
 
-/** Registers (or returns) the client bound to the caller's address. */
+/** Registers a client for this device. `resume` (a client id this device holds)
+ *  keeps that identity on a reload or a second tab — the tower honours it only
+ *  from the same address (ADR 0022). */
 export function registerClient(
   sid: string,
   token: string,
-  opts: { name?: string; role?: string } = {},
+  opts: { name?: string; role?: string; resume?: string } = {},
   fetchFn: FetchFn = fetch,
 ): Promise<Client> {
+  const { resume, ...body } = opts;
   return fetchFn(apiURL(`api/sessions/${sid}/clients`), {
     method: "POST",
-    headers: { ...clientHeaders(token), "Content-Type": "application/json" },
-    body: JSON.stringify(opts),
+    headers: { ...clientHeaders(token, resume), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   }).then((r) => expectJSON<Client>(r));
 }
 

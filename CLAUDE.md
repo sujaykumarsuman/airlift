@@ -92,11 +92,12 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
     meta.json}`, staged and renamed into place; downloads stream from those
     files, the in-memory copies freed; a persist failure keeps the beam READY
     from memory, a FAILED beam writes nothing; cleanup on delete/sweep. (ADR 0016)
-15. Open multi-user access: a client per address (`X-Airlift-Client`), four auth
-    tiers (public/token/client/admin), open creation with clamped options, a
-    salted-SHA-256 password join, per-address/session rate limits (429 +
-    `Retry-After`), address eviction, and operator beam removal + auto-evict of
-    the oldest terminal beam at the cap. (ADR 0017)
+15. Open multi-user access: a client registry (`X-Airlift-Client`; per address
+    here, per device since ADR 0022), four auth tiers (public/token/client/admin),
+    open creation with clamped options, a salted-SHA-256 password join,
+    per-address/session rate limits (429 + `Retry-After`), address eviction, and
+    operator beam removal + auto-evict of the oldest terminal beam at the cap.
+    (ADR 0017)
 16. Session lifecycle: `status` is OPEN or TERMINATED; a session-admin DELETE or a
     clock soft-terminates (freeze + keep files), then the two-phase sweep deletes
     after `terminated_ttl`; a session-level `session.json` receipt. Expiry is
@@ -145,6 +146,14 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
     the token) or denies. The snapshot carries `knocks:[{id,name,at}]` (no address);
     the dashboard shows Requests-to-join (Admit/Deny) and the knocker a
     Waiting-to-be-let-in screen. The token is issued only on admit. (ADR 0021)
+22. A client per device: `POST …/clients` mints a new client every time unless
+    `X-Airlift-Client` names one of the session's clients bound to the same
+    address, which is then returned (name kept, admin upgradable only) — so a
+    reload keeps its identity and a second device behind the same NAT is a second
+    participant. A resume from another address is refused (the id is public). The
+    dashboard's scan link carries `&c=<client_id>` so the scanner resumes the
+    dashboard's client. Eviction still bars the address, except a session admin
+    evicting a client at their own address drops only that client. (ADR 0022)
 
 ## Non-goals
 

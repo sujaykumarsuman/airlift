@@ -258,6 +258,16 @@ symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
   viewfinder with a darkened surround and corner brackets (visual guide only —
   the decoder still reads the whole frame). `airliftScan.demo(total, have)`
   previews the HUD without a camera.
+- **Client per device** (ADR 0022): `RegisterClient(addr, name, admin, resume)`
+  mints per registration and resumes only a same-address id; the dashboard sends
+  its stored id, the scan link carries `&c=<client_id>`, and a session-admin
+  eviction of a same-address client drops just that client. Two devices behind
+  one NAT are now two participants. `EvictClientByID(cid, byAddr)`.
+- **Nav**: the brand sits at one place on every page; End / Delete moved into a
+  power menu in the nav (session admins only).
+- **Beam player** revamped (`internal/beam/player.go`): black page, the QR alone
+  bright on a white quiet-zone tile, on-screen controls (step, pause, fps, size,
+  fullscreen, hide chrome) with keys, responsive; still one offline file.
 
 - **Phase 12 complete.**
 

@@ -1,7 +1,7 @@
 export type Join =
-  | { sid: string; token: string; needsPassword?: undefined; error?: undefined }
-  | { sid: string; token?: undefined; needsPassword: true; error?: undefined }
-  | { error: string; sid?: undefined; token?: undefined; needsPassword?: undefined };
+  | { sid: string; token: string; client?: string; needsPassword?: undefined; error?: undefined }
+  | { sid: string; token?: undefined; client?: undefined; needsPassword: true; error?: undefined }
+  | { error: string; sid?: undefined; token?: undefined; client?: undefined; needsPassword?: undefined };
 
 /** Strips a path prefix ("/airlift") off a pathname, leaving a rooted "/s/…". */
 function underBase(pathname: string, basePath: string): string {
@@ -9,7 +9,9 @@ function underBase(pathname: string, basePath: string): string {
   return rel.startsWith("/") ? rel : "/" + rel;
 }
 
-/** Reads /s/{sid} from the path (below basePath) and t= from the fragment. */
+/** Reads /s/{sid} from the path (below basePath), t= from the fragment, and an
+ *  optional c= — the dashboard's client id, so the scanner it opened resumes the
+ *  same participant (ADR 0022). */
 export function parseJoin(pathname: string, hash: string, basePath = ""): Join {
   const m = /^\/s\/([A-Za-z0-9_-]+)\/?$/.exec(underBase(pathname, basePath));
   if (!m?.[1]) return { error: "This is not a join link: the address should look like /s/<session>#t=<token>." };
@@ -17,7 +19,8 @@ export function parseJoin(pathname: string, hash: string, basePath = ""): Join {
   const token = params.get("t")?.trim() ?? "";
   // No usable token: the page offers a password join (404s if none is set).
   if (!/^[A-Za-z0-9_-]{8,}$/.test(token)) return { sid: m[1], needsPassword: true };
-  return { sid: m[1], token };
+  const client = params.get("c")?.trim() ?? "";
+  return /^[0-9a-f]{16}$/.test(client) ? { sid: m[1], token, client } : { sid: m[1], token };
 }
 
 export const LAST_KEY = "airlift.lastJoin";

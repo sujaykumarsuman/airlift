@@ -54,7 +54,7 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	c, ok := s.RegisterClient(addr, "", true) // the creator is the first session admin
+	c, ok := s.RegisterClient(addr, "", true, "") // the creator is the first session admin
 	if !ok {
 		writeError(w, http.StatusForbidden, "evicted")
 		return
@@ -110,7 +110,9 @@ func clampTTL(name string, secs *int64, capD time.Duration) (time.Duration, erro
 	return d, nil
 }
 
-// registerClient registers, or returns, the client bound to the caller's address.
+// registerClient mints a client for the caller's device, or returns the one an
+// X-Airlift-Client header names when it is bound to the caller's address
+// (ADR 0022: a reload keeps its identity; a second device is a second client).
 func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *session.Session) {
 	addr := srv.clientAddr(r)
 	if s.Evicted(addr) {
@@ -136,7 +138,7 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		return
 	}
 	// A token/QR joiner is a session admin iff the session was created that way.
-	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin())
+	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin(), r.Header.Get("X-Airlift-Client"))
 	if !ok {
 		writeError(w, http.StatusForbidden, "evicted")
 		return
@@ -200,7 +202,7 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		writeError(w, http.StatusUnauthorized, "wrong password")
 		return
 	}
-	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin())
+	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin(), "")
 	if !ok {
 		writeError(w, http.StatusForbidden, "evicted")
 		return
@@ -241,14 +243,16 @@ func (srv *Server) patchSession(w http.ResponseWriter, r *http.Request, s *sessi
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// evictClient bars a client's address from the session (session admin).
+// evictClient removes a client and bars its address from the session (session
+// admin) — unless it shares the admin's own address, in which case only that
+// client is dropped (ADR 0022).
 func (srv *Server) evictClient(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
 	cid := r.PathValue("cid")
 	if cid == c.ID {
 		writeError(w, http.StatusBadRequest, "cannot evict yourself")
 		return
 	}
-	if _, ok := s.EvictClientByID(cid); !ok {
+	if _, ok := s.EvictClientByID(cid, c.Addr); !ok {
 		writeError(w, http.StatusNotFound, "no such client")
 		return
 	}

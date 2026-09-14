@@ -306,7 +306,7 @@ function onReopen(): void {
     btn.disabled = true;
     btn.textContent = "Reopening…";
   }
-  void registerClient(sid, token, { role: "relay" })
+  void registerClient(sid, token, { role: "relay", resume: clientID || join.client })
     .then((c) => {
       clientID = c.client_id;
     })
@@ -526,7 +526,7 @@ async function init(): Promise<void> {
 // register binds a client to this address and starts watching + scanning.
 async function register(): Promise<void> {
   try {
-    const c = await registerClient(sid, token, { role: "relay" });
+    const c = await registerClient(sid, token, { role: "relay", resume: join.client });
     clientID = c.client_id;
     ownName = c.name;
   } catch (err) {

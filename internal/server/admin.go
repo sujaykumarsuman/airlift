@@ -208,9 +208,10 @@ func (srv *Server) adminReview(w http.ResponseWriter, r *http.Request, s *sessio
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// adminEvict bars a client's address from a session (airlift admin).
+// adminEvict bars a client's address from a session (airlift admin) — always the
+// whole address; the same-address exception is for session admins (ADR 0022).
 func (srv *Server) adminEvict(w http.ResponseWriter, r *http.Request, s *session.Session) {
-	if _, ok := s.EvictClientByID(r.PathValue("cid")); !ok {
+	if _, ok := s.EvictClientByID(r.PathValue("cid"), ""); !ok {
 		writeError(w, http.StatusNotFound, "no such client")
 		return
 	}

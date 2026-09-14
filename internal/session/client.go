@@ -19,10 +19,11 @@ const (
 // Valid reports whether r is a known role.
 func (r Role) Valid() bool { return r == RoleRelay || r == RoleViewer }
 
-// Client is one participant, bound to the address it registered from: one client
-// per address per session (ADR 0017). A client may hold several streams. The id
-// is not a secret — every authenticated call rechecks it against the caller's
-// address — so it can travel in a header and appear in the snapshot.
+// Client is one participant — one device — recording the address it registered
+// from (ADR 0022; ADR 0017 keyed clients by address, which folded every device
+// behind one NAT into a single participant). A client may hold several streams.
+// The id is not a secret — every authenticated call rechecks it against the
+// caller's address — so it can travel in a header and appear in the snapshot.
 type Client struct {
 	ID           string
 	Name         string
@@ -42,18 +43,23 @@ type ClientSnapshot struct {
 	LastActive   time.Time `json:"last_active"`
 }
 
-// RegisterClient returns the client bound to addr, creating it on first sight
-// with a unique name. A repeat registration keeps the existing client (the
-// proposed name is ignored) and may only UPGRADE it to session admin, never
-// downgrade. It refuses (ok=false) an evicted address — the check is atomic with
-// the insert, so a concurrent eviction cannot re-admit the address.
-func (s *Session) RegisterClient(addr, proposed string, admin bool) (*Client, bool) {
+// RegisterClient returns a client for the caller at addr. When resume names one
+// of this session's clients bound to the SAME address, that client is returned —
+// the proposed name is ignored and admin may only UPGRADE it, never downgrade —
+// so a reload or a second tab keeps its identity. Any other call mints a new
+// client with a unique name: two devices behind one address are two
+// participants (ADR 0022). A resume from a different address is not honoured
+// (the id is public in the snapshot; the address check is what stops one
+// participant taking over another). It refuses (ok=false) an evicted address —
+// the check is atomic with the insert, so a concurrent eviction cannot re-admit
+// the address.
+func (s *Session) RegisterClient(addr, proposed string, admin bool, resume string) (*Client, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.evicted[addr] {
 		return nil, false
 	}
-	if c, ok := s.byAddr[addr]; ok {
+	if c, ok := s.clients[resume]; ok && resume != "" && c.Addr == addr {
 		if admin {
 			c.SessionAdmin = true
 		}
@@ -70,7 +76,6 @@ func (s *Session) RegisterClient(addr, proposed string, admin bool) (*Client, bo
 		lastActive:   s.now(),
 	}
 	s.clients[c.ID] = c
-	s.byAddr[addr] = c
 	s.clientOrder = append(s.clientOrder, c.ID)
 	s.usedNames[c.Name] = true
 	s.notifyLocked()
@@ -127,11 +132,15 @@ func (s *Session) JoinersAdmin() bool {
 	return s.joinersAdmin
 }
 
-// EvictClientByID bars the address of client cid from the session: every client
-// at that address is removed, the address is remembered as evicted for the
-// session's life, and each of its open streams is flagged and woken so the
-// events handler can send `event: evicted`. Returns the evicted address.
-func (s *Session) EvictClientByID(cid string) (string, bool) {
+// EvictClientByID removes client cid and bars its address for the session's
+// life — every client at that address goes with it, and each of their open
+// streams is flagged and woken so the events handler can send `event: evicted`.
+// The exception is a target at the evictor's own address (byAddr): barring it
+// would evict the admin too, so only that one client is dropped and the
+// address stays open (the other devices behind that NAT are the admin's own).
+// An airlift-admin eviction passes an empty byAddr and always bars. Returns the
+// target's address.
+func (s *Session) EvictClientByID(cid, byAddr string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.clients[cid]
@@ -139,19 +148,22 @@ func (s *Session) EvictClientByID(cid string) (string, bool) {
 		return "", false
 	}
 	addr := c.Addr
-	s.evicted[addr] = true
+	barAddr := byAddr == "" || addr != byAddr
+	if barAddr {
+		s.evicted[addr] = true
+	}
+	gone := func(cl *Client) bool { return cl.ID == cid || (barAddr && cl.Addr == addr) }
 	kept := s.clientOrder[:0]
 	for _, id := range s.clientOrder {
-		if cl := s.clients[id]; cl != nil && cl.Addr == addr {
+		if cl := s.clients[id]; cl != nil && gone(cl) {
 			delete(s.clients, id)
 		} else {
 			kept = append(kept, id)
 		}
 	}
 	s.clientOrder = kept
-	delete(s.byAddr, addr)
 	for sub := range s.subs {
-		if sub.client != nil && sub.client.Addr == addr {
+		if sub.client != nil && gone(sub.client) {
 			sub.evicted.Store(true)
 			select {
 			case sub.C <- struct{}{}:

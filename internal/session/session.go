@@ -190,11 +190,10 @@ type Session struct {
 	onComplete  func(*Session, *Beam)
 	onBeamEvict func(sid, bid string) // reclaims a removed beam's on-disk dir
 
-	// Access layer (6.5, ADR 0017): one client per address, a stable listing
-	// order, the names in use for uniqueness, and the addresses evicted for the
-	// session's life.
+	// Access layer (6.5, ADR 0017; ADR 0022): one client per device, each
+	// recording its address, a stable listing order, the names in use for
+	// uniqueness, and the addresses evicted for the session's life.
 	clients     map[string]*Client
-	byAddr      map[string]*Client
 	clientOrder []string
 	usedNames   map[string]bool
 	evicted     map[string]bool

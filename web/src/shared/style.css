@@ -86,9 +86,20 @@ input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var
   max-width: 1120px; margin: 0 auto; height: 56px; padding: 0 clamp(1rem, 4vw, 1.5rem);
   display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
 }
-/* On the home/gate screens the content is a centred narrow column; narrow the nav
-   to match so the brand sits above the column, not floating at the window edge. */
-body:has(#app.mode-home) .bar-inner { max-width: 540px; }
+/* the session power menu (End / Delete) — session admins only */
+.btn.iconbtn { padding: 0.4rem 0.5rem; }
+.menu { position: relative; }
+.menu-list {
+  position: absolute; right: 0; top: calc(100% + 8px); min-width: 190px; z-index: 6;
+  display: none; flex-direction: column; gap: 2px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.menu.open .menu-list { display: flex; }
+.menu.open > .btn { border-color: var(--accent); color: var(--accent); }
+.menu-list .btn { width: 100%; justify-content: flex-start; background: transparent; border-color: transparent; }
+.menu-list .btn:hover { background: var(--surface-2); }
+.menu-list .btn.danger { color: var(--bad); }
 .brand { display: flex; align-items: center; gap: 0.55rem; min-width: 0; font-size: 0.95rem; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
 .brand .ic { width: 22px; height: 22px; color: var(--accent); }
 .brand .t2 { color: var(--muted); font-weight: 500; }

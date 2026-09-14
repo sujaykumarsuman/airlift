@@ -227,7 +227,6 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 		onComplete:    st.onComplete,
 		onBeamEvict:   st.onBeamEvict,
 		clients:       map[string]*Client{},
-		byAddr:        map[string]*Client{},
 		usedNames:     map[string]bool{},
 		evicted:       map[string]bool{},
 		label:         p.Label,
