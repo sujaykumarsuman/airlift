@@ -1,7 +1,8 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, resolveKnock } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getInfo, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, resolveKnock } from "../shared/api";
 import { decodeBitmap } from "../shared/bitmap";
 import { renderChunkMarks } from "../shared/chunks";
+import { bindCopyButtons } from "../shared/copy";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { icon } from "../shared/icons";
 import { formatBytes, formatDuration } from "../shared/format";
@@ -59,6 +60,10 @@ const sessionEl = $<HTMLElement>("#session");
 const placeEl = $<HTMLElement>("#place"); // session panel (left column, below the share card)
 const statusEl = $<HTMLElement>("#status"); // beams (right column)
 const newButton = $<HTMLButtonElement>("#new-session");
+// The landing: a hero above the Create / Join card and the get-airlift / how-it-
+// works sections below it (static HTML), shown on the home page only.
+const heroEl = $<HTMLElement>("#hero");
+const landingEl = $<HTMLElement>("#landing");
 // The session-admin actions live in the nav: a power button opening End / Delete.
 const menuEl = $<HTMLElement>("#session-menu");
 const powerBtn = $<HTMLButtonElement>("#power");
@@ -73,7 +78,43 @@ function setMode(mode: "home" | "dash"): void {
     appEl.className = next;
     enter(appEl); // a new view: its cards rise in
   }
+  heroEl.hidden = landingEl.hidden = true; // only renderHome shows the landing
   if (mode === "home") showMenu(false, false);
+}
+
+// showVersion fills the landing footer with the tower's version, once.
+let versionShown = false;
+function showVersion(): void {
+  if (versionShown) return;
+  versionShown = true;
+  void getInfo()
+    .then((i) => {
+      const el = document.getElementById("tower-version");
+      if (el) el.textContent = `tower ${i.version}`;
+    })
+    .catch(() => {
+      /* the footer simply stays blank */
+    });
+}
+
+// bindCloneTabs wires the landing's SSH / HTTPS / ZIP pill: the thumb slides
+// (--i) and the matching command pane shows.
+function bindCloneTabs(): void {
+  const seg = document.querySelector<HTMLElement>("[data-clone]");
+  if (!seg) return;
+  const tabs = [...seg.querySelectorAll<HTMLButtonElement>(".seg")];
+  const panes = [...landingEl.querySelectorAll<HTMLElement>("[data-pane]")];
+  tabs.forEach((b, i) =>
+    b.addEventListener("click", () => {
+      seg.style.setProperty("--i", String(i));
+      for (const t of tabs) {
+        const on = t === b;
+        t.classList.toggle("on", on);
+        t.setAttribute("aria-selected", String(on));
+      }
+      for (const p of panes) p.hidden = p.dataset.pane !== b.dataset.tab;
+    }),
+  );
 }
 
 // Beams already on the dashboard; a bid not in here is a new card and rises in.
@@ -214,7 +255,7 @@ async function renderHome(): Promise<void> {
   // which card is shown, without a re-render, so the motion actually plays.
   sessionEl.innerHTML = html`
     ${notice ? html`<div class="card"><p class="warn">${notice}</p></div>` : ""}
-    <div class="segmented${homeTab === "join" ? " join" : ""}" role="tablist">
+    <div class="segmented" role="tablist" style="--i:${homeTab === "join" ? 1 : 0}">
       <span class="thumb" aria-hidden="true"></span>
       <button class="btn seg${homeTab === "create" ? " on" : ""}" type="button" role="tab" data-tab="create" aria-selected="${homeTab === "create"}">${icon("plus")} Create</button>
       <button class="btn seg${homeTab === "join" ? " on" : ""}" type="button" role="tab" data-tab="join" aria-selected="${homeTab === "join"}">${icon("key")} Join</button>
@@ -239,7 +280,7 @@ async function renderHome(): Promise<void> {
   const showTab = (tab: "create" | "join"): void => {
     if (tab === homeTab) return;
     homeTab = tab;
-    switchEl.classList.toggle("join", tab === "join");
+    switchEl.style.setProperty("--i", tab === "join" ? "1" : "0");
     for (const b of segs) {
       const on = b.dataset.tab === tab;
       b.classList.toggle("on", on);
@@ -265,6 +306,9 @@ async function renderHome(): Promise<void> {
     const sid = $<HTMLInputElement>("#join-sid", sessionEl).value.trim().toLowerCase();
     if (sid) location.href = new URL(sid, appBase).toString();
   });
+  heroEl.hidden = false;
+  landingEl.hidden = false;
+  showVersion();
 }
 
 // A password-protected session opened without a token: ask for the password.
@@ -933,4 +977,6 @@ delBtn.addEventListener("click", () => {
   closeMenu();
   onHardDelete();
 });
+bindCopyButtons(document);
+bindCloneTabs();
 void boot();

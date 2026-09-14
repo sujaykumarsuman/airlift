@@ -159,6 +159,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("GET /api/admin/sessions/{sid}/download", srv.adminSess(srv.adminDownload))
 	m.HandleFunc("GET /s/{sid}", srv.sessionPage("scan.html", scanPlaceholder))
 	m.HandleFunc("GET /admin", srv.page("admin.html", adminPlaceholder))
+	m.HandleFunc("GET /docs", srv.page("docs.html", docsPlaceholder))
 	m.HandleFunc("GET /{$}", srv.page("index.html", dashboardPlaceholder))
 	// A session lives at its own path `<base>/<sid>` (ADR 0020); the dashboard page
 	// reads the sid from the URL. This wildcard is the least specific route, so the
@@ -168,6 +169,7 @@ func (srv *Server) routes() {
 	if srv.opts.Web != nil {
 		m.Handle("GET /assets/", http.FileServerFS(srv.opts.Web))
 		m.Handle("GET /icons/", http.FileServerFS(srv.opts.Web))
+		m.Handle("GET /docs/", http.FileServerFS(srv.opts.Web)) // the docs page's screenshots
 		m.HandleFunc("GET /sw.js", srv.file("sw.js", "text/javascript; charset=utf-8"))
 		m.HandleFunc("GET /manifest.webmanifest", srv.file("manifest.webmanifest", "application/manifest+json"))
 	}
@@ -685,6 +687,10 @@ func (srv *Server) sessionPage(file, placeholder string) http.HandlerFunc {
 		inner(w, r)
 	}
 }
+
+const docsPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift docs</title>
+<p>The docs arrive with the web build. Until then: <code>airlift beam PATH</code> makes a beam; the tower's dashboard receives it.</p>
+`
 
 const dashboardPlaceholder = `<!doctype html><meta charset="utf-8">` + baseSentinel + `<title>airlift tower</title>
 <p>airlift tower is running. The dashboard arrives with the web build; the API is live under <code>/api/</code>.</p>

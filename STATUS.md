@@ -284,6 +284,15 @@ symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
   inputs ring on focus; ticks light in; the scanner overlay fades and its
   viewfinder corners breathe while waiting. `prefers-reduced-motion` honoured.
   Canvas: a Motion spec board (Version 6).
+- **Landing + docs**: the home is a landing around the Create / Join card — hero,
+  how-it-works, and *Get airlift* (GitHub link, clone by SSH / HTTPS / ZIP with
+  copy buttons, per-platform release binaries, `go install`), with the tower's
+  version in the footer. A **docs page** at `/docs` (`web/docs.html`, static HTML
+  + `web/src/docs/main.ts` for copy buttons and the live TOC) walks through
+  install → make a beam → show it → receive it → sessions → tips → reference, with
+  real screenshots captured headlessly from the running tower
+  (`web/public/docs/*.webp`, embedded in the binary; `GET /docs` and `/docs/`
+  routes). The repo is public; releases are `airlift-<os>-<arch>` from `v*` tags.
 
 - **Phase 12 complete.**
 

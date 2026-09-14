@@ -21,6 +21,11 @@ dropped for inactivity is suspended and reopened by simply opening its link (ADR
 0018). The tower is deployed behind Caddy TLS on a VPS (see
 [`docs/HOSTING.md`](docs/HOSTING.md)).
 
+**Using it:** the hosted tower's home page has the downloads and clone commands,
+and a walkthrough with screenshots lives at
+[projects.sujaykumar.dev/airlift/docs](https://projects.sujaykumar.dev/airlift/docs)
+(served by the tower itself from `web/docs.html`).
+
 ## The two commands
 
 ```

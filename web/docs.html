@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--airlift-base-->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>airlift docs</title>
+  </head>
+  <body class="tower docs-page">
+    <header class="bar">
+      <div class="bar-inner">
+        <a class="brand" href="./">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M6 6a9 9 0 0 0 0 12M18 6a9 9 0 0 1 0 12"/></svg>
+          airlift <span class="t2">docs</span>
+        </a>
+        <span class="bar-right">
+          <a class="btn small" href="./"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-6.5 8 6.5"/><path d="M6 9.5V19h12V9.5"/></svg> Tower</a>
+          <a class="btn small" href="https://github.com/sujaykumarsuman/airlift"><svg class="ic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg> GitHub</a>
+        </span>
+      </div>
+    </header>
+
+    <main class="docs">
+      <aside class="toc">
+        <p class="section-label">On this page</p>
+        <a href="#overview" class="on">What airlift does</a>
+        <a href="#install">Install the CLI</a>
+        <a href="#beam">Make a beam</a>
+        <a href="#show">Show it</a>
+        <a href="#receive">Receive it</a>
+        <a href="#sessions">Sessions &amp; people</a>
+        <a href="#tips">Tips &amp; troubleshooting</a>
+        <a href="#reference">Reference</a>
+      </aside>
+
+      <article>
+        <section id="overview">
+          <h1>Using airlift</h1>
+          <p class="lede">airlift moves a file <em>out</em> of a machine that has no network at all. The machine shows the file as an animated QR loop; a phone reads the loop and relays it to a tower on the internet, which puts the file back together, checks it, and lets you download it. Nothing crosses the gap but light.</p>
+          <svg class="diagram" viewBox="0 0 720 150" aria-label="beam → phone → tower → dashboard">
+            <g class="node"><rect x="10" y="30" width="170" height="90" rx="12"/><text x="95" y="66" class="t">air-gapped machine</text><text x="95" y="90" class="m">airlift beam ./repo</text></g>
+            <g class="node"><rect x="275" y="30" width="170" height="90" rx="12"/><text x="360" y="66" class="t">phone</text><text x="360" y="90" class="m">scanner relays frames</text></g>
+            <g class="node"><rect x="540" y="30" width="170" height="90" rx="12"/><text x="625" y="66" class="t">tower</text><text x="625" y="90" class="m">verify · unpack · serve</text></g>
+            <path class="arrow" d="M180 75 H270"/><text x="225" y="62" class="l">light</text>
+            <path class="arrow" d="M445 75 H535"/><text x="490" y="62" class="l">https</text>
+          </svg>
+          <div class="roles">
+            <div><b>Beam</b><span>One self-contained HTML page made by <code>airlift beam</code>. It never talks to anything — that is what keeps the air gap.</span></div>
+            <div><b>Tower</b><span>This site. It hosts sessions, receives frames, verifies the sha256 chain, unpacks a repobundle and serves downloads.</span></div>
+            <div><b>Dashboard</b><span>A session's shared page: share the link, watch beams land, download results. Everyone who joins sees the same thing.</span></div>
+            <div><b>Scanner</b><span>The camera page a phone opens from the dashboard's <em>Scan a beam</em>. It stops itself once the beam is in.</span></div>
+          </div>
+        </section>
+
+        <section id="install">
+          <h2>Install the CLI</h2>
+          <p>You need the <code>airlift</code> binary on the air-gapped machine (to make beams) — copy it in however files normally get in there. The tower side is already hosted; nothing to install.</p>
+          <h3>Download a release</h3>
+          <p>Pick your platform from the <a href="https://github.com/sujaykumarsuman/airlift/releases/latest">latest release</a>, then make it executable and put it on your path:</p>
+          <div class="cmd"><code>curl -LO https://github.com/sujaykumarsuman/airlift/releases/latest/download/airlift-darwin-arm64
+chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local/bin/airlift</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <p class="hint">Assets: <code>airlift-darwin-arm64</code>, <code>airlift-darwin-amd64</code>, <code>airlift-linux-amd64</code>, <code>airlift-linux-arm64</code>, <code>airlift-windows-amd64.exe</code>, plus <code>SHA256SUMS</code>. On macOS, if Gatekeeper objects: <code>xattr -d com.apple.quarantine airlift</code>.</p>
+          <h3>Or with Go</h3>
+          <div class="cmd"><code>go install github.com/sujaykumarsuman/airlift/cmd/airlift@latest</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <h3>Or from source</h3>
+          <div class="cmd"><code>git clone https://github.com/sujaykumarsuman/airlift.git &amp;&amp; cd airlift &amp;&amp; make airlift   # → bin/airlift</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <p class="hint">Needs Go 1.26 and Node (the web UI is embedded into the binary). <code>airlift --help</code> should then list the two commands, <code>beam</code> and <code>tower</code>.</p>
+        </section>
+
+        <section id="beam">
+          <h2>Make a beam</h2>
+          <p>On the air-gapped machine, point <code>airlift beam</code> at what you want out. It bundles, compresses, chunks the payload into QR frames and writes <strong>one self-contained HTML file</strong>, then opens it in the browser.</p>
+          <h3>A folder</h3>
+          <div class="cmd"><code>airlift beam ./my-repo</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <p>The folder becomes a <a href="https://github.com/sujaykumarsuman/airlift/blob/main/docs/BUNDLE.md">repobundle</a> — git-aware, so <code>.gitignore</code> is respected — named after the folder. The tower unpacks it back into a tree and offers it as a zip.</p>
+          <h3>A single file</h3>
+          <div class="cmd"><code>airlift beam ./notes.txt</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <p>Sent as-is, named after the file; the tower serves it back as the raw file.</p>
+          <h3>Several files</h3>
+          <div class="cmd"><code>airlift beam --name evidence report.pdf photo.jpg log.txt</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <p>Several paths are bundled together and need a name — <code>--name</code>, or a <code>name:</code> line in a list file:</p>
+          <div class="cmd"><code>airlift beam --files-from list.txt      # list.txt: "name: evidence" then one path per line</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <h3>What it prints</h3>
+          <pre><code>  gzip          40870 bytes   42.4 % of input
+  chunks           69 × 600 bytes
+  mode     fountain (175 packets, LT/robust soliton)
+  qr       version 20 (97×97 modules), ECC M, alphanumeric
+  loop            184 frames   manifest every 20   36.8 s per pass at 5 fps
+  session  0xbc7ce2dd
+  output   2.5 MB</code></pre>
+          <p>Small beams (under ~24 chunks) play their chunks in order and repeat; larger ones switch to a <em>fountain</em> code automatically, so every pass produces fresh packets and a missed frame never means waiting for the same one to come round. You do not choose — the mode is picked from the size.</p>
+          <h3>Options</h3>
+          <table class="opts">
+            <tr><th><code>--name NAME</code></th><td>The beam's name (the tower shows it). Required for several files.</td></tr>
+            <tr><th><code>--fps N</code></th><td>Initial frames per second, 1–60 (default 5). Raise it once the scanner reports more decodes/s than that.</td></tr>
+            <tr><th><code>--chunk BYTES</code></th><td>Payload bytes per frame (default 600, at most 2242 at ECC M). Bigger chunks mean fewer frames but denser codes.</td></tr>
+            <tr><th><code>--version-target V</code></th><td>Pick the largest chunk that fits QR version V (1–40) instead of <code>--chunk</code>.</td></tr>
+            <tr><th><code>--ecc L|M|Q|H</code></th><td>QR error correction (default M). Higher survives glare better, at fewer bytes per frame.</td></tr>
+            <tr><th><code>--manifest-every K</code></th><td>Re-insert the manifest frame every K frames (default 20), so a scanner that starts mid-loop learns the beam quickly.</td></tr>
+            <tr><th><code>--format base64|text</code></th><td>Bundle format for folders (default base64).</td></tr>
+            <tr><th><code>--out FILE</code> · <code>--no-open</code></th><td>Where to write the page (default <code>&lt;name&gt;.html</code>), and whether to open it.</td></tr>
+          </table>
+        </section>
+
+        <section id="show">
+          <h2>Show it</h2>
+          <p>Open the HTML on the air-gapped screen. The page is black with only the code bright, so a camera exposes for the QR; make it full-screen and leave it playing.</p>
+          <figure><img src="docs/player.webp" alt="The beam player: a QR code on a white tile over a black page, with a control bar" loading="lazy" /><figcaption>The player. Controls: ◀ ▶ step · pause/play · fps − + · size − + · fullscreen · hide chrome. Keys: <code>space</code> · <code>←</code>/<code>→</code> · <code>+</code>/<code>−</code> · <code>[</code>/<code>]</code> · <code>f</code> · <code>h</code>.</figcaption></figure>
+          <ul>
+            <li><b>Size</b> — <code>[</code> / <code>]</code> scale the code 40–100 %. Smaller can decode <em>better</em> when the phone is close and the screen is large.</li>
+            <li><b>Speed</b> — <code>+</code> / <code>−</code> change the fps live. Watch the scanner's <code>decoded/s</code>; run the beam a touch below it.</li>
+            <li><b>Chrome</b> — <code>h</code> hides everything but the code; <code>f</code> goes full-screen.</li>
+          </ul>
+        </section>
+
+        <section id="receive">
+          <h2>Receive it</h2>
+          <ol class="walk">
+            <li>
+              <b>Create a session</b> on the tower's home page (a join password is optional; tick <em>Joiners are session admins</em> if you want everyone to be able to end it).
+              <figure><img src="docs/home.webp" alt="The tower home page with the Create / Join switch" loading="lazy" /></figure>
+            </li>
+            <li>
+              <b>Open the session on the phone</b> — scan the QR on the dashboard or open the link. The phone joins the same session and sees the same dashboard.
+            </li>
+            <li>
+              <b>Tap <em>Scan a beam</em></b> and point the camera at the screen. The HUD counts chunks as they land — one tally mark per chunk, a minimap of pages, and the decode rate. The scanner stops itself and offers to close once the beam is whole.
+              <figure><img src="docs/scanner.webp" alt="The scanner: a square viewfinder and the chunk tally" loading="lazy" class="phone" /></figure>
+            </li>
+            <li>
+              <b>Watch the dashboard.</b> Each beam is a card: chunk marks while receiving, then the verification — gzip sha256, original sha256, every file's sha256 — and the downloads: the raw file, or the unpacked tree as a zip.
+              <figure><img src="docs/dashboard.webp" alt="The dashboard with a verified beam and its downloads" loading="lazy" /></figure>
+            </li>
+          </ol>
+        </section>
+
+        <section id="sessions">
+          <h2>Sessions &amp; people</h2>
+          <ul>
+            <li><b>A public session's link carries its token</b> — anyone with the link is in. A <b>password session's</b> link is the id alone; joiners enter the password. Someone with only the id can <em>knock</em>, and a session admin admits or denies them.</li>
+            <li><b>Participants</b> are devices: your laptop and your phone are two entries, each with its roles (<code>viewer</code>, <code>relay</code>). A session admin can evict one.</li>
+            <li><b>Lifetime</b> — a session stays alive while anyone is connected, up to 24 h; the last 30 minutes show a countdown and a <em>+1 h</em> for admins. If everyone leaves for 30 minutes it is suspended: opening its link reopens it. <em>End session</em> keeps the downloads for an hour; <em>Delete now</em> removes everything at once. Both live under the ⏻ menu in the nav.</li>
+          </ul>
+        </section>
+
+        <section id="tips">
+          <h2>Tips &amp; troubleshooting</h2>
+          <ul>
+            <li><b>Distance and size.</b> Fill the viewfinder with the code without touching its edges. If decodes stall, shrink the code (<code>[</code>) rather than backing the phone away.</li>
+            <li><b>Glare and light.</b> A dark room and a matte screen decode best; the page is already black for that reason. Tilt the screen a few degrees if a reflection sits on the code.</li>
+            <li><b>The counters.</b> <code>new</code> is frames the tower had not seen; <code>dup</code> is repeats (normal — the loop repeats); <code>bad</code> means a frame decoded but did not parse, usually motion blur — hold still.</li>
+            <li><b>Missing chunks.</b> A sequential beam fills them on its next pass; a fountain beam keeps producing new packets, so just keep pointing. The minimap shows which pages are still short.</li>
+            <li><b>"Already received".</b> The scanner tells you when the loop on screen is a beam the session already has. Show the next beam, or start a new session.</li>
+            <li><b>Several beams, one session.</b> A session holds many beams; beam a folder, then a file, then another folder — each lands as its own card.</li>
+          </ul>
+        </section>
+
+        <section id="reference">
+          <h2>Reference</h2>
+          <table class="opts">
+            <tr><th><code>airlift beam PATH…</code></th><td>Make a beam page from a folder, a file, or several files.</td></tr>
+            <tr><th><code>airlift tower</code></th><td>Run your own tower (settings in <code>~/.airlift/config</code>; every key is also a flag). See <a href="https://github.com/sujaykumarsuman/airlift/blob/main/docs/HOSTING.md">HOSTING</a> for the reverse-proxy setup.</td></tr>
+            <tr><th>Protocol</th><td><a href="https://github.com/sujaykumarsuman/airlift/blob/main/docs/PROTOCOL.md">PROTOCOL.md</a> — the frame header, base45 QR frames, the loop schedule and the fountain code.</td></tr>
+            <tr><th>Bundle format</th><td><a href="https://github.com/sujaykumarsuman/airlift/blob/main/docs/BUNDLE.md">BUNDLE.md</a> — the repobundle text format a folder is packed into.</td></tr>
+            <tr><th>HTTP API</th><td><a href="https://github.com/sujaykumarsuman/airlift/blob/main/docs/API.md">API.md</a> — sessions, clients, frames, events, downloads.</td></tr>
+            <tr><th>Decisions</th><td><a href="https://github.com/sujaykumarsuman/airlift/tree/main/docs/adr">docs/adr</a> — every locked decision, with its reasoning.</td></tr>
+          </table>
+        </section>
+      </article>
+    </main>
+    <script type="module" src="/src/docs/main.ts"></script>
+  </body>
+</html>
