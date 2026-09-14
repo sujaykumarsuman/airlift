@@ -68,4 +68,3 @@ export function failedStage(beam: Beam): Stage | null {
   }
   return null;
 }
-

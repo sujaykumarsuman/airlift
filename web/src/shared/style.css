@@ -66,6 +66,14 @@ a:hover { color: #5fe0d2; }
 .btn:disabled { opacity: 0.55; cursor: default; }
 .btn.danger { background: transparent; border-color: #4a2a2e; color: var(--bad); }
 .btn.danger:hover { border-color: var(--bad); }
+/* A `sym` button keeps its words on wide screens and collapses to its symbol on a
+   phone (the `.lbl` span hides; the text lives on as aria-label/title). The main
+   calls to action (Create, Join, Scan a beam, downloads) never carry `sym`. */
+@media (max-width: 640px) {
+  .btn.sym .lbl { display: none; }
+  .btn.sym { padding: 0.4rem 0.5rem; gap: 0; min-width: 32px; min-height: 32px; justify-content: center; }
+  .btn.small.sym { padding: 0.32rem 0.45rem; }
+}
 
 input, select {
   font: inherit; color: var(--fg); background: var(--surface-2);
@@ -138,7 +146,11 @@ input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var
 .tower main.mode-home { max-width: 960px; }
 /* the home's Create / Join card (and the gate cards) stay a centred narrow column */
 .mode-home #session { width: 100%; max-width: 540px; margin: 0 auto; }
-.tower main.mode-home #left { display: grid; gap: 1rem; }
+/* One explicit minmax(0, 1fr) track: a bare `1fr` is minmax(auto, 1fr), whose
+   minimum is the items' min-content — one long install command would size the
+   track (and every sibling) to its own length and scroll the page sideways. */
+.tower main.mode-home #left { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr); }
+#left > *, .landing > * { min-width: 0; }
 .tower main.mode-home #status, .tower main.mode-home #place:empty { display: none; }
 /* Default is one column; the dashboard splits into share/session + beams only
    once there is room for both (≥1000px). Grid children carry min-width:0 so a
@@ -285,7 +297,7 @@ ul.paths code { color: var(--fg); }
 }
 .scan .xbtn svg { width: 16px; height: 16px; }
 /* the home Create / Join switch — a pill whose thumb slides under the active tab */
-.segmented { --n: 2; --i: 0; position: relative; display: grid; grid-template-columns: repeat(var(--n), 1fr); padding: 4px; margin: 0 0 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; }
+.segmented { --n: 2; --i: 0; position: relative; display: grid; grid-template-columns: repeat(var(--n), minmax(0, 1fr)); padding: 4px; margin: 0 0 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; }
 .segmented .thumb {
   position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / var(--n)); border-radius: 999px;
   background: var(--surface); border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
@@ -361,25 +373,62 @@ ul.paths code { color: var(--fg); }
 .hero h1 { font-size: 2.1rem; letter-spacing: -0.02em; margin: 0; }
 .hero .tagline { font-size: 1.05rem; margin: 0; }
 .hero .sub { color: var(--muted); max-width: 580px; margin: 0; }
-.landing { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-top: 0.75rem; }
+/* Side by side, the get-airlift column is never narrower than its longest command
+   (min-content) so nothing is clipped on a wide screen, and the two share the rest
+   equally — the split the page always had. Under 860px both stack into one
+   minmax(0, 1fr) column, so a long command can never widen a phone. */
+.landing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(min-content, 1fr); gap: 1.25rem; margin-top: 0.75rem; }
 .landing .how { padding: 1.1rem 1.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .steps { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: 0.9rem; }
-.steps li { display: grid; grid-template-columns: 28px 1fr; gap: 0.15rem 0.75rem; align-items: start; }
+.steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 0.15rem 0.75rem; align-items: start; }
 .steps .n { grid-row: span 2; width: 28px; height: 28px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line); display: grid; place-items: center; font-weight: 600; font-size: 0.85rem; }
 .steps b { font-weight: 600; }
 .steps span:last-child { color: var(--muted); font-size: 0.9rem; }
-.cmd { display: flex; align-items: center; gap: 0.5rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.4rem 0.45rem 0.65rem; margin-top: 0.6rem; }
+.cmd { display: flex; align-items: center; gap: 0.5rem; min-width: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 0.45rem 0.4rem 0.45rem 0.65rem; margin-top: 0.6rem; }
 .cmd code { flex: 1; min-width: 0; font-size: 0.8rem; color: var(--fg); white-space: pre; overflow-x: auto; scrollbar-width: none; }
 .cmd .btn { flex: none; }
 .btn.copied { color: var(--ok); border-color: rgba(70, 196, 106, 0.4); }
-.dl { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.6rem; }
-.dl .btn { justify-content: flex-start; font-size: 0.85rem; }
+.dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; margin-top: 0.6rem; }
+.dl .btn { justify-content: flex-start; font-size: 0.85rem; white-space: nowrap; }
+/* the symbol is taller than the small text; the negative block margin keeps the
+   button the height it had without one */
+.dl .btn .ic { color: var(--muted); margin-block: -2px; }
 .section-label a.count { color: var(--muted); }
 .section-label a.count:hover { color: var(--accent); }
 .foot { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; color: var(--muted); font-size: 0.8rem; padding: 0.25rem 0 0; }
 .foot a { color: var(--muted); }
 .foot a:hover { color: var(--accent); }
-@media (max-width: 860px) { .landing { grid-template-columns: 1fr; } }
+@media (max-width: 860px) { .landing { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- phone (≤640px): the same page, tighter — symbols for secondary actions,
+   one column of binaries, one hash per verified stage, a smaller type scale ---- */
+@media (max-width: 640px) {
+  .card, .landing .how { padding: 1rem; }
+  .hero { padding: 0.75rem 0 0; }
+  .hero .mark { width: 48px; height: 48px; border-radius: 14px; }
+  .hero .mark .ic { width: 28px; height: 28px; }
+  .hero h1 { font-size: 1.9rem; }
+  .hero .sub { font-size: 0.93rem; }
+  /* the forms' primary button fills the card */
+  .create-options p:has(> .btn.primary) { display: grid; }
+  .create-options .btn.primary { justify-content: center; }
+  .dl { grid-template-columns: minmax(0, 1fr); }
+  /* a command wider than the phone is ellipsized (copy still copies the whole line) */
+  .cmd code { overflow: hidden; text-overflow: ellipsis; }
+  .card.join canvas { width: 170px; height: 170px; }
+  .progress .big { font-size: 1.9rem; }
+  /* beam head: badge + name + the remove symbol on one line, the beam id beneath */
+  .card.beam .head .btn { margin-left: auto; }
+  .card.beam .head .muted { order: 3; flex-basis: 100%; margin-top: -0.25rem; }
+  /* verdicts stack: mark + stage on one line, the hash beneath; an ok stage shows
+     its one hash (expected equals actual by definition), a bad one shows both */
+  table.verdicts, table.verdicts tbody { display: block; }
+  table.verdicts tr { display: flex; flex-wrap: wrap; align-items: center; gap: 0 0.5rem; padding: 0.3rem 0; }
+  table.verdicts th { order: 1; padding: 0; }
+  table.verdicts td.mark { order: 0; width: auto; padding: 0; display: inline-flex; }
+  table.verdicts td:not(.mark) { order: 2; flex-basis: 100%; padding: 0.1rem 0 0 1.55rem; }
+  table.verdicts tr.ok .exp, table.verdicts tr.ok .act .k { display: none; }
+}
 
 /* ---- docs ---- */
 .brand:is(a) { color: inherit; text-decoration: none; }

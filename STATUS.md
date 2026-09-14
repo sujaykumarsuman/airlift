@@ -325,6 +325,26 @@ new runtime dep — CLAUDE.md holds).
   kept beyond a session, wiped on restart); linked from the landing footer and
   the docs nav. The sample beams in `test-run/` are kept in the repo.
 
+- **Phone pass (2026-09-14)**: the home page scrolled sideways on phones because the
+  landing's `1fr` tracks (`minmax(auto, 1fr)`) sized themselves to the `go install`
+  command's min-content and pushed every sibling to 540px — every grid track is now
+  `minmax(0, …)` and every grid/flex item `min-width: 0`, so nothing can widen the
+  page; side by side, the get-airlift column keeps its longest command as its
+  minimum (`minmax(min-content, 1fr)`, the desktop split unchanged) and a command
+  wider than a phone is ellipsized (copy still copies the whole line). New ≤640px rules in
+  `shared/style.css`: a `.btn.sym` keeps its words on wide screens and collapses to
+  its symbol on a phone (the `.lbl` span hides; the text stays as `aria-label`/
+  `title`) — New session, Evict, Admit/Deny, Remove, and the docs/legal nav (Tower ·
+  Docs · GitHub · Legal, with a book and a shield symbol); the main calls to action
+  keep their text everywhere. Also on phones: one column of binaries (with a download
+  symbol before each label at every width), the form's primary button fills the
+  card, the verdict table stacks with one hash per verified stage (a failed stage
+  still shows expected + actual), the beam id drops under the name so the remove
+  symbol stays top-right, and a smaller hero/count scale. Canvas Version 8 adds the
+  LandingMobile and Responsive boards and reworks DashMobile. Verified in-browser at
+  375 / 768 / 1000 / 1400 with overflow probes (no page wider than its viewport, no
+  `[hidden]` element visible); desktop unchanged.
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.

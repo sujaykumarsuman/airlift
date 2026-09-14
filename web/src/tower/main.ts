@@ -851,8 +851,8 @@ function updateClocks(now: number): void {
 function knockRow(k: KnockView): Raw {
   return html`<li>
     <span class="who">${k.name || "(anonymous)"}</span>
-    <button class="btn small primary" data-admit="${k.id}">${icon("check")} Admit</button>
-    <button class="btn small" data-deny="${k.id}">${icon("cross")} Deny</button>
+    <button class="btn small primary sym" data-admit="${k.id}" title="Admit" aria-label="Admit">${icon("check")} <span class="lbl">Admit</span></button>
+    <button class="btn small sym" data-deny="${k.id}" title="Deny" aria-label="Deny">${icon("cross")} <span class="lbl">Deny</span></button>
   </li>`;
 }
 
@@ -875,7 +875,7 @@ function clientRow(cl: ClientSummary, iAmAdmin: boolean): Raw {
   if (me) tags.push("you");
   return html`<li class="${cl.connected ? "on" : "off"}">
     <span class="who">${cl.name}</span>${tags.length ? html` <span class="tags">${tags.join(" · ")}</span>` : ""}
-    ${iAmAdmin && !me ? html` <button class="btn small" data-evict="${cl.client_id}">${icon("cross")} Evict</button>` : ""}
+    ${iAmAdmin && !me ? html` <button class="btn small sym" data-evict="${cl.client_id}" title="Evict" aria-label="Evict">${icon("cross")} <span class="lbl">Evict</span></button>` : ""}
   </li>`;
 }
 
@@ -888,7 +888,7 @@ function beamCard(bv: BeamView, iAmAdmin: boolean, fresh: boolean): Raw {
       <span class="badge" data-state="${b.state}">${STATE_LABELS[b.state]}</span>
       <strong>${b.name || "(unnamed)"}</strong>
       <span class="muted">beam ${b.bid}</span>
-      ${iAmAdmin ? html`<button class="btn small" data-remove-beam="${b.bid}">${icon("trash")} Remove</button>` : ""}
+      ${iAmAdmin ? html`<button class="btn small sym" data-remove-beam="${b.bid}" title="Remove" aria-label="Remove">${icon("trash")} <span class="lbl">Remove</span></button>` : ""}
     </div>
     <div class="progress">
       <div class="big">${b.total > 0 ? `${b.have} / ${b.total}` : "— / —"}</div>
@@ -909,7 +909,7 @@ function verdictRow(label: string, v: Verdict | null): Raw {
   return html`<tr class="${v.ok ? "ok" : "bad"}">
     <th>${label}</th>
     <td class="mark">${v.ok ? icon("check") : icon("cross")}</td>
-    <td><div>expected <code>${v.expected}</code></div><div>actual <code>${v.actual}</code></div></td>
+    <td><div class="exp"><span class="k">expected</span> <code>${v.expected}</code></div><div class="act"><span class="k">actual</span> <code>${v.actual}</code></div></td>
   </tr>`;
 }
 

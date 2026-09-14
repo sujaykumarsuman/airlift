@@ -12,4 +12,3 @@ web/dist/*
 # Local artefacts
 *.local
 .DS_Store
-
