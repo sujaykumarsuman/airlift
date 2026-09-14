@@ -5,6 +5,7 @@ import { renderChunkMarks } from "../shared/chunks";
 import { $, html, raw, type Raw } from "../shared/dom";
 import { icon } from "../shared/icons";
 import { formatBytes, formatDuration } from "../shared/format";
+import { enter } from "../shared/motion";
 import { cleanupCountdown, expiryCountdown, instantMs, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
@@ -67,9 +68,16 @@ const delBtn = $<HTMLButtonElement>("#del-btn");
 // The layout is a single centred column for the home/gate screens and a two-column
 // dashboard (share + participants | beams) once a session is attached (ADR 0019).
 function setMode(mode: "home" | "dash"): void {
-  appEl.className = mode === "home" ? "mode-home" : "mode-dash";
+  const next = mode === "home" ? "mode-home" : "mode-dash";
+  if (!appEl.classList.contains(next)) {
+    appEl.className = next;
+    enter(appEl); // a new view: its cards rise in
+  }
   if (mode === "home") showMenu(false, false);
 }
+
+// Beams already on the dashboard; a bid not in here is a new card and rises in.
+const seenBids = new Set<string>();
 
 // showMenu shows the power menu to a session admin; End only while the session is live.
 function showMenu(admin: boolean, live: boolean): void {
@@ -202,43 +210,57 @@ async function renderHome(): Promise<void> {
   setMode("home");
   placeEl.innerHTML = "";
   statusEl.innerHTML = "";
-  // One card at a time, picked by the Create / Join switch above it.
-  const createCard = html`<div class="card">
-    <p class="section-label">${icon("beam")} Create a session</p>
-    <form id="create-form" class="create-options">
-      <label>Join password — optional <input id="opt-password" type="password" placeholder="none — open to anyone with the link" /></label>
-      <label class="check"><input id="opt-admin" type="checkbox" /> Joiners are session admins</label>
-      <p><button class="btn primary" type="submit">${icon("plus")} Create session</button></p>
-    </form>
-  </div>`;
-  const joinCard = html`<div class="card">
-    <p class="section-label">${icon("key")} Join a session</p>
-    <form id="join-form" class="create-options">
-      <label>Session id <input id="join-sid" type="text" placeholder="e.g. qkf-mzt-bwp" autocomplete="off" spellcheck="false" /></label>
-      <p><button class="btn primary" type="submit">${icon("key")} Join</button></p>
-    </form>
-  </div>`;
+  // Both cards are rendered once; the pill switch slides its thumb and swaps
+  // which card is shown, without a re-render, so the motion actually plays.
   sessionEl.innerHTML = html`
     ${notice ? html`<div class="card"><p class="warn">${notice}</p></div>` : ""}
-    <div class="segmented" role="tablist">
+    <div class="segmented${homeTab === "join" ? " join" : ""}" role="tablist">
+      <span class="thumb" aria-hidden="true"></span>
       <button class="btn seg${homeTab === "create" ? " on" : ""}" type="button" role="tab" data-tab="create" aria-selected="${homeTab === "create"}">${icon("plus")} Create</button>
       <button class="btn seg${homeTab === "join" ? " on" : ""}" type="button" role="tab" data-tab="join" aria-selected="${homeTab === "join"}">${icon("key")} Join</button>
     </div>
-    ${homeTab === "create" ? createCard : joinCard}`.html;
-  sessionEl.querySelectorAll<HTMLButtonElement>(".seg").forEach((b) =>
-    b.addEventListener("click", () => {
-      homeTab = b.dataset.tab === "join" ? "join" : "create";
-      void renderHome();
-    }),
-  );
-  sessionEl.querySelector<HTMLFormElement>("#create-form")?.addEventListener("submit", (e) => {
+    <div id="tab-create" class="card" ${homeTab === "create" ? "" : raw("hidden")}>
+      <p class="section-label">${icon("beam")} Create a session</p>
+      <form id="create-form" class="create-options">
+        <label>Join password — optional <input id="opt-password" type="password" placeholder="none — open to anyone with the link" /></label>
+        <label class="check"><input id="opt-admin" type="checkbox" /> Joiners are session admins</label>
+        <p><button class="btn primary" type="submit">${icon("plus")} Create session</button></p>
+      </form>
+    </div>
+    <div id="tab-join" class="card" ${homeTab === "join" ? "" : raw("hidden")}>
+      <p class="section-label">${icon("key")} Join a session</p>
+      <form id="join-form" class="create-options">
+        <label>Session id <input id="join-sid" type="text" placeholder="e.g. qkf-mzt-bwp" autocomplete="off" spellcheck="false" /></label>
+        <p><button class="btn primary" type="submit">${icon("key")} Join</button></p>
+      </form>
+    </div>`.html;
+  const switchEl = $<HTMLElement>(".segmented", sessionEl);
+  const segs = [...sessionEl.querySelectorAll<HTMLButtonElement>(".seg")];
+  const showTab = (tab: "create" | "join"): void => {
+    if (tab === homeTab) return;
+    homeTab = tab;
+    switchEl.classList.toggle("join", tab === "join");
+    for (const b of segs) {
+      const on = b.dataset.tab === tab;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-selected", String(on));
+    }
+    const create = $<HTMLElement>("#tab-create", sessionEl);
+    const join = $<HTMLElement>("#tab-join", sessionEl);
+    create.hidden = tab !== "create";
+    join.hidden = tab !== "join";
+    enter(tab === "create" ? create : join);
+    (tab === "create" ? $<HTMLInputElement>("#opt-password", create) : $<HTMLInputElement>("#join-sid", join)).focus();
+  };
+  for (const b of segs) b.addEventListener("click", () => showTab(b.dataset.tab === "join" ? "join" : "create"));
+  $<HTMLFormElement>("#create-form", sessionEl).addEventListener("submit", (e) => {
     e.preventDefault();
     void create({
       password: $<HTMLInputElement>("#opt-password", sessionEl).value || undefined,
       joiners_admin: $<HTMLInputElement>("#opt-admin", sessionEl).checked || undefined,
     });
   });
-  sessionEl.querySelector<HTMLFormElement>("#join-form")?.addEventListener("submit", (e) => {
+  $<HTMLFormElement>("#join-form", sessionEl).addEventListener("submit", (e) => {
     e.preventDefault();
     const sid = $<HTMLInputElement>("#join-sid", sessionEl).value.trim().toLowerCase();
     if (sid) location.href = new URL(sid, appBase).toString();
@@ -377,6 +399,7 @@ function attach(s: Stored): void {
   view = initialView;
   connection = "connecting";
   clocksClosed = false;
+  seenBids.clear();
   setMode("dash");
   stopEvents?.();
   stopPinging();
@@ -573,11 +596,12 @@ function renderStatus(): void {
         ? html`<div class="card"><p class="muted">Waiting — tap <b>Scan a beam</b> and point the camera at a beam page.</p></div>`
         : ""
     }
-    ${view.beams.map((bv) => beamCard(bv, iAmAdmin))}
+    ${view.beams.map((bv) => beamCard(bv, iAmAdmin, !seenBids.has(bv.beam.bid)))}
     ${notice ? html`<p class="warn">${notice}</p>` : ""}
   `.html;
   for (const bv of view.beams) {
     const b = bv.beam;
+    seenBids.add(b.bid);
     if (b.total > 0) {
       renderChunkMarks($<HTMLElement>(`#grid-${b.bid}`, statusEl), b.bid, decodeBitmap(b.bitmap, b.total));
     }
@@ -811,10 +835,11 @@ function clientRow(cl: ClientSummary, iAmAdmin: boolean): Raw {
   </li>`;
 }
 
-/** One beam's card: progress, then a verified or failed panel once terminal. */
-function beamCard(bv: BeamView, iAmAdmin: boolean): Raw {
+/** One beam's card: progress, then a verified or failed panel once terminal.
+ *  A card seen for the first time rises in. */
+function beamCard(bv: BeamView, iAmAdmin: boolean, fresh: boolean): Raw {
   const b = bv.beam;
-  return html`<div class="card beam" data-bid="${b.bid}">
+  return html`<div class="card beam${fresh ? " enter" : ""}" data-bid="${b.bid}">
     <div class="head">
       <span class="badge" data-state="${b.state}">${STATE_LABELS[b.state]}</span>
       <strong>${b.name || "(unnamed)"}</strong>

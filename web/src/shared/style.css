@@ -20,6 +20,11 @@
   --card: var(--surface);
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  /* motion: one easing, three durations */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 140ms;
+  --dur: 220ms;
+  --dur-slow: 380ms;
   font-family: var(--sans);
   font-size: 14.5px;
   line-height: 1.5;
@@ -49,9 +54,10 @@ a:hover { color: #5fe0d2; }
   font: inherit; font-size: 0.92rem; display: inline-flex; align-items: center; gap: 0.5rem;
   padding: 0.5rem 0.85rem; border-radius: 7px; border: 1px solid var(--border);
   background: var(--surface-2); color: var(--fg); cursor: pointer; line-height: 1;
-  transition: border-color 0.12s, background 0.12s;
+  transition: border-color var(--dur-fast), background var(--dur-fast), color var(--dur-fast), transform var(--dur-fast);
 }
 .btn:hover { border-color: #33404d; }
+.btn:active { transform: scale(0.97); }
 .btn .ic { width: 16px; height: 16px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .btn.primary:hover { background: #46ddcd; border-color: #46ddcd; }
@@ -66,7 +72,23 @@ input, select {
   border: 1px solid var(--border); border-radius: 7px; padding: 0.5rem 0.65rem;
 }
 input::placeholder { color: #626b76; }
-input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var(--accent); }
+input, select { transition: border-color var(--dur-fast), box-shadow var(--dur-fast); }
+input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---- motion ---- */
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes breathe { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+/* a view entering: its cards rise, lightly staggered; `enter` is transient */
+.enter .card, .card.enter, .enter .segmented { animation: rise var(--dur-slow) var(--ease) both; }
+.enter .card:nth-child(2) { animation-delay: 45ms; }
+.enter .card:nth-child(3) { animation-delay: 90ms; }
+.enter #place .card { animation-delay: 60ms; }
+.enter #status .card { animation-delay: 90ms; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
 
 .place .controls, .controls { display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }
 .overlay-actions { display: flex; gap: 0.75rem; justify-content: center; margin-top: 1rem; }
@@ -95,7 +117,7 @@ input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
-.menu.open .menu-list { display: flex; }
+.menu.open .menu-list { display: flex; animation: pop var(--dur) var(--ease) both; }
 .menu.open > .btn { border-color: var(--accent); color: var(--accent); }
 .menu-list .btn { width: 100%; justify-content: flex-start; background: transparent; border-color: transparent; }
 .menu-list .btn:hover { background: var(--surface-2); }
@@ -195,6 +217,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
 /* one fixed pitch whatever the count (3px tick, 4px gap); a tick may shrink a hair
    before it would ever overflow the row */
 .chunks .tally i { flex: 0 1 3px; min-width: 2px; height: 14px; border-radius: 2px; background: var(--chunk-off); }
+.chunks .tally i { transition: background var(--dur-fast); }
 .chunks .tally i.on { background: var(--accent); }
 .chunks .tally i.new { background: #fff; box-shadow: 0 0 8px rgba(53, 208, 192, 0.9); }
 .chunks .mini { display: flex; gap: 3px; height: 6px; margin-top: 8px; }
@@ -259,11 +282,19 @@ ul.paths code { color: var(--fg); }
   backdrop-filter: blur(6px); cursor: pointer; padding: 0;
 }
 .scan .xbtn svg { width: 16px; height: 16px; }
-/* the home Create / Join switch */
-.segmented { display: flex; gap: 4px; padding: 4px; margin: 0 0 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
-.segmented .seg { flex: 1; justify-content: center; background: transparent; border-color: transparent; color: var(--muted); }
-.segmented .seg.on { background: var(--surface); border-color: var(--border); color: var(--accent); }
-.segmented .seg.on .ic { color: var(--accent); }
+/* the home Create / Join switch — a pill whose thumb slides under the active tab */
+.segmented { position: relative; display: grid; grid-template-columns: 1fr 1fr; padding: 4px; margin: 0 0 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; }
+.segmented .thumb {
+  position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc(50% - 4px); border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  transition: transform var(--dur) var(--ease);
+}
+.segmented.join .thumb { transform: translateX(100%); }
+.segmented .seg { position: relative; z-index: 1; justify-content: center; border-radius: 999px; background: transparent; border-color: transparent; color: var(--muted); transition: color var(--dur) var(--ease); }
+.segmented .seg:active { transform: none; }
+.segmented .seg.on { color: var(--accent); }
+.segmented .seg .ic { transition: transform var(--dur) var(--ease); }
+.segmented .seg.on .ic { transform: scale(1.12); }
 #session > * + * { margin-top: 1rem; }
 .scan .big { font-size: clamp(2rem, 10vw, 3.4rem); font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .scan .state {
@@ -271,7 +302,12 @@ ul.paths code { color: var(--fg); }
   letter-spacing: 0.08em; color: var(--accent); background: var(--accent-soft);
   border: 1px solid var(--accent-line); border-radius: 999px; padding: 0.2rem 0.6rem;
 }
+.scan .state { transition: color var(--dur), background var(--dur), border-color var(--dur); }
 .scan .state:empty { display: none; }
+/* waiting for a beam: the viewfinder corners breathe; a finished scan fades its overlay in */
+.scan[data-state="waiting"] .finder i { animation: breathe 2.2s ease-in-out infinite; }
+.scan .ended-overlay:not([hidden]) { animation: fade var(--dur) var(--ease) both; }
+.scan .ended-card { animation: rise var(--dur-slow) var(--ease) both; }
 .scan .state[data-state="READY"] { color: var(--ok); background: rgba(70, 196, 106, 0.14); border-color: rgba(70, 196, 106, 0.34); }
 .scan .state[data-state="FAILED"] { color: var(--bad); background: rgba(242, 85, 90, 0.14); border-color: rgba(242, 85, 90, 0.34); }
 .scan .chunks { --chunk-off: rgba(255, 255, 255, 0.16); margin-top: 0.8rem; }

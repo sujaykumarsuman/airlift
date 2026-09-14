@@ -13,6 +13,7 @@ import {
 import { $, html, raw, type Raw } from "../shared/dom";
 import { icon } from "../shared/icons";
 import { cleanupCountdown, expiryCountdown, terminateCountdown } from "../shared/lifecycle";
+import { enter } from "../shared/motion";
 import { subscribe, type SSEStatus } from "../shared/sse";
 import type { AdminRow, ClientSummary, ConfigKey } from "../shared/types";
 import { downloadableBeams, reduceAdmin, rowLabel, type AdminView } from "./state";
@@ -113,6 +114,7 @@ function start(): void {
   if (ticker === null) ticker = setInterval(patchClocks, 1000);
   render();
   renderSettings();
+  enter($<HTMLElement>("#app")); // signed in: the console rises in
 }
 
 function teardown(): void {
@@ -155,6 +157,7 @@ function renderLogin(message = ""): void {
       <p><button class="btn primary" type="submit">${icon("lock")} Sign in</button></p>
     </form>
   </div>`.html;
+  enter(loginEl);
   $<HTMLFormElement>("#login-form", loginEl).addEventListener("submit", (e) => {
     e.preventDefault();
     const t = $<HTMLInputElement>("#admin-token", loginEl).value.trim();

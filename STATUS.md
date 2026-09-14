@@ -277,6 +277,14 @@ symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
   minimap + pager always, identical on scanner and dashboard. Home: a Create /
   Join switch, one card at a time.
 
+- **Motion** (`web/src/shared/motion.ts` + tokens in style.css): one easing and
+  three durations; cards rise into a view once (and a beam card the first time
+  its bid appears — never on the per-second rebuild); the home switch is a pill
+  whose thumb slides without a re-render; the power menu pops; buttons press;
+  inputs ring on focus; ticks light in; the scanner overlay fades and its
+  viewfinder corners breathe while waiting. `prefers-reduced-motion` honoured.
+  Canvas: a Motion spec board (Version 6).
+
 - **Phase 12 complete.**
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
