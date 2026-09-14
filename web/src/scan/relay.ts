@@ -95,6 +95,13 @@ export class Relay {
     this.timer = null;
   }
 
+  /** Zeroes the counters for a fresh scan. The dedup set stays — a frame already
+   *  relayed is never re-sent — and so does `completed`, which the scanner acks. */
+  resetStats(): void {
+    Object.assign(this.stats, { seen: 0, unique: 0, sent: 0, accepted: 0, dup: 0, bad: 0, failures: 0, lastError: null });
+    this.emit();
+  }
+
   /** Re-arms a stopped relay for a reopened session (an accepted extension),
    *  keeping the dedup set so already-relayed frames are not re-sent; any queued
    *  remainder is flushed on the next tick. */

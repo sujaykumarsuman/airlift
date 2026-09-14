@@ -91,6 +91,7 @@ let notice = "";
 let pinger: Pinger | null = null;
 let clocksClosed = false; // guards the one-shot re-render when the cleanup countdown ends
 let knockTimer: ReturnType<typeof setInterval> | null = null; // polls a pending knock (ADR 0021)
+let homeTab: "create" | "join" = "create"; // the home page's Create / Join switch
 
 // The app root, incl. any path prefix from the injected <base href>.
 const appBase = new URL("./", document.baseURI).toString();
@@ -201,31 +202,43 @@ async function renderHome(): Promise<void> {
   setMode("home");
   placeEl.innerHTML = "";
   statusEl.innerHTML = "";
+  // One card at a time, picked by the Create / Join switch above it.
+  const createCard = html`<div class="card">
+    <p class="section-label">${icon("beam")} Create a session</p>
+    <form id="create-form" class="create-options">
+      <label>Join password — optional <input id="opt-password" type="password" placeholder="none — open to anyone with the link" /></label>
+      <label class="check"><input id="opt-admin" type="checkbox" /> Joiners are session admins</label>
+      <p><button class="btn primary" type="submit">${icon("plus")} Create session</button></p>
+    </form>
+  </div>`;
+  const joinCard = html`<div class="card">
+    <p class="section-label">${icon("key")} Join a session</p>
+    <form id="join-form" class="create-options">
+      <label>Session id <input id="join-sid" type="text" placeholder="e.g. qkf-mzt-bwp" autocomplete="off" spellcheck="false" /></label>
+      <p><button class="btn primary" type="submit">${icon("key")} Join</button></p>
+    </form>
+  </div>`;
   sessionEl.innerHTML = html`
     ${notice ? html`<div class="card"><p class="warn">${notice}</p></div>` : ""}
-    <div class="card">
-      <p class="section-label">${icon("beam")} Create a session</p>
-      <form id="create-form" class="create-options">
-        <label>Join password — optional <input id="opt-password" type="password" placeholder="none — open to anyone with the link" /></label>
-        <label class="check"><input id="opt-admin" type="checkbox" /> Joiners are session admins</label>
-        <p><button class="btn primary" type="submit">${icon("plus")} Create session</button></p>
-      </form>
+    <div class="segmented" role="tablist">
+      <button class="btn seg${homeTab === "create" ? " on" : ""}" type="button" role="tab" data-tab="create" aria-selected="${homeTab === "create"}">${icon("plus")} Create</button>
+      <button class="btn seg${homeTab === "join" ? " on" : ""}" type="button" role="tab" data-tab="join" aria-selected="${homeTab === "join"}">${icon("key")} Join</button>
     </div>
-    <div class="card">
-      <p class="section-label">${icon("home")} Join a session</p>
-      <form id="join-form" class="create-options">
-        <label>Session id <input id="join-sid" type="text" placeholder="e.g. qkf-mzt-bwp" autocomplete="off" spellcheck="false" /></label>
-        <p><button class="btn" type="submit">${icon("key")} Join</button></p>
-      </form>
-    </div>`.html;
-  $<HTMLFormElement>("#create-form", sessionEl).addEventListener("submit", (e) => {
+    ${homeTab === "create" ? createCard : joinCard}`.html;
+  sessionEl.querySelectorAll<HTMLButtonElement>(".seg").forEach((b) =>
+    b.addEventListener("click", () => {
+      homeTab = b.dataset.tab === "join" ? "join" : "create";
+      void renderHome();
+    }),
+  );
+  sessionEl.querySelector<HTMLFormElement>("#create-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
     void create({
       password: $<HTMLInputElement>("#opt-password", sessionEl).value || undefined,
       joiners_admin: $<HTMLInputElement>("#opt-admin", sessionEl).checked || undefined,
     });
   });
-  $<HTMLFormElement>("#join-form", sessionEl).addEventListener("submit", (e) => {
+  sessionEl.querySelector<HTMLFormElement>("#join-form")?.addEventListener("submit", (e) => {
     e.preventDefault();
     const sid = $<HTMLInputElement>("#join-sid", sessionEl).value.trim().toLowerCase();
     if (sid) location.href = new URL(sid, appBase).toString();

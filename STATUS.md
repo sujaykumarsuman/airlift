@@ -269,6 +269,14 @@ symbols throughout (no icon font, no new runtime dep — CLAUDE.md holds).
   bright on a white quiet-zone tile, on-screen controls (step, pause, fps, size,
   fullscreen, hide chrome) with keys, responsive; still one offline file.
 
+- **Scanner polish**: completion also fires on the frames reply's `completed_beams`
+  (a small beam is READY before its first snapshot — the SSE edge never came); a
+  reopened scanner ignores beams already finished when it opened (and ones it
+  dismissed) so it waits clean; a persistent ✕ closes the tab; "already received"
+  hint when the loop on screen is a known beam. Chunk marks: one fixed pitch,
+  minimap + pager always, identical on scanner and dashboard. Home: a Create /
+  Join switch, one card at a time.
+
 - **Phase 12 complete.**
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified

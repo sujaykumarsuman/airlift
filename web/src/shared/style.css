@@ -192,8 +192,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
    (No `.bar` progress rule here — that class is the nav header's.) */
 .chunks { --chunk-off: #2a3039; display: block; }
 .chunks .tally { display: flex; gap: 4px; height: 14px; }
-.chunks .tally i { flex: 1 1 3px; max-width: 16px; min-width: 2px; height: 14px; border-radius: 2px; background: var(--chunk-off); }
-.chunks .tally.paged i { flex: 0 1 3px; } /* fixed pitch, but shrink a hair before ever overflowing */
+/* one fixed pitch whatever the count (3px tick, 4px gap); a tick may shrink a hair
+   before it would ever overflow the row */
+.chunks .tally i { flex: 0 1 3px; min-width: 2px; height: 14px; border-radius: 2px; background: var(--chunk-off); }
 .chunks .tally i.on { background: var(--accent); }
 .chunks .tally i.new { background: #fff; box-shadow: 0 0 8px rgba(53, 208, 192, 0.9); }
 .chunks .mini { display: flex; gap: 3px; height: 6px; margin-top: 8px; }
@@ -252,6 +253,18 @@ ul.paths code { color: var(--fg); }
 #hud .top { padding: max(1rem, env(safe-area-inset-top)) 1.1rem 1.6rem; background: linear-gradient(var(--edge-top), transparent); }
 #hud .bottom { padding: 1.6rem 1.1rem max(1rem, env(safe-area-inset-bottom)); background: linear-gradient(transparent, var(--edge-bot) 34%); display: grid; gap: 0.7rem; }
 .scan .statusline { display: flex; align-items: center; gap: 0.75rem; }
+.scan .xbtn {
+  flex: none; width: 34px; height: 34px; border-radius: 999px; display: grid; place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(255, 255, 255, 0.09); color: #fff;
+  backdrop-filter: blur(6px); cursor: pointer; padding: 0;
+}
+.scan .xbtn svg { width: 16px; height: 16px; }
+/* the home Create / Join switch */
+.segmented { display: flex; gap: 4px; padding: 4px; margin: 0 0 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
+.segmented .seg { flex: 1; justify-content: center; background: transparent; border-color: transparent; color: var(--muted); }
+.segmented .seg.on { background: var(--surface); border-color: var(--border); color: var(--accent); }
+.segmented .seg.on .ic { color: var(--accent); }
+#session > * + * { margin-top: 1rem; }
 .scan .big { font-size: clamp(2rem, 10vw, 3.4rem); font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .scan .state {
   margin-left: auto; align-self: center; font-size: 0.7rem; font-weight: 600; text-transform: uppercase;

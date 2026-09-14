@@ -18,7 +18,7 @@ import {
   stopStream,
   streamSize,
 } from "./camera";
-import { activeKey, scanJustCompleted } from "./complete";
+import { activeKey, baselineIgnored, pickActive, relayCompleted, scanJustCompleted } from "./complete";
 import { createDecoder, startDecodeLoop, type Decoder, type LoopStats } from "./decoder";
 import { resolveJoin } from "./join";
 import { Relay, type RelayStats } from "./relay";
@@ -85,7 +85,14 @@ const FROZEN = new Set(["TERMINATED", "PENDING_REVIEW", "REJECTED"]);
 let terminal: Terminal | null = null;
 let frozen = false; // we have stopped the camera for a frozen status
 let scanComplete = false; // the beam we were feeding is fully received (ADR 0019)
+let completedBid = ""; // which beam that was, for the overlay and for dismissing it
 let prevActiveKey = ""; // `${bid}:${state}` of the active beam last render, for the READY edge
+// A scanner adopts only beams that arrive after it opened: the ones already
+// finished at its first snapshot, and the ones it has scanned and dismissed, are
+// ignored, so a reopened scanner is a clean "waiting for a beam".
+let ignored = new Set<string>();
+let baselined = false;
+const acked = new Set<string>(); // relay-reported completions already acted on
 let overlayKey = ""; // identifies the currently-rendered overlay (avoids clobbering the form)
 let lifecycleTimer: ReturnType<typeof setInterval> | null = null;
 let pinger: Pinger | null = null;
@@ -204,9 +211,10 @@ function updateChrome(): void {
 function renderOverlay(): void {
   if (scanComplete && !overlayActive()) {
     // The beam is fully received: camera off, offer to close or scan another.
+    const done = snap?.beams.find((b) => b.bid === completedBid);
     endedEl.innerHTML = html`<div class="ended-card">
       <h2>Beam received</h2>
-      <p class="muted">The tower has the whole beam. Close this tab, or scan another.</p>
+      <p class="muted">${done?.name ? html`<b>${done.name}</b> — ` : ""}The tower has the whole beam. Close this tab, or scan another.</p>
       <p class="overlay-actions">
         <button id="scan-again" class="btn" type="button">Scan another</button>
         <button id="close-tab" class="btn primary" type="button">Close</button>
@@ -277,9 +285,13 @@ function patchOverlayClock(): void {
   if (el && !c.hidden) el.textContent = c.text;
 }
 
-// onScanAnother clears the completion overlay and restarts the camera for the
-// next beam (ADR 0019).
+// onScanAnother dismisses the received beam (it stays ignored, so the still-
+// displayed loop cannot re-adopt it), zeroes the counters, and restarts the
+// camera for the next beam (ADR 0019).
 function onScanAnother(): void {
+  if (completedBid) ignored.add(completedBid);
+  completedBid = "";
+  relay.resetStats();
   scanComplete = false;
   void startCamera();
 }
@@ -289,11 +301,16 @@ function onScanAnother(): void {
 function onCloseTab(): void {
   window.close();
   const card = endedEl.querySelector(".ended-card");
-  if (card && !card.querySelector(".close-hint")) {
-    const p = document.createElement("p");
-    p.className = "muted close-hint";
-    p.textContent = "If the tab did not close, you can close it now.";
-    card.appendChild(p);
+  if (card) {
+    if (!card.querySelector(".close-hint")) {
+      const p = document.createElement("p");
+      p.className = "muted close-hint";
+      p.textContent = "If the tab did not close, you can close it now.";
+      card.appendChild(p);
+    }
+  } else {
+    message = "If the tab did not close, you can close it now.";
+    render();
   }
 }
 
@@ -341,24 +358,30 @@ function onExtensionSubmit(e: Event): void {
 }
 
 /** The beam the scanner is feeding now: the last one still receiving, else the
- *  most recently arrived. A place may hold several; the scan page tracks one. */
+ *  most recently arrived, never one it ignores. A place may hold several; the
+ *  scan page tracks one. */
 function activeBeam(): Beam | null {
-  if (!snap || snap.beams.length === 0) return null;
-  for (let i = snap.beams.length - 1; i >= 0; i--) {
-    if (snap.beams[i]!.state === "RECEIVING") return snap.beams[i]!;
-  }
-  return snap.beams[snap.beams.length - 1]!;
+  return snap ? pickActive(snap.beams, ignored) : null;
+}
+
+// finish marks the beam this scanner fed as received: camera off, overlay on.
+function finish(bid: string): void {
+  acked.add(bid);
+  completedBid = bid;
+  scanComplete = true;
+  stopCamera();
 }
 
 function render(): void {
   const beam = activeBeam();
   // The beam this scanner is feeding reaching READY (all packets received) stops
-  // the camera and offers to close (ADR 0019). Fires on the transition into READY
-  // from RECEIVING or VERIFYING, while our camera is running.
-  if (scanJustCompleted(prevActiveKey, beam, !!stream)) {
-    scanComplete = true;
-    stopCamera();
-  }
+  // the camera and offers to close (ADR 0019). Two signals: the SSE transition
+  // into READY from RECEIVING/VERIFYING, and the frames reply's completed_beams —
+  // the latter catches a small beam that is READY before its first snapshot.
+  const filled = relayCompleted(relayStats?.completed ?? [], acked);
+  if (filled !== null) acked.add(filled);
+  if (beam && scanJustCompleted(prevActiveKey, beam, !!stream)) finish(beam.bid);
+  else if (filled !== null && stream) finish(filled);
   prevActiveKey = activeKey(beam);
   updateChrome();
   if (overlayActive() || scanComplete) return; // an overlay owns the screen; skip the live HUD
@@ -388,7 +411,10 @@ function render(): void {
   if (beam) parts.push(`beam ${beam.bid}`);
   if (connection !== "open") parts.push(`link: ${connection}`);
   statsEl.innerHTML = html`${parts.map((p) => html`<span>${p}</span>`)}`.html;
-  messageEl.textContent = beam?.error ?? message;
+  // No beam to feed but the tower keeps answering "dup": the loop on screen is a
+  // beam this session already has.
+  const stale = !beam && !!stream && !!relayStats && relayStats.dup > 0;
+  messageEl.textContent = beam?.error ?? (stale ? "That beam is already received — show a new one." : message);
   document.body.dataset.state = state;
 }
 
@@ -409,6 +435,10 @@ function subscribeProgress(as: "viewer" | "relay"): () => void {
           setTerminal({ kind: "evicted" });
         } else {
           snap = JSON.parse(ev.data) as Snapshot;
+          if (!baselined) {
+            ignored = baselineIgnored(snap.beams); // finished before we opened: not ours
+            baselined = true;
+          }
           syncLifecycle();
         }
         render();
@@ -495,6 +525,7 @@ document.addEventListener("visibilitychange", () => {
 });
 cameraSelect.addEventListener("change", () => void startCamera(cameraSelect.value));
 startButton.addEventListener("click", () => void startCamera());
+$<HTMLButtonElement>("#close-hud").addEventListener("click", onCloseTab);
 torchButton.addEventListener("click", () => {
   if (!stream) return;
   void setTorch(stream, !torchOn).then((ok) => {

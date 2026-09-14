@@ -107,27 +107,22 @@ export function renderChunkMarks(root: HTMLElement, key: string, bits: Uint8Arra
     ticks += on ? `<i class="on${flash ? " new" : ""}"></i>` : "<i></i>";
   }
 
-  let mini = "";
-  let pager = "";
-  if (pages > 1) {
-    const pips = minimap(bits, per)
-      .map((p) => {
-        const cur = from >= p.from && from < p.to;
-        const pct = Math.round(p.frac * 100);
-        const cls = p.frac >= 1 ? "full" : p.frac > 0 ? "part" : "none";
-        const style = cls === "part" ? ` style="background:linear-gradient(90deg,var(--accent) ${pct}%,var(--chunk-off) ${pct}%)"` : "";
-        return `<b class="${cls}${cur ? " cur" : ""}" data-from="${p.from}"${style} title="chunks ${p.from + 1}–${p.to} · ${pct}%"></b>`;
-      })
-      .join("");
-    const pinnedNow = t.pinned !== null && now - t.pinnedAt < PIN_MS;
-    mini = `<div class="mini">${pips}</div>`;
-    pager = `<div class="pager"><span>page <b>${page + 1}</b>/${pages}</span><span>chunks <b>${from + 1}–${to}</b></span><span><b>${here}</b>/${to - from} here</span>${
-      pinnedNow ? "" : "<span>following</span>"
-    }</div>`;
-  }
-  // Ticks widen to fill only when the whole beam fits one row; a paged beam keeps
-  // a fixed pitch so a short last page reads like the others.
-  root.innerHTML = `<div class="tally${pages > 1 ? " paged" : ""}">${ticks}</div>${mini}${pager}`;
+  // The minimap and pager always show, so a 3-chunk beam and a 700-chunk beam
+  // read the same way on the scanner and the dashboard alike.
+  const pips = minimap(bits, per)
+    .map((p) => {
+      const cur = from >= p.from && from < p.to;
+      const pct = Math.round(p.frac * 100);
+      const cls = p.frac >= 1 ? "full" : p.frac > 0 ? "part" : "none";
+      const style = cls === "part" ? ` style="background:linear-gradient(90deg,var(--accent) ${pct}%,var(--chunk-off) ${pct}%)"` : "";
+      return `<b class="${cls}${cur ? " cur" : ""}" data-from="${p.from}"${style} title="chunks ${p.from + 1}–${p.to} · ${pct}%"></b>`;
+    })
+    .join("");
+  const pinnedNow = t.pinned !== null && now - t.pinnedAt < PIN_MS;
+  const follow = pages > 1 ? (pinnedNow ? "<span>pinned</span>" : "<span>following</span>") : "";
+  const mini = `<div class="mini">${pips}</div>`;
+  const pager = `<div class="pager"><span>page <b>${page + 1}</b>/${pages}</span><span>chunks <b>${from + 1}–${to}</b></span><span><b>${here}</b>/${to - from} here</span>${follow}</div>`;
+  root.innerHTML = `<div class="tally">${ticks}</div>${mini}${pager}`;
 
   if (pages > 1) {
     root.querySelector(".mini")?.addEventListener("click", (e) => {
