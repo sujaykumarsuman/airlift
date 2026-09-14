@@ -64,6 +64,7 @@ const newButton = $<HTMLButtonElement>("#new-session");
 // works sections below it (static HTML), shown on the home page only.
 const heroEl = $<HTMLElement>("#hero");
 const landingEl = $<HTMLElement>("#landing");
+const footEl = $<HTMLElement>("#foot"); // the landing footer (version, docs, github, legal)
 // The session-admin actions live in the nav: a power button opening End / Delete.
 const menuEl = $<HTMLElement>("#session-menu");
 const powerBtn = $<HTMLButtonElement>("#power");
@@ -78,7 +79,8 @@ function setMode(mode: "home" | "dash"): void {
     appEl.className = next;
     enter(appEl); // a new view: its cards rise in
   }
-  heroEl.hidden = landingEl.hidden = true; // only renderHome shows the landing
+  heroEl.hidden = landingEl.hidden = footEl.hidden = true; // only renderHome shows the landing
+  appEl.classList.remove("with-landing"); // the 70/30 desktop split is the landing's alone
   if (mode === "home") showMenu(false, false);
 }
 
@@ -308,6 +310,8 @@ async function renderHome(): Promise<void> {
   });
   heroEl.hidden = false;
   landingEl.hidden = false;
+  footEl.hidden = false;
+  appEl.classList.add("with-landing");
   showVersion();
 }
 
@@ -578,7 +582,7 @@ async function renderSession(): Promise<void> {
       <p class="hint">${
         current.hasPassword
           ? "Share the id and the password — the link alone won't let anyone in."
-          : "Scan the code or open the link to join on another device — everyone shares the same beams and downloads."
+          : "Scan the code or open the link to join on another device."
       }</p>
       <div class="linkrow"><code class="url">${link}</code><button class="btn small" id="copy" title="Copy link">${icon("copy")}</button></div>
       <button class="btn primary" id="scan-here" type="button">${icon("scan")} Scan a beam</button>
@@ -610,29 +614,47 @@ function renderStatus(): void {
     statusEl.innerHTML = "";
     return;
   }
-  const relays = `${s.relays} ${s.relays === 1 ? "relay" : "relays"}`;
   const live = s.status === "OPEN" || s.status === "TERMINATING";
   const iAmAdmin = !!current && s.clients.some((cl) => cl.client_id === current!.client_id && cl.session_admin);
   showMenu(iAmAdmin, live);
-  // LEFT column: the session panel (people, requests, lifecycle).
+  // The session card: details (id, facts, lifecycle) beside the people (a bounded,
+  // scrolling participants list, then the requests to join).
+  const statusWord =
+    s.status === "OPEN" ? "open" : s.status === "TERMINATING" ? "ending" : s.status === "PENDING_REVIEW" ? "awaiting review" : s.reopenable ? "paused" : "ended";
+  // green while open with the stream up; amber while ending, paused, or reconnecting
+  const dot = s.status === "OPEN" ? (connection === "open" ? "on" : "warn") : s.status === "TERMINATING" || s.reopenable ? "warn" : "off";
+  // The card is rebuilt on every tick while a beam is receiving; keep the
+  // participants list where the reader scrolled it.
+  const listScroll = placeEl.querySelector<HTMLElement>(".clients")?.scrollTop ?? 0;
   placeEl.innerHTML = html`
     <div class="card place${s.status === "OPEN" ? "" : " terminated"}">
-      <div class="head">
-        <span class="section-label" style="margin:0">${icon("beam")} Session</span>
-        <span class="muted">${live ? html`<span class="livedot"></span>` : ""}${relays} · link ${connection}</span>
-        ${s.status === "OPEN" ? openExpiry(s, iAmAdmin) : s.status === "TERMINATING" ? warningExpiry(s) : ""}
+      <div class="details">
+        <p class="section-label">${icon("beam")} Session</p>
+        <div class="sid">${s.sid}</div>
+        <dl class="facts">
+          <dt>Status</dt><dd class="st"><span class="dot ${dot}"></span>${statusWord}${connection === "open" ? "" : ` · link ${connection}`}</dd>
+          <dt>Relays</dt><dd>${s.relays}</dd>
+          <dt>Access</dt><dd>${s.has_password ? "password" : "public link"}</dd>
+          ${s.status === "OPEN" ? openExpiry(s, iAmAdmin) : s.status === "TERMINATING" ? warningExpiry(s) : ""}
+        </dl>
+        ${s.status !== "OPEN" && s.status !== "TERMINATING" ? terminatedPanel(s, Date.now()) : ""}
       </div>
-      ${s.status !== "OPEN" && s.status !== "TERMINATING" ? terminatedPanel(s, Date.now()) : ""}
-      <p class="section-label">${icon("people")} Participants <span class="count">${s.clients.length}</span></p>
-      <ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul>
-      ${
-        iAmAdmin && s.knocks.length
-          ? html`<p class="section-label">${icon("bell")} Requests to join <span class="count">${s.knocks.length}</span></p>
-              <ul class="knocks">${s.knocks.map((k) => knockRow(k))}</ul>`
-          : ""
-      }
+      <div class="people">
+        <p class="section-label">${icon("people")} Participants <span class="count">${s.clients.length}</span></p>
+        <div class="listwrap"><ul class="clients">${s.clients.map((cl) => clientRow(cl, iAmAdmin))}</ul></div>
+        ${
+          iAmAdmin && s.knocks.length
+            ? html`<p class="section-label">${icon("bell")} Requests to join <span class="count">${s.knocks.length}</span></p>
+                <ul class="knocks">${s.knocks.map((k) => knockRow(k))}</ul>`
+            : ""
+        }
+      </div>
     </div>`.html;
-  // RIGHT column: the beams.
+  if (listScroll) {
+    const list = placeEl.querySelector<HTMLElement>(".clients");
+    if (list) list.scrollTop = listScroll;
+  }
+  // The beams, beneath the session band.
   statusEl.innerHTML = html`
     <p class="section-label">${icon("beam")} Beams <span class="count">${s.beams.length}</span></p>
     ${
@@ -756,15 +778,15 @@ function nearCap(s: Snapshot | null, now: number): boolean {
 function openExpiry(s: Snapshot, iAmAdmin: boolean): Raw {
   if (!nearCap(s, Date.now())) return raw("");
   const c = expiryCountdown(s, Date.now());
-  return html`<span class="muted expiry">ends in <span id="expiry" class="clock">${c.text}</span></span>${
-    iAmAdmin ? html` <button class="btn small" id="extend-btn" type="button" title="Push the limit out by an hour">+1 h</button>` : ""
-  }`;
+  return html`<dt>Ends in</dt><dd class="extend"><span id="expiry" class="clock">${c.text}</span>${
+    iAmAdmin ? html`<button class="btn small" id="extend-btn" type="button" title="Push the limit out by an hour">+1 h</button>` : ""
+  }</dd>`;
 }
 
 /** The warning countdown while TERMINATING (an airlift admin is ending it). */
 function warningExpiry(s: Snapshot): Raw {
   const c = terminateCountdown(s, Date.now());
-  return html`<span class="expiry warn">ending in <span id="expiry" class="clock">${c.hidden ? "…" : c.text}</span></span>`;
+  return html`<dt>Ending in</dt><dd class="warn"><span id="expiry" class="clock">${c.hidden ? "…" : c.text}</span></dd>`;
 }
 
 /** The panel for a non-live session: who/why, a cleanup countdown, and — while

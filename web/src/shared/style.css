@@ -152,13 +152,51 @@ input:focus, select:focus, .btn:focus-visible { outline: none; border-color: var
 .tower main.mode-home #left { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr); }
 #left > *, .landing > * { min-width: 0; }
 .tower main.mode-home #status, .tower main.mode-home #place:empty { display: none; }
-/* Default is one column; the dashboard splits into share/session + beams only
-   once there is room for both (≥1000px). Grid children carry min-width:0 so a
-   long filename or hash wraps instead of widening the track and scrolling. */
+/* Default is one column: share, session, beams. From 1000px the dashboard is one
+   session band across the top — share (340px) | details + participants — with the
+   beams as a one-column list beneath. Grid children carry min-width:0 so a long
+   filename or hash wraps instead of widening the track and scrolling. */
 .tower main.mode-dash { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.25rem; align-items: start; }
 #left, #status { min-width: 0; }
 #left { display: flex; flex-direction: column; gap: 1.25rem; }
-@media (min-width: 1000px) { .tower main.mode-dash { grid-template-columns: 340px minmax(0, 1fr); } }
+@media (min-width: 1000px) {
+  .tower main.mode-dash #left { display: grid; grid-template-columns: 340px minmax(0, 1fr); align-items: stretch; }
+  /* the wrappers are the grid items; a grid inside each lets the card itself stretch to the band's height */
+  .tower main.mode-dash #session, .tower main.mode-dash #place { display: grid; grid-template-columns: minmax(0, 1fr); }
+  /* the pre-snapshot "connecting…" card keeps its own height rather than the band's */
+  .tower main.mode-dash #place > .card:not(.place) { align-self: start; }
+  /* the session card: details | people; the people column is a flex column so the
+     participants list takes whatever height the band leaves and scrolls on its own */
+  .card.place { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 1.75rem; align-items: stretch; min-height: 0; }
+  .place .details { padding-right: 1.75rem; border-right: 1px solid var(--border); }
+  /* the list's wrapper is the flexible row; the list fills it absolutely, so it
+     never grows the band — the share card sets the height and the list scrolls */
+  .place .people { display: grid; grid-template-rows: auto minmax(0, 1fr); grid-auto-rows: auto; min-height: 0; }
+  .place .listwrap { position: relative; min-height: 120px; }
+  .place .listwrap .clients { position: absolute; inset: 0; max-height: none; }
+  .with-landing .steps li { grid-template-columns: 28px minmax(0, 1fr); gap: 0.35rem 0.6rem; align-items: center; }
+  .with-landing .steps li span:last-child { grid-column: 1 / -1; }
+  .with-landing .steps .n { grid-row: auto; }
+}
+/* the home from 1000px: a hero band, then how-it-works + get-airlift (left) beside
+   the create / join column (right, sticky), the footer across both. The gate
+   screens (password, knock, waiting) keep the centred single column. */
+@media (min-width: 1000px) {
+  .tower main.mode-home.with-landing { max-width: 1120px; }
+  .tower main.mode-home.with-landing #left { grid-template-columns: minmax(0, 1fr) 340px; grid-template-areas: "hero hero" "landing session" "foot foot"; gap: 1.25rem; align-items: start; }
+  .with-landing #hero { grid-area: hero; }
+  .with-landing #landing { grid-area: landing; }
+  .with-landing #foot { grid-area: foot; }
+  .mode-home.with-landing #session { grid-area: session; max-width: none; margin: 0; position: sticky; top: 72px; }
+  .with-landing .hero { grid-template-columns: 56px minmax(0, 1fr); justify-items: start; text-align: left; gap: 0.1rem 1rem; align-items: center; padding: 0.25rem 0 0; }
+  .with-landing .hero .mark { grid-row: span 2; margin: 0; }
+  .with-landing .hero .title { flex-direction: row; align-items: baseline; gap: 0.9rem; }
+  .with-landing .hero h1 { font-size: 2rem; }
+  .with-landing .hero .sub { max-width: none; }
+  .with-landing .landing { grid-template-columns: minmax(0, 1fr); margin-top: 0; }
+  .with-landing .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.1rem; }
+  .with-landing .dl { grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); }
+}
 
 /* create / join forms */
 .create-options { display: grid; gap: 0.85rem; }
@@ -181,11 +219,20 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
 
 .head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-bottom: 0.75rem; }
 .head strong { font-weight: 600; }
-.expiry { margin-left: auto; font-size: 0.85rem; }
 .clock { font-variant-numeric: tabular-nums; }
-.livedot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--ok); box-shadow: 0 0 0 3px rgba(70, 196, 106, 0.16); margin-right: 0.4rem; vertical-align: 0.05em; }
 .card.place.terminated { border-color: var(--warn); }
-.expiry.warn { color: var(--warn); font-weight: 600; }
+/* the session details: the id, then a key/value list of facts */
+.place .sid { font-family: var(--mono); font-size: 1.6rem; font-weight: 600; letter-spacing: 0.02em; line-height: 1.1; margin: 0.1rem 0 0.7rem; overflow-wrap: anywhere; }
+.facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.35rem 1rem; margin: 0 0 0.75rem; font-size: 0.9rem; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.facts dd.st { display: inline-flex; align-items: center; gap: 0.45rem; }
+.facts dd.warn { color: var(--warn); font-weight: 600; }
+.facts .extend { display: inline-flex; align-items: center; gap: 0.5rem; }
+.facts .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--muted); flex: none; }
+.facts .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(70, 196, 106, 0.16); }
+.facts .dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(224, 179, 65, 0.16); }
+.place .people { min-width: 0; }
 .place .ended { margin: 0.35rem 0 0.5rem; padding: 0.85rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; }
 .place .ended-head { color: var(--warn); }
 .ext-form { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
@@ -193,7 +240,11 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
 
 /* participants / knocks */
 .clients, .knocks { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.15rem; }
+/* the participants list is bounded (about five rows) and scrolls on its own; the
+   requests beneath it stay put */
+.clients { max-height: 205px; overflow-y: auto; padding-right: 4px; scrollbar-width: thin; scrollbar-color: #33404d transparent; align-content: start; }
 .knocks { gap: 0.35rem; }
+.place .people > .section-label:not(:first-child) { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
 .clients li, .knocks li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.4rem 0; }
 .clients li .who, .knocks li .who { font-weight: 500; }
 .clients li::before { content: ""; width: 7px; height: 7px; border-radius: 999px; background: var(--ok); flex: none; box-shadow: 0 0 0 3px rgba(70, 196, 106, 0.15); }
@@ -370,6 +421,7 @@ ul.paths code { color: var(--fg); }
 .hero { display: grid; justify-items: center; gap: 0.4rem; text-align: center; padding: 1.25rem 0 0.25rem; }
 .hero .mark { width: 56px; height: 56px; border-radius: 16px; background: var(--surface-2); border: 1px solid var(--border); display: grid; place-items: center; margin-bottom: 0.25rem; }
 .hero .mark .ic { width: 32px; height: 32px; color: var(--accent); }
+.hero .title { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; min-width: 0; }
 .hero h1 { font-size: 2.1rem; letter-spacing: -0.02em; margin: 0; }
 .hero .tagline { font-size: 1.05rem; margin: 0; }
 .hero .sub { color: var(--muted); max-width: 580px; margin: 0; }
@@ -395,7 +447,7 @@ ul.paths code { color: var(--fg); }
 .dl .btn .ic { color: var(--muted); margin-block: -2px; }
 .section-label a.count { color: var(--muted); }
 .section-label a.count:hover { color: var(--accent); }
-.foot { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; color: var(--muted); font-size: 0.8rem; padding: 0.25rem 0 0; }
+.foot { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: center; color: var(--muted); font-size: 0.8rem; padding: 0.25rem 0 0; }
 .foot a { color: var(--muted); }
 .foot a:hover { color: var(--accent); }
 @media (max-width: 860px) { .landing { grid-template-columns: minmax(0, 1fr); } }

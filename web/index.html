@@ -29,8 +29,10 @@
       <div id="left">
         <section id="hero" class="hero" hidden>
           <div class="mark"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M6 6a9 9 0 0 0 0 12M18 6a9 9 0 0 1 0 12"/></svg></div>
-          <h1>airlift</h1>
-          <p class="tagline">Optical file transfer out of an air-gapped machine.</p>
+          <div class="title">
+            <h1>airlift</h1>
+            <p class="tagline">Optical file transfer out of an air-gapped machine.</p>
+          </div>
           <p class="sub">A <b>beam</b> shows a file as an animated QR loop; a phone relays what it sees to this <b>tower</b>, which reassembles, verifies and serves it. Nothing crosses the gap but light.</p>
         </section>
         <section id="session"></section>
@@ -46,14 +48,16 @@
           </div>
           <div class="get card">
             <p class="section-label"><svg class="ic" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.6 9.6 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.69-4.57 4.93.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg> Get airlift <a class="count" href="https://github.com/sujaykumarsuman/airlift">sujaykumarsuman/airlift ↗</a></p>
-            <div class="segmented small" role="tablist" data-clone style="--n:3;--i:0">
+            <div class="segmented small" role="tablist" data-clone style="--n:4;--i:0">
               <span class="thumb" aria-hidden="true"></span>
               <button class="btn seg on" type="button" role="tab" data-tab="ssh" aria-selected="true">SSH</button>
               <button class="btn seg" type="button" role="tab" data-tab="https" aria-selected="false">HTTPS</button>
               <button class="btn seg" type="button" role="tab" data-tab="zip" aria-selected="false">ZIP</button>
+              <button class="btn seg" type="button" role="tab" data-tab="go" aria-selected="false" title="go install">Go</button>
             </div>
             <div class="cmd" data-pane="ssh"><code>git clone git@github.com:sujaykumarsuman/airlift.git</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
             <div class="cmd" data-pane="https" hidden><code>git clone https://github.com/sujaykumarsuman/airlift.git</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+            <div class="cmd" data-pane="go" hidden><code>go install github.com/sujaykumarsuman/airlift/cmd/airlift@latest</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
             <div class="cmd" data-pane="zip" hidden><code>curl -L -o airlift.zip https://github.com/sujaykumarsuman/airlift/archive/refs/heads/main.zip</code><a class="btn small iconbtn" href="https://github.com/sujaykumarsuman/airlift/archive/refs/heads/main.zip" title="Download main.zip"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10m0 0l-4-4m4 4l4-4"/><path d="M5 18h14"/></svg></a><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
             <p class="section-label" style="margin-top:1.1rem"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10m0 0l-4-4m4 4l4-4"/><path d="M5 18h14"/></svg> Binary <a class="count" href="https://github.com/sujaykumarsuman/airlift/releases/latest">latest release ↗</a></p>
             <div class="dl">
@@ -63,11 +67,10 @@
               <a class="btn" href="https://github.com/sujaykumarsuman/airlift/releases/latest/download/airlift-linux-arm64"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10m0 0l-4-4m4 4l4-4"/><path d="M5 18h14"/></svg> Linux · arm64</a>
               <a class="btn" href="https://github.com/sujaykumarsuman/airlift/releases/latest/download/airlift-windows-amd64.exe"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10m0 0l-4-4m4 4l4-4"/><path d="M5 18h14"/></svg> Windows · x86-64</a>
             </div>
-            <div class="cmd"><code>go install github.com/sujaykumarsuman/airlift/cmd/airlift@latest</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
-            <p class="hint">Or clone and <code>make airlift</code> (Go 1.26 + Node). Only the air-gapped machine needs the binary — the tower side is this site.</p>
+            <p class="hint">Clone and <code>make airlift</code> needs Go 1.26 + Node. Only the air-gapped machine needs the binary — the tower side is this site.</p>
           </div>
-          <footer class="foot"><span id="tower-version"></span><a href="docs">docs</a><a href="https://github.com/sujaykumarsuman/airlift">github</a><a href="legal#licence">MIT licence</a><a href="legal#terms">terms</a><a href="legal#privacy">privacy</a></footer>
         </section>
+        <footer id="foot" class="foot" hidden><span id="tower-version"></span><a href="docs">docs</a><a href="https://github.com/sujaykumarsuman/airlift">github</a><a href="legal#licence">MIT licence</a><a href="legal#terms">terms</a><a href="legal#privacy">privacy</a></footer>
         <section id="place"></section>
       </div>
       <section id="status"></section>

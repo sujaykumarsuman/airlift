@@ -345,6 +345,27 @@ new runtime dep — CLAUDE.md holds).
   375 / 768 / 1000 / 1400 with overflow probes (no page wider than its viewport, no
   `[hidden]` element visible); desktop unchanged.
 
+- **Desktop restructure (2026-09-14)**, from operator feedback on the live site: from
+  1000px the **home** is a 70 / 30 split — a left-aligned hero band, then
+  how-it-works (three steps across, the number inline with its title) above
+  get-airlift (three columns of binaries; `go install` is a fourth tab of the clone
+  switch) on the left, the Create / Join column (340px, sticky) on the right, the
+  footer across both — sized to fit a 1400×900 screen (the page uses the 1120px
+  width the dashboard has; the gate screens keep the centred column). The
+  **dashboard** puts one session band across the top — the share card (340px) |
+  one session card with the details (id, then Status · Relays · Access as a
+  key/value list, the ends-in / ending-in rows and the paused/ended/review panel
+  in the same column) beside the participants (a bounded list that fills the band
+  and scrolls on its own; the requests to join pinned beneath) — and the beams
+  as a one-column list below. Mechanics worth knowing: `#session`/`#place` are
+  `minmax(0, 1fr)` grids so the cards stretch to the band without a nowrap link
+  widening the column; the list is absolutely positioned inside `.listwrap` so it
+  can fill the band's leftover height without growing it (under 1000px it is a
+  205px scroll box). Canvas Version 11 (Landing and Dashboard boards redrawn;
+  the redesign was critiqued by three independent reviewers before coding —
+  fit-to-viewport, ambiguous facts and a two-up beam grid were dropped on their
+  evidence). Verified in-browser at 375 / 768 / 1000 / 1400 with overflow probes.
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.
