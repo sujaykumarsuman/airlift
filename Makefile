@@ -69,7 +69,11 @@ vps-bootstrap:
 	ssh $(VPS) 'systemctl restart airlift; systemctl reload caddy || systemctl restart caddy'
 
 # Build the Linux binary and roll it out with a zero-downtime rename + restart.
+# The tower reports the stamped VERSION (GET /api/info, the landing footer): a
+# tagged HEAD gives a clean "v1.2.3"; an untagged one still deploys, but says so.
 deploy: airlift-linux
+	@echo "deploying $(VERSION)"
+	@git describe --tags --exact-match >/dev/null 2>&1 || echo "  note: HEAD is not on a tag — the tower will report $(VERSION); tag a release for a clean version"
 	scp $(BIN)/$(AIRLIFT)-linux-amd64 $(VPS):/usr/local/bin/airlift.new
 	ssh $(VPS) 'chmod 755 /usr/local/bin/airlift.new && mv -f /usr/local/bin/airlift.new /usr/local/bin/airlift && systemctl restart airlift && sleep 1 && systemctl is-active airlift'
 
