@@ -1,7 +1,15 @@
 # Build plan — migrating the tower to k3s
 
 Status: **executed 2026-09-15** (originally a plan; the migration below was
-carried out — the tower now runs on k3s). Prepared alongside the wider move of
+carried out — the tower now runs on k3s).
+
+> **Now GitOps-managed (updated 2026-09-15):** the cluster is reconciled by Flux +
+> Helm from the `sujaykumarsuman/infra` repo. The `deploy/k8s/` manifests and the
+> `make k3s-*` targets this document references were removed from the airlift repo
+> and reworked as a shared Helm chart there. This doc stays as the record of the
+> initial (kubectl-applied) migration.
+
+Prepared alongside the wider move of
 `projects.sujaykumar.dev` from a Caddy + systemd host to a single-node **k3s**
 cluster, with each project in its own namespace. This document is about the
 **airlift tower** specifically: what has to change to run it on Kubernetes, why

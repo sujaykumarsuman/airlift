@@ -260,9 +260,10 @@ repo is public and releases are cut from `v*` tags.)
   `airlift-<os>-<arch>` (+ `.exe`, `SHA256SUMS`) and publishes a GitHub release;
   the landing's download links point at `releases/latest`. The binary is stamped
   with `VERSION` (`git describe --tags`, or the tag in the workflow) and reports
-  it at `GET /api/info` and in the landing footer. **Deploy from a tag**: `make
-  deploy` prints the version and notes an untagged HEAD — tag first (after any
-  post-release fixes, cut the next patch) so the live tower shows a clean version.
+  it at `GET /api/info` and in the landing footer. **Deployment is GitOps** (Flux
+  + Helm, the `sujaykumarsuman/infra` repo): a `vX.Y.Z` tag also builds the tower
+  image to GHCR (`.github/workflows/deploy.yml`) and Flux auto-deploys it to the
+  k3s cluster (`docs/HOSTING.md`). `make` only builds; it never deploys.
 - Web UI: one committed dark theme (tokens in `shared/style.css`), symbols are
   inline SVG from `shared/icons.ts` (no icon font, no CDN), motion is CSS on the
   shared tokens with `prefers-reduced-motion` honoured, layout is mobile-first
