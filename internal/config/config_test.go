@@ -97,16 +97,18 @@ func TestPrecedence(t *testing.T) {
 
 func TestParseKinds(t *testing.T) {
 	ok := map[string]string{
-		"sessions = 5":                           "sessions",
-		"max_gz_bytes = 512KiB":                  "max_gz_bytes",
-		"max_body = 1048576":                     "max_body",
-		"idle_ttl = 90s":                         "idle_ttl",
-		"max_age = 0":                            "max_age",
-		"rate_frames = 30/s":                     "rate_frames",
-		"rate_extension = 3/h":                   "rate_extension",
-		"trusted_proxies = 10.0.0.1,::1":         "trusted_proxies",
-		"public_url = https://x.example/airlift": "public_url",
-		"listen = 0.0.0.0:9000":                  "listen",
+		"sessions = 5":                                "sessions",
+		"max_gz_bytes = 512KiB":                       "max_gz_bytes",
+		"max_body = 1048576":                          "max_body",
+		"idle_ttl = 90s":                              "idle_ttl",
+		"max_age = 0":                                 "max_age",
+		"rate_frames = 30/s":                          "rate_frames",
+		"rate_extension = 3/h":                        "rate_extension",
+		"trusted_proxies = 10.0.0.1,::1":              "trusted_proxies",
+		"trusted_proxies = 10.42.0.0/16":              "trusted_proxies",
+		"trusted_proxies = 10.0.0.1,10.42.0.0/16,::1": "trusted_proxies",
+		"public_url = https://x.example/airlift":      "public_url",
+		"listen = 0.0.0.0:9000":                       "listen",
 	}
 	for line := range ok {
 		home := t.TempDir()
@@ -122,7 +124,7 @@ func TestParseKinds(t *testing.T) {
 		"idle_ttl = nope",
 		"rate_frames = 30", // no unit
 		"rate_frames = 30/decade",
-		"trusted_proxies = not-an-ip",
+		"trusted_proxies = not-an-ip", "trusted_proxies = 10.0.0.0/99",
 		"public_url = ftp://x", "public_url = /relative",
 		"listen = noport", "listen = 1.2.3.4:notaport", "listen = 1.2.3.4:99999",
 	}
