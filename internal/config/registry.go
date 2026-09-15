@@ -17,7 +17,7 @@ type Kind int
 const (
 	KString   Kind = iota // public_url, listen, data_dir
 	KSecret               // admin_token — like KString but masked in dumps/errors
-	KList                 // trusted_proxies (comma-separated IPs)
+	KList                 // trusted_proxies (comma-separated IPs or CIDRs)
 	KInt                  // sessions, max_beams
 	KBytes                // max_gz_bytes, max_body ("64MiB")
 	KDuration             // *_ttl, max_age ("10m"; "0"/"off" = zero)
@@ -113,7 +113,9 @@ func parseValue(k key, raw string) (canon string, val any, err error) {
 				continue
 			}
 			if _, err := netip.ParseAddr(p); err != nil {
-				return "", nil, fmt.Errorf("%q is not an IP address", p)
+				if _, err := netip.ParsePrefix(p); err != nil {
+					return "", nil, fmt.Errorf("%q is not an IP address or CIDR", p)
+				}
 			}
 			parts = append(parts, p)
 		}

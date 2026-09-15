@@ -7,15 +7,21 @@ import (
 	"strings"
 )
 
-// ParseTrustedProxies turns the config's trusted_proxies (bare IPs) into host
-// prefixes for clientAddr's trust check. Addresses are unmapped so an IPv4
-// entry matches the same address arriving IPv4-mapped over a dual-stack socket.
+// ParseTrustedProxies turns the config's trusted_proxies (bare IPs or CIDRs)
+// into prefixes for clientAddr's trust check: a bare IP becomes a host prefix,
+// a CIDR its masked range — e.g. a k3s pod network "10.42.0.0/16", so Traefik's
+// dynamic pod address is trusted behind the ingress. Bare-IP addresses are
+// unmapped so an IPv4 entry matches the same address arriving IPv4-mapped over a
+// dual-stack socket.
 func ParseTrustedProxies(ips []string) []netip.Prefix {
 	var out []netip.Prefix
 	for _, s := range ips {
-		if ip, err := netip.ParseAddr(strings.TrimSpace(s)); err == nil {
+		s = strings.TrimSpace(s)
+		if ip, err := netip.ParseAddr(s); err == nil {
 			ip = ip.Unmap()
 			out = append(out, netip.PrefixFrom(ip, ip.BitLen()))
+		} else if p, err := netip.ParsePrefix(s); err == nil {
+			out = append(out, p.Masked())
 		}
 	}
 	return out

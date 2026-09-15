@@ -1694,6 +1694,34 @@ func TestClientAddrTrustedProxy(t *testing.T) {
 	}
 }
 
+// TestClientAddrTrustedCIDR covers a trusted_proxies entry given as a CIDR (the
+// k3s pod network), so Traefik's dynamic pod address is trusted behind the
+// ingress without pinning a single IP.
+func TestClientAddrTrustedCIDR(t *testing.T) {
+	srv := New(Options{
+		Store:          session.NewStore(time.Minute, 4),
+		TrustedProxies: ParseTrustedProxies([]string{"10.42.0.0/16"}),
+	})
+	mk := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+	cases := []struct{ name, remote, xff, want string }{
+		{"peer inside CIDR trusts appended client", "10.42.3.7:5000", "9.9.9.9", "9.9.9.9"},
+		{"peer outside CIDR ignores xff", "10.43.0.1:5000", "9.9.9.9", "10.43.0.1"},
+		{"chain of trusted CIDR hops", "10.42.0.9:5000", "9.9.9.9, 10.42.1.1", "9.9.9.9"},
+	}
+	for _, tc := range cases {
+		if got := srv.clientAddr(mk(tc.remote, tc.xff)); got != tc.want {
+			t.Errorf("%s: clientAddr = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // readMeta reads and decodes a beam's meta.json.
 func readMeta(t *testing.T, dataDir, sid, bid string) beamMeta {
 	t.Helper()

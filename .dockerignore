@@ -1,0 +1,9 @@
+# Keep the build context small; the image rebuilds web/dist and the binary itself.
+.git
+bin/
+web/node_modules/
+web/dist/
+test-run/
+*.md
+docs/
+prompts/

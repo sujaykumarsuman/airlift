@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airlift-config
+data:
+  # Mounted read-only at $AIRLIFT_HOME/config (subPath). The admin token is NOT
+  # here — it is the airlift-admin Secret (envFrom). These three keys differ from
+  # the bare-metal VPS config and are restart-only (a change needs a pod restart):
+  #   listen           0.0.0.0 (Traefik is a different pod, not loopback)
+  #   trusted_proxies  the k3s pod CIDR, so Traefik's dynamic IP is trusted (XFF)
+  #   public_url       unchanged — path prefixes kept (ADR 0012)
+  config: |
+    public_url = https://projects.sujaykumar.dev/airlift
+    listen = 0.0.0.0:8443
+    trusted_proxies = 10.42.0.0/16

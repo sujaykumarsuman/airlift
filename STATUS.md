@@ -510,6 +510,37 @@ new runtime dep — CLAUDE.md holds).
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.
 
+## Phase 13 — k3s migration (done, 2026-09-15)
+
+The projects hub and the tower moved off Caddy + systemd onto a single-node
+**k3s** cluster (k3s v1.36.4+k3s1), each in its own namespace. Path-prefix
+routing kept (Traefik strips `/airlift`); TLS via Traefik + cert-manager (a
+shared Let's Encrypt cert on the default `TLSStore`); no registry (image built on
+the VPS and imported into containerd). The tower runs as a single-replica
+Deployment (Recreate) — no code change beyond the one prerequisite:
+**`trusted_proxies` now accepts CIDRs** so Traefik's dynamic pod IP is trusted
+(the real client IP is preserved — verified via the admin API showing the real
+caller address, not `10.42.x.x`). Caddy, the systemd `airlift` unit and the old
+webroots were removed after cutover; Docker is kept as the image build tool; the
+careerdock backup was tidied into `/root/backups/`.
+
+- Plan + manifests: `docs/build-plan/k3s-migration.md`, `deploy/Dockerfile`,
+  `deploy/k8s/{airlift,cluster}` (+ the hub's `projects/deploy/k8s/` in the
+  `sujaykumarsuman.github.io` repo). Branch `phase/13-k3s`.
+- Verified live over the internet: `/airlift/api/info` (v0.1.8-2-g15705e8) and the
+  hub both 200 on a valid prod Let's Encrypt cert, `/airlift`→`/airlift/`
+  redirect, real client IP through Traefik, admin API, and a session
+  create/terminate round-trip.
+- **Distributed architecture (Phase B in the plan) is deferred** — one replica is
+  correct on a single node; the plan records the externalised-state path for any
+  future horizontal scale.
+- **Next**: soak + watch the first cert-manager renewal; to use `make k3s-deploy`,
+  push `phase/13-k3s` and set up `/root/airlift` as a checkout (redeploys
+  currently ship via `git archive`); the careerdock backup can be deleted from the
+  VPS once the laptop copy is trusted.
+
+- **Phase 13 complete.**
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender

@@ -18,7 +18,7 @@ DOMAIN     ?= projects.sujaykumar.dev
 PREFIX     ?= /airlift
 PUBLIC_URL ?= https://$(DOMAIN)$(PREFIX)
 
-.PHONY: all web airlift airlift-all airlift-linux docs-shots scan-e2e go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy
+.PHONY: all web airlift airlift-all airlift-linux docs-shots scan-e2e go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy k3s-image k3s-deploy
 
 all: web airlift
 
@@ -87,6 +87,29 @@ deploy: airlift-linux
 	@git describe --tags --exact-match >/dev/null 2>&1 || echo "  note: HEAD is not on a tag — the tower will report $(VERSION); tag a release for a clean version"
 	scp $(BIN)/$(AIRLIFT)-linux-amd64 $(VPS):/usr/local/bin/airlift.new
 	ssh $(VPS) 'chmod 755 /usr/local/bin/airlift.new && mv -f /usr/local/bin/airlift.new /usr/local/bin/airlift && systemctl restart airlift && sleep 1 && systemctl is-active airlift'
+
+## ---- k3s (see docs/build-plan/k3s-migration.md) ----
+# Run against the VPS over ssh once the cluster + the airlift-admin Secret exist
+# (deploy/k8s/cluster + deploy/k8s/airlift/README.md). VPS_REPO is a checkout on
+# the VPS (it has Docker + Go); the image is imported into k3s' containerd — no
+# registry. The `deploy`/`vps-bootstrap` targets above stay until cleanup, for
+# rollback to the Caddy + systemd path.
+VPS_REPO ?= /root/airlift
+K8S_NS   ?= airlift
+
+# Build the tower image on the VPS and import it into k3s.
+k3s-image:
+	ssh $(VPS) 'set -e; cd $(VPS_REPO) && git pull --ff-only; \
+	  V=$$(git describe --tags); echo "building airlift:$$V"; \
+	  docker build -f deploy/Dockerfile --build-arg VERSION=$$V -t airlift:$$V -t airlift:latest .; \
+	  docker save airlift:$$V airlift:latest | k3s ctr images import -'
+
+# Apply the airlift manifests and roll the deployment.
+k3s-deploy: k3s-image
+	ssh $(VPS) 'set -e; export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd $(VPS_REPO); \
+	  k3s kubectl apply -k deploy/k8s/airlift; \
+	  k3s kubectl -n $(K8S_NS) rollout restart deploy/airlift; \
+	  k3s kubectl -n $(K8S_NS) rollout status deploy/airlift'
 
 go-lint:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt:"; echo "$$out"; exit 1; fi

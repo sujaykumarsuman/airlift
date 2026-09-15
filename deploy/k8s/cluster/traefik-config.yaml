@@ -1,0 +1,19 @@
+# k3s reconciles this into the bundled Traefik Helm release. Two changes:
+#  - externalTrafficPolicy: Local  → ServiceLB does not SNAT the source, so
+#    Traefik (and thus the tower via X-Forwarded-For) sees the real client IP.
+#  - web→websecure redirect        → plain HTTP is redirected to HTTPS. Let's
+#    Encrypt HTTP-01 follows the redirect, so ACME still works.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      spec:
+        externalTrafficPolicy: Local
+    ports:
+      web:
+        redirectTo:
+          port: websecure

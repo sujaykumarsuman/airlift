@@ -1,0 +1,11 @@
+# One namespace per project. Add a new project's namespace here (and give it its
+# own IngressRoute for its path prefix under projects.sujaykumar.dev).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: airlift
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: projects-hub
