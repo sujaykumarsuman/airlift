@@ -1,6 +1,7 @@
 package beam
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -8,13 +9,21 @@ import (
 	"strings"
 )
 
-// playerTemplate is the self-contained HTML player (ADR 0003): inline SVG whose
-// single path is swapped per frame, an inline loop on requestAnimationFrame,
-// on-screen controls with keys for pause, step, fps, size, fullscreen and
-// hiding the chrome. The page is black and the chrome dim so the QR — black on
-// a white tile with a quiet zone — is the only bright thing a camera exposes
-// for. No external references; the __TOKEN__ slots are filled by PlayerHTML.
-// The player never talks to anything — it preserves the air gap.
+// qrJS is the in-page QR encoder (ADR 0011, amended): the frames travel as
+// their base45 text and the page renders each symbol itself, so a beam costs
+// about the payload's size rather than a pre-rendered picture per frame.
+//
+//go:embed qrjs.js
+var qrJS string
+
+// playerTemplate is the self-contained HTML player (ADR 0003): a canvas the
+// inline encoder paints per frame at an exact integer pixel pitch, an inline
+// loop on requestAnimationFrame, on-screen controls with keys for pause, step,
+// fps, size, fullscreen and hiding the chrome. The page is black and the
+// chrome dim so the QR — black on a white tile with a quiet zone — is the only
+// bright thing a camera exposes for. No external references; the __TOKEN__
+// slots are filled by PlayerHTML. The player never talks to anything — it
+// preserves the air gap.
 const playerTemplate = `<!doctype html>
 <html lang="en">
 <head>
@@ -30,7 +39,7 @@ header b{color:#c9d0d8;font-weight:600}
 header .hint{margin-left:auto;color:#4a525c}
 main{flex:1;min-height:0;display:flex;align-items:center;justify-content:center}
 #tile{background:#fff;line-height:0}
-svg{display:block}
+canvas{display:block}
 footer{justify-content:center;gap:.5em .9em}
 button{font:inherit;color:#aab2bb;background:#0f1216;border:1px solid #262b33;border-radius:7px;min-width:2.6em;height:2.4em;padding:0 .75em;cursor:pointer}
 button:hover{border-color:#3a414b;color:#e6e9ee}
@@ -52,8 +61,7 @@ body.bare header,body.bare footer{display:none}
 <span id="chunk"></span>
 <span class="hint">space pause · ←/→ step · +/- fps · [/] size · f fullscreen · h hide chrome</span>
 </header>
-<main id="main"><div id="tile"><svg id="qr" viewBox="0 0 __SIZE__ __SIZE__" shape-rendering="crispEdges">
-<path id="path" stroke="#000" stroke-width="1" fill="none" d=""/></svg></div></main>
+<main id="main"><div id="tile"><canvas id="qr"></canvas></div></main>
 <footer>
 <button id="prev" title="step back (left)">&#9664;</button>
 <button id="play" class="on" title="pause / play (space)">pause</button>
@@ -65,31 +73,78 @@ body.bare header,body.bare footer{display:none}
 <span id="state"></span>
 </footer>
 <script>
+__QRJS__
 (function () {
+  var PLAN = __PLAN__;
   var FRAMES = __FRAMES__;
   var ORDER = __ORDER__;
-  var N = __TOTAL__, fps = __FPS__, LABEL = __LABEL__, SIZE = __SIZE__;
+  var N = __TOTAL__, fps = __FPS__, LABEL = __LABEL__;
   var i = 0, playing = true, acc = 0, last = null, scale = 100;
   var $ = function (id) { return document.getElementById(id); };
-  var main = $('main'), tile = $('tile'), svg = $('qr'), path = $('path');
+  var main = $('main'), tile = $('tile'), canvas = $('qr'), ctx = canvas.getContext('2d');
   var hFrame = $('frame'), hChunk = $('chunk'), hFps = $('fps'), hState = $('state');
   var hScale = $('scale'), bPlay = $('play');
   var KEYS = {32: ' ', 37: 'ArrowLeft', 39: 'ArrowRight', 187: '+', 61: '+', 107: '+',
               189: '-', 173: '-', 109: '-', 219: '[', 221: ']', 70: 'f', 72: 'h'};
+  var qr = airliftQR(PLAN), n = qr.n, M = n * n;
+  var off = document.createElement('canvas');
+  off.width = n;
+  off.height = n;
+  var octx = off.getContext('2d'), img = octx.createImageData(n, n);
+  var cache = new Array(FRAMES.length); // packed symbols, encoded once each
+  var shown = -1; // the frame on the tile
+  var now = function () { return window.performance && performance.now ? performance.now() : Date.now(); };
+  function symbol(k) {
+    var packed = cache[k];
+    if (!packed) {
+      var bits = qr.encode(FRAMES[k]).bits;
+      packed = new Uint8Array((M + 7) >> 3);
+      for (var j = 0; j < M; j++) { if (bits[j]) { packed[j >> 3] |= 0x80 >> (j & 7); } }
+      cache[k] = packed;
+    }
+    return packed;
+  }
+  function paint(k) {
+    var packed = symbol(k), d = img.data;
+    for (var j = 0, p = 0; j < M; j++, p += 4) {
+      var v = (packed[j >> 3] >> (7 - (j & 7))) & 1 ? 0 : 255;
+      d[p] = v; d[p + 1] = v; d[p + 2] = v; d[p + 3] = 255;
+    }
+    octx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.webkitImageSmoothingEnabled = false;
+    ctx.mozImageSmoothingEnabled = false;
+    ctx.msImageSmoothingEnabled = false;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(off, 0, 0, canvas.width, canvas.height); // integer upscale: every module the same size
+    shown = k;
+  }
   function fit() {
+    var dpr = window.devicePixelRatio || 1;
     var s = Math.floor(Math.min(main.clientWidth, main.clientHeight) * scale / 100);
-    var pad = Math.max(4, Math.round(s * 4 / SIZE)); // a 4-module quiet zone
-    var q = Math.max(1, s - 2 * pad);
-    svg.style.width = q + 'px';
-    svg.style.height = q + 'px';
-    tile.style.padding = pad + 'px';
+    var k = Math.max(1, Math.floor(s * dpr / (n + 8))); // device pixels per module, 4-module quiet zone each side
+    canvas.width = n * k;
+    canvas.height = n * k;
+    canvas.style.width = (n * k / dpr) + 'px';
+    canvas.style.height = (n * k / dpr) + 'px';
+    tile.style.padding = (4 * k / dpr) + 'px';
     hScale.textContent = scale + '%';
+    if (shown >= 0) { paint(shown); }
   }
   function show() {
     var k = ORDER[i];
-    path.setAttribute('d', FRAMES[k]);
+    paint(k);
     hFrame.textContent = 'frame ' + (i + 1) + '/' + ORDER.length;
     hChunk.textContent = k === 0 ? 'manifest' : LABEL + ' ' + k + '/' + N;
+  }
+  // warm encodes the loop ahead of playback in short idle slices, so a pass
+  // never waits on the encoder; a frame shown before its turn is encoded there.
+  var warmAt = 0;
+  function warm() {
+    var t0 = now();
+    while (warmAt < ORDER.length && now() - t0 < 8) { symbol(ORDER[warmAt++]); }
+    if (warmAt < ORDER.length) { setTimeout(warm, 0); }
   }
   function status() {
     hFps.textContent = fps + ' fps · ' + (ORDER.length / fps).toFixed(1) + ' s/pass';
@@ -158,6 +213,7 @@ body.bare header,body.bare footer{display:none}
   fit();
   show();
   status();
+  warm();
   window.requestAnimationFrame(tick);
   if (navigator.wakeLock && navigator.wakeLock.request) {
     var lock = function () { navigator.wakeLock.request('screen').catch(function () {}); };
@@ -173,9 +229,10 @@ body.bare header,body.bare footer{display:none}
 `
 
 // PlayerHTML fills the player template. name and title are HTML-escaped; the
-// frames, order and label are JSON; the session is eight hex digits. The
-// result is one self-contained page with no external references.
-func PlayerHTML(name string, session uint32, total int, order []int, paths []string, size, fps int, fountain bool) string {
+// plan, frames (their base45 text), order and label are JSON; the session is
+// eight hex digits; the encoder is inlined. The result is one self-contained
+// page with no external references.
+func PlayerHTML(name string, session uint32, total int, order []int, frames []string, plan *PlayerPlan, fps int, fountain bool) string {
 	js := func(v any) string {
 		b, _ := json.Marshal(v)
 		return strings.ReplaceAll(string(b), "</", "<\\/")
@@ -189,8 +246,9 @@ func PlayerHTML(name string, session uint32, total int, order []int, paths []str
 		"__NAME__", html.EscapeString(name),
 		"__SESSION__", fmt.Sprintf("%08x", session),
 		"__MODE__", mode,
-		"__SIZE__", strconv.Itoa(size),
-		"__FRAMES__", js(paths),
+		"__QRJS__", strings.TrimSpace(qrJS),
+		"__PLAN__", js(plan),
+		"__FRAMES__", js(frames),
 		"__ORDER__", js(order),
 		"__TOTAL__", strconv.Itoa(total),
 		"__FPS__", strconv.Itoa(fps),

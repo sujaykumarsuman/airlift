@@ -1,6 +1,7 @@
 package beam
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math"
 	"strings"
@@ -83,12 +84,28 @@ func ChunkForVersion(version int, ecc string) (int, error) {
 	return lo, nil
 }
 
-// RenderQR encodes every frame at one QR version — the one the longest frame
-// needs — so the symbol geometry never changes on screen; each frame then
-// picks the mask with the lowest ISO penalty. It returns the version, the
-// viewBox size in modules (symbol plus two quiet zones), and one SVG path per
-// frame.
-func RenderQR(texts []string, ecc string) (version, size int, paths []string, err error) {
+// PlayerPlan is what the in-page encoder (qrjs.js) needs to render any frame
+// of a beam at one fixed symbol: the version and ECC level, the block
+// structure, and two row-major MSB-first bitmaps over the n×n modules — the
+// function patterns (Occ: finder, alignment, timing, format, version, the dark
+// module) and their colour (Base). It is derived from rsc.io/qr/coding's plan
+// for the version, so the page places bits exactly where the Go encoder would.
+type PlayerPlan struct {
+	Version int    `json:"version"`
+	Level   int    `json:"level"` // rsc.io numbering: L=0, M=1, Q=2, H=3
+	N       int    `json:"n"`
+	Data    int    `json:"data"`   // data bytes in the symbol
+	Check   int    `json:"check"`  // check bytes in the symbol
+	Blocks  int    `json:"blocks"` // Reed-Solomon blocks
+	Occ     string `json:"occ"`    // base64 bitmap: 1 = function module
+	Base    string `json:"base"`   // base64 bitmap: 1 = dark function module
+}
+
+// PlanQR picks one QR version for every frame of a beam — the one the longest
+// frame needs — so the symbol geometry never changes on screen, and returns
+// the version, the tile size in modules (symbol plus two quiet zones) and the
+// plan the player's encoder renders each frame with (ADR 0011, amended).
+func PlanQR(texts []string, ecc string) (version, size int, plan *PlayerPlan, err error) {
 	level, err := eccLevel(ecc)
 	if err != nil {
 		return 0, 0, nil, err
@@ -103,24 +120,65 @@ func RenderQR(texts []string, ecc string) (version, size int, paths []string, er
 	if err != nil {
 		return 0, 0, nil, err
 	}
+	plan, err = playerPlan(v, level)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return int(v), plan.N + 2*QuietZone, plan, nil
+}
+
+// playerPlan builds the PlayerPlan for one version and level from the coding
+// plan with mask 0: a module is a function module when its role is not Data,
+// Check or Extra; it is dark when it is a function module other than the
+// format area and carries the Black flag (the format bits are the encoder's
+// to write, per mask).
+func playerPlan(v coding.Version, level coding.Level) (*PlayerPlan, error) {
+	p, err := coding.NewPlan(v, level, 0)
+	if err != nil {
+		return nil, err
+	}
+	n := len(p.Pixel)
+	occ := make([]byte, (n*n+7)/8)
+	base := make([]byte, (n*n+7)/8)
+	for y, row := range p.Pixel {
+		for x, pix := range row {
+			i := y*n + x
+			switch r := pix.Role(); r {
+			case coding.Data, coding.Check, coding.Extra:
+			default:
+				occ[i/8] |= 0x80 >> (i % 8)
+				if r != coding.Format && pix&coding.Black != 0 {
+					base[i/8] |= 0x80 >> (i % 8)
+				}
+			}
+		}
+	}
+	return &PlayerPlan{
+		Version: int(v),
+		Level:   int(level),
+		N:       n,
+		Data:    p.DataBytes,
+		Check:   p.CheckBytes,
+		Blocks:  p.Blocks,
+		Occ:     base64.StdEncoding.EncodeToString(occ),
+		Base:    base64.StdEncoding.EncodeToString(base),
+	}, nil
+}
+
+// encodeSymbol is the Go reference encoder: text at one version and level,
+// under the penalty-chosen mask. The player's JavaScript encoder is checked
+// bit for bit against it (testdata/qr, web/src/beam/qrjs.test.ts); Build no
+// longer renders symbols itself.
+func encodeSymbol(v coding.Version, level coding.Level, text string) (*coding.Code, coding.Mask, error) {
 	var plans [8]*coding.Plan
 	for m := 0; m < 8; m++ {
-		p, perr := coding.NewPlan(coding.Version(v), level, coding.Mask(m))
-		if perr != nil {
-			return 0, 0, nil, perr
+		p, err := coding.NewPlan(v, level, coding.Mask(m))
+		if err != nil {
+			return nil, 0, err
 		}
 		plans[m] = p
 	}
-	paths = make([]string, len(texts))
-	for i, t := range texts {
-		code, cerr := bestMask(plans, coding.Alpha(t))
-		if cerr != nil {
-			return 0, 0, nil, cerr
-		}
-		paths[i] = svgPath(code)
-	}
-	modules := 17 + 4*int(v)
-	return int(v), modules + 2*QuietZone, paths, nil
+	return bestMask(plans, coding.Alpha(text))
 }
 
 // minVersion is the smallest version whose alphanumeric capacity holds text.
@@ -137,52 +195,19 @@ func minVersion(text string, level coding.Level, ecc string) (coding.Version, er
 }
 
 // bestMask encodes enc under all eight precomputed mask plans and returns the
-// symbol with the lowest penalty score.
-func bestMask(plans [8]*coding.Plan, enc coding.Encoding) (*coding.Code, error) {
+// symbol with the lowest penalty score (the first of equals) and its mask.
+func bestMask(plans [8]*coding.Plan, enc coding.Encoding) (*coding.Code, coding.Mask, error) {
 	var best *coding.Code
 	bestScore := math.MaxInt
-	for _, p := range plans {
+	var mask coding.Mask
+	for m, p := range plans {
 		code, err := p.Encode(enc)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if s := penalty(code); s < bestScore {
-			bestScore, best = s, code
+			bestScore, best, mask = s, code, coding.Mask(m)
 		}
 	}
-	return best, nil
-}
-
-// svgPath renders a symbol as a compact SVG path: one 1-unit-wide horizontal
-// stroke per run of dark modules, offset by the quiet zone, with relative
-// moves between runs. It is the Go twin of airlift.py svg_path.
-func svgPath(code *coding.Code) string {
-	n := code.Size
-	var sb strings.Builder
-	first := true
-	px, py := 0, 0
-	for y := 0; y < n; y++ {
-		yy := y + QuietZone
-		x := 0
-		for x < n {
-			if !code.Black(x, y) {
-				x++
-				continue
-			}
-			x0 := x
-			for x < n && code.Black(x, y) {
-				x++
-			}
-			run := x - x0
-			xx := x0 + QuietZone
-			if first {
-				fmt.Fprintf(&sb, "M%d %d.5h%d", xx, yy, run)
-				first = false
-			} else {
-				fmt.Fprintf(&sb, "m%d %dh%d", xx-px, yy-py, run)
-			}
-			px, py = xx+run, yy
-		}
-	}
-	return sb.String()
+	return best, mask, nil
 }

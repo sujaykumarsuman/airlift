@@ -160,8 +160,8 @@ try {
   procs.push({ kill: () => player.close() });
 
   // 3. record the player's frames: paused, chrome hidden, the tile at half size
-  //    so a version-30 symbol lands inside the scanner's viewfinder at ~3.7 px
-  //    per module in a 1080p "camera" frame
+  //    so a version-30 symbol lands inside the scanner's viewfinder at an
+  //    integer 3 px per module (the player's pitch) in a 1080p "camera" frame
   const rec = await chrome(CDP_REC, [], "1920,1080");
   await rec.go(`http://127.0.0.1:${PLAYER_PORT}/beam.html`);
   await rec.eval(`document.dispatchEvent(new KeyboardEvent('keydown', {key: ' '})); document.dispatchEvent(new KeyboardEvent('keydown', {key: 'h'})); for (let i = 0; i < 10; i++) document.getElementById('smaller').click(); 1`);

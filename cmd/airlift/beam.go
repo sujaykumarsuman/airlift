@@ -26,6 +26,7 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 	}
 	name := fs.String("name", "", "beam name (defaults to the folder or file name; required for several files)")
 	format := fs.String("format", "auto", "bundle format for a folder or several files: auto (text when every file is text and none holds a boundary marker, else base64), text or base64")
+	mode := fs.String("mode", "auto", fmt.Sprintf("frame layout: auto (fountain from %d chunks, else sequential), sequential or fountain", beam.FountainThreshold))
 	filesFrom := fs.String("files-from", "", "read the file list from this file (one path per line; a `name: X` line sets the name)")
 	out := fs.String("out", "", "output HTML file (default <name>.html)")
 	noOpen := fs.Bool("no-open", false, "do not open the beam in a browser")
@@ -57,6 +58,10 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 	}
 	if *format != "auto" && *format != "text" && *format != "base64" {
 		return fail(errors.New("--format must be auto, text or base64"))
+	}
+	layout, ok := map[string]beam.Mode{"auto": beam.ModeAuto, "sequential": beam.ModeSequential, "fountain": beam.ModeFountain}[*mode]
+	if !ok {
+		return fail(errors.New("--mode must be auto, sequential or fountain"))
 	}
 
 	inputs := append([]string(nil), positional...)
@@ -91,7 +96,7 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	res, err := beam.Build(data, beamName, beam.Options{
-		Chunk: ch, ECC: *ecc, FPS: *fps, ManifestEvery: *manifestEvery, Seed: seedPtr, Mode: beam.ModeAuto,
+		Chunk: ch, ECC: *ecc, FPS: *fps, ManifestEvery: *manifestEvery, Seed: seedPtr, Mode: layout,
 	})
 	if err != nil {
 		return fail(err)

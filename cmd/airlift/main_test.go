@@ -231,3 +231,44 @@ func TestBeamDefaultChunkFollowsECC(t *testing.T) {
 		}
 	}
 }
+
+// TestBeamModeFlag: --mode overrides the automatic layout both ways and
+// rejects anything else; the default stays auto.
+func TestBeamModeFlag(t *testing.T) {
+	work := t.TempDir()
+	small := filepath.Join(work, "small.txt")
+	os.WriteFile(small, []byte("a few bytes: one chunk\n"), 0o644)
+	big := filepath.Join(work, "big.bin")
+	data := make([]byte, 60000) // incompressible: ~46 chunks, fountain by default
+	x := uint32(7)
+	for i := range data {
+		x = x*1664525 + 1013904223
+		data[i] = byte(x >> 24)
+	}
+	os.WriteFile(big, data, 0o644)
+	for _, tc := range []struct{ src, mode, want string }{
+		{small, "", "mode     sequential"},
+		{big, "", "mode     fountain ("},
+		{small, "fountain", "mode     fountain ("},
+		{big, "sequential", "mode     sequential"},
+	} {
+		args := []string{"beam", tc.src, "--out", filepath.Join(work, "m.html"), "--no-open"}
+		if tc.mode != "" {
+			args = append(args, "--mode", tc.mode)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("--mode %q: exit %d\n%s", tc.mode, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), tc.want) {
+			t.Fatalf("--mode %q on %s should print %q:\n%s", tc.mode, filepath.Base(tc.src), tc.want, stdout.String())
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"beam", small, "--out", filepath.Join(work, "x.html"), "--no-open", "--mode", "random"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("--mode random: exit %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "--mode must be auto, sequential or fountain") {
+		t.Fatalf("--mode random should be refused with the choices:\n%s", stderr.String())
+	}
+}

@@ -10,7 +10,7 @@ agree on.
 ## Pipeline
 
 ```
-input file ──gzip──▶ blob ──chunk──▶ N chunks ──frame──▶ bytes ──base45──▶ text ──QR──▶ SVG
+input file ──gzip──▶ blob ──chunk──▶ N chunks ──frame──▶ bytes ──base45──▶ text ──QR──▶ canvas
 ```
 
 - **gzip**: level 9, mtime zeroed, no filename. Deterministic for a given
@@ -27,12 +27,14 @@ input file ──gzip──▶ blob ──chunk──▶ N chunks ──frame─
   bytes is `3·⌊b/2⌋ + 2·(b mod 2)` characters. Decoders reject a length that
   is 1 modulo 3, any character outside the alphabet, a triplet above `0xFFFF`
   and a pair above `0xFF`.
-- **QR**: `rsc.io/qr/coding` (ADR 0011), alphanumeric mode, ECC level M by
-  default (`--ecc`), never Micro QR. Every frame of a beam is rendered at one
-  version, the one the
-  longest frame needs, so the symbol geometry on screen never changes;
-  shorter frames (the manifest, the last chunk) get a free ECC upgrade within
-  that version. A 4-module quiet zone is part of the SVG viewBox. At ECC M the
+- **QR**: alphanumeric mode, ECC level M by default (`--ecc`), never Micro
+  QR. Every frame of a beam is rendered at one version, the one the longest
+  frame needs, so the symbol geometry on screen never changes; shorter frames
+  (the manifest, the last chunk) get a free ECC upgrade within that version.
+  `beam` fixes the version and ships the symbol's plan (`rsc.io/qr/coding`,
+  ADR 0011); the page carries the frames as text and encodes each symbol
+  itself (ADR 0011 amended), drawn at an integer pixel pitch inside a 4-module
+  quiet zone. At ECC M the
   largest frame that fits version 40 is 2260 bytes, so `--chunk` tops out at
   2242.
 
@@ -118,9 +120,10 @@ The player cycles frames at `--fps` (default 10):
 One pass is `N + ⌈N / 20⌉` frames, so `(N + ⌈N/20⌉) / fps` seconds; real runs
 need more than one pass because frames are missed.
 
-The player is one self-contained HTML file (ADR 0003): a single `<svg>` whose
-path is swapped per frame, an inline loop driven by `requestAnimationFrame`,
-and keys for pause, step, fps and fullscreen.
+The player is one self-contained HTML file (ADR 0003): a `<canvas>` the inline
+encoder (`qrjs.js`, ADR 0011 amended) paints per frame from the frames' text
+and the `PLAN`, an inline loop driven by `requestAnimationFrame`, and keys for
+pause, step, fps, size, fullscreen and hiding the chrome.
 
 ## Reassembly and verification chain
 

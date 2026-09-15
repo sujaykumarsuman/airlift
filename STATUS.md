@@ -413,6 +413,38 @@ new runtime dep — CLAUDE.md holds).
   key across addresses, the wrong key, the keyless fallback, the snapshot never
   leaking it, and parking/un-parking.
 
+- **The page encodes its own QR codes (2026-09-15, ADR 0011 amended)**, from
+  "why is a 6.9 MB file a 195 MB beam?": every frame was stored as a pre-rendered
+  SVG path (~27 KB for a version-30 symbol) against 2 KB of frame text. `beam`
+  now fixes the version as before (`PlanQR`) and inlines the frames as their
+  base45 text plus a `PLAN` (`internal/beam.PlayerPlan`: version, level, size,
+  block structure, and two bitmaps — the function modules and their colour —
+  from `coding.NewPlan`); `internal/beam/qrjs.js` (plain ES5, `//go:embed`-ed
+  into the player, no dependency, still offline) encodes each frame in the page —
+  alphanumeric bits and padding, Reed–Solomon over the same GF(256) and generator,
+  rsc.io's block interleave and zig-zag placement, the eight masks scored by the
+  same penalty rules, the format bits — and paints it on a `<canvas>` at an
+  integer device-pixel pitch (every module the same size) inside the 4-module
+  quiet zone, caching each packed symbol and warming the loop ahead of playback.
+  Bit-exact with Go: `encodeSymbol` stays as the reference, `go test
+  ./internal/beam -run TestQRFixtureCurrent -update` freezes its symbols into
+  `testdata/qr/matrices.json` (12 versions, every level, 96 symbols with their
+  masks) and `web/src/beam/qrjs.test.ts` reproduces every one module for module
+  and reads them back through zxing-wasm; `TestPlayerPlanShape` checks the plan
+  against the coding tables for all 40 versions. Measured: the 7 MB
+  incompressible file → **13.8 MB** (was 195 MB), built in 0.7 s; the 24-frame
+  docs beam 655 KB → 68 KB (the sample in `test-run/` is now a 76-frame fountain
+  beam, 165 KB, because these notes pushed `docs/adr` over the threshold); ~5 ms per encode in Chrome; `make scan-e2e` READY in 3.0 s at
+  30 decodes/s, 0 bad; controls, keys, quiet zone and the hidden-chrome mode
+  verified in-browser at desktop and phone widths; `player.webp` recaptured.
+
+- **`--mode auto|sequential|fountain` (2026-09-15, ADR 0010 amended)**, on
+  request: the layout was auto-only; the flag forces sequential (smallest page,
+  fixed pass) or fountain (lossy or two-phone runs), auto stays the default.
+  `TestBeamModeFlag` covers both overrides, the default either side of the
+  threshold and the refusal of anything else; README, the docs page, CLAUDE.md
+  and ADR 0010 updated.
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.
@@ -428,7 +460,7 @@ new runtime dep — CLAUDE.md holds).
 - `beam PATH…` bundles a folder (git-aware) or several files, sends a single
   file as-is, always carries a name (folder/file name, `--name`, a `name:` line
   in `--files-from`, or a prompt), auto-selects sequential vs fountain by size
-  (no flag), writes a self-contained page and opens it in the browser
+  (no flag until `--mode`, 2026-09-15), writes a self-contained page and opens it in the browser
   (`--no-open` to suppress). `--version-target` agrees with the README table.
 - `tower` keeps its Phase 1–4 behaviour (local-CA TLS, `--dest`, LAN bind);
   `~/.airlift` config and preflight are Phase 6.

@@ -36,10 +36,14 @@ served by the tower's session dashboard, not a CLI. `cmd/tower` is removed;
 amd64 and arm64, and the release workflow attaches those binaries and nothing
 else.
 
-**Fountain is automatic, never a flag.** `beam` runs `ModeAuto`, which uses a
+**Fountain is automatic by default.** `beam` runs `ModeAuto`, which uses a
 sequential loop for small payloads and switches to fountain once the chunk
 count reaches a threshold, where the last-chunk problem and the multi-scanner
-speed-up pay for the packet overhead. The user never chooses a mode.
+speed-up pay for the packet overhead. (Originally "never a flag"; amended
+2026-09-15: `--mode auto|sequential|fountain` lets the operator force a
+layout — sequential for the smallest page and a predictable pass, fountain for
+lossy or two-phone runs — while auto stays the default and the only choice the
+docs lead with.)
 
 `sender/airlift.py` and `tools/repobundle.py` are deleted. Their behaviour
 moves into Go:

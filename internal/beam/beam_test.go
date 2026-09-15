@@ -6,7 +6,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -68,8 +67,9 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBeamStructural checks the emitted page: one SVG path per frame, the loop
-// order the schedule dictates, and no external references (it must be offline).
+// TestBeamStructural checks the emitted page: every frame's text, the plan the
+// page encodes them with, the loop order the schedule dictates, the inlined
+// encoder, and no external references (it must be offline).
 func TestBeamStructural(t *testing.T) {
 	res, err := Build(bytes.Repeat([]byte("payload "), 500), "myrepo", Options{Chunk: 400, Seed: ptr(7)})
 	if err != nil {
@@ -82,6 +82,19 @@ func TestBeamStructural(t *testing.T) {
 	frames := extractArray(t, html, "FRAMES")
 	if len(frames) != len(d.Frames) {
 		t.Fatalf("player FRAMES has %d entries, want %d", len(frames), len(d.Frames))
+	}
+	for i := range frames {
+		if frames[i] != d.Frames[i] {
+			t.Fatalf("frame %d is not its text", i)
+		}
+	}
+	var plan PlayerPlan
+	decodeArray(t, html, "PLAN", &plan)
+	if plan.Version != res.Version || plan.N != 17+4*res.Version || plan.Data == 0 || plan.Occ == "" || plan.Base == "" {
+		t.Fatalf("player PLAN %+v does not describe version %d", plan, res.Version)
+	}
+	if res.SizeModules != plan.N+2*QuietZone {
+		t.Fatalf("tile size %d, want %d modules", res.SizeModules, plan.N+2*QuietZone)
 	}
 	var gotOrder []int
 	decodeArray(t, html, "ORDER", &gotOrder)
@@ -96,14 +109,19 @@ func TestBeamStructural(t *testing.T) {
 	if gotOrder[0] != 0 || gotOrder[1] != 1 {
 		t.Fatalf("loop must open with the manifest then chunk 1: %v", gotOrder[:2])
 	}
-	if !strings.Contains(html, "viewBox=\"0 0 "+strconv.Itoa(res.SizeModules)+" "+strconv.Itoa(res.SizeModules)+"\"") {
-		t.Fatal("viewBox missing or wrong size")
+	for _, want := range []string{"function airliftQR(plan)", "airliftQR(PLAN)", "<canvas id=\"qr\">"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("player lacks %q", want)
+		}
 	}
 	if !strings.Contains(html, "airlift beam · myrepo") {
 		t.Fatal("beam name missing from the page title")
 	}
+	// The frames are base45, which has ':' and '/', so scan the page around them.
+	fi := strings.Index(html, "var FRAMES = ")
+	page := html[:fi] + html[fi+strings.Index(html[fi:], ";"):]
 	for _, ref := range []string{"://", "src=", "<link", "http-equiv", "https:", "//cdn"} {
-		if strings.Contains(html, ref) {
+		if strings.Contains(page, ref) {
 			t.Fatalf("beam is not self-contained: contains %q", ref)
 		}
 	}

@@ -45,9 +45,9 @@ type FountainInfo struct {
 	Indices [][]int `json:"indices"`
 }
 
-// Mode selects the frame layout. It is an internal choice, not a user flag:
-// beam runs ModeAuto, which picks fountain once the payload is large enough
-// that loss and stragglers dominate a sequential loop.
+// Mode selects the frame layout. beam runs ModeAuto unless --mode says
+// otherwise; auto picks fountain once the payload is large enough that loss
+// and stragglers dominate a sequential loop.
 type Mode int
 
 // Frame-layout modes.

@@ -33,7 +33,7 @@ repos:
         name: go test
         entry: go test ./...
         language: system
-        files: (\.go$|^go\.(mod|sum)$|^testdata/)
+        files: (\.go$|^go\.(mod|sum)$|^testdata/|^internal/beam/qrjs\.js$)
         pass_filenames: false
 
       # ---- web (TypeScript) ----
@@ -55,6 +55,6 @@ repos:
         name: vitest (web)
         entry: npm --prefix web run --silent test
         language: system
-        files: ^web/
+        files: (^web/|^internal/beam/qrjs\.js$|^testdata/qr/)
         exclude: ^web/dist/
         pass_filenames: false

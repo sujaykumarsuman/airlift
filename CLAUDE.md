@@ -49,10 +49,12 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
   not a command. `tower` owns sessions, protocol decode, reassembly,
   verification, bundle unpack, downloads, TLS; it serves the embedded web UI.
 - `internal/beam` — the shared encoder (gzip → chunk → frame, sequential or
-  fountain, `ModeAuto` picking per size), QR rendering (`rsc.io/qr/coding`,
-  ADR 0011), the embedded HTML player, `Build` (the whole beam pipeline) and
-  `Decode` (offline reassembly, used by tests). `beam` and `internal/replay`
-  share it.
+  fountain, `ModeAuto` picking per size), the QR plan (`rsc.io/qr/coding`
+  fixes the version; ADR 0011), the embedded HTML player with its inline QR
+  encoder `qrjs.js` (the page encodes the frames' text itself — ADR 0011
+  amended; bit-exact with the Go reference via `testdata/qr/matrices.json` and
+  `web/src/beam/qrjs.test.ts`), `Build` (the whole beam pipeline) and `Decode`
+  (offline reassembly, used by tests). `beam` and `internal/replay` share it.
 - `internal/bundle` — repobundle `Pack`/`Parse`, tree/zip writers, the one
   path sanitiser. `Pack` is a byte-for-byte port of the retired
   `tools/repobundle.py` (`docs/BUNDLE.md`).
@@ -211,14 +213,18 @@ repo is public and releases are cut from `v*` tags.)
   and downloads through blobs, because the token travels in a header.
 - The dashboard is exercised without a camera by `internal/replay` inside
   `go test` (bundle → beam → replay through loss → READY → the tree restored);
-  there is no `replay` command. `beam`'s fountain choice is automatic (ADR
-  0010), so there is no `--fountain` flag.
+  there is no `replay` command. `beam`'s fountain choice is automatic by
+  default (`--mode auto`, fountain from `FountainThreshold` chunks) and
+  `--mode sequential|fountain` overrides it (ADR 0010, amended 2026-09-15).
 - Shared fixtures: `testdata/bundles/` (trees plus the bundles
   `internal/bundle.Pack` reproduces from them, the byte-for-byte contract of
-  ADR 0010) and `testdata/vectors/vectors*.json` (frames dumps for the multi
-  base64 bundle, sequential and fountain layouts). The vectors are frozen from
-  the original Python sender and are never regenerated from Go; the bundles are
-  regenerated only when a tree changes (see `testdata/bundles/README.md`).
+  ADR 0010), `testdata/vectors/vectors*.json` (frames dumps for the multi
+  base64 bundle, sequential and fountain layouts) and `testdata/qr/matrices.json`
+  (the Go reference encoder's symbols the player's JS encoder must reproduce
+  bit for bit; `go test ./internal/beam -run TestQRFixtureCurrent -update`
+  after a deliberate Go-side change). The vectors are frozen from the original
+  Python sender and are never regenerated from Go; the bundles are regenerated
+  only when a tree changes (see `testdata/bundles/README.md`).
 - The fountain packet construction is a cross-language contract (ADR 0009):
   it lives in `internal/proto/fountain.go`, keeps its arithmetic free of fused
   multiply-add, and is checked seed-by-seed against the frozen vectors.

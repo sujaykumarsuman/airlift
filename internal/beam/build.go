@@ -24,8 +24,9 @@ type Result struct {
 }
 
 // Build runs the whole beam pipeline for one payload: encode (mode auto by
-// default), render every frame at one QR version, lay out the loop, and fill
-// the player template. It is what `airlift beam` calls once it has the payload
+// default), fix one QR version for every frame and derive the page's encoding
+// plan, lay out the loop, and fill the player template (the page encodes the
+// symbols itself, ADR 0011 amended). It is what `airlift beam` calls once it has the payload
 // bytes and the name.
 func Build(data []byte, name string, o Options) (*Result, error) {
 	if o.Chunk == 0 {
@@ -45,7 +46,7 @@ func Build(data []byte, name string, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	version, size, paths, err := RenderQR(d.Frames, o.ECC)
+	version, size, plan, err := PlanQR(d.Frames, o.ECC)
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +61,6 @@ func Build(data []byte, name string, o Options) (*Result, error) {
 	if d.Fountain != nil {
 		res.Packets = d.Fountain.Packets
 	}
-	res.HTML = PlayerHTML(name, session, len(d.Frames)-1, order, paths, size, o.FPS, res.Fountain)
+	res.HTML = PlayerHTML(name, session, len(d.Frames)-1, order, d.Frames, plan, o.FPS, res.Fountain)
 	return res, nil
 }

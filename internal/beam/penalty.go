@@ -7,7 +7,8 @@ import (
 )
 
 // penalty scores a symbol by the four mask-evaluation rules of ISO/IEC 18004
-// §8.8.2; RenderQR picks the mask that minimises it. rsc.io/qr/coding takes an
+// §8.8.2; the reference encoder picks the mask that minimises it and the page's
+// encoder (qrjs.js) carries the same rules. rsc.io/qr/coding takes an
 // explicit mask and does no evaluation of its own, so this supplies it.
 func penalty(code *coding.Code) int {
 	n := code.Size

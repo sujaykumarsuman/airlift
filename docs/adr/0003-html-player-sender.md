@@ -15,6 +15,11 @@ add a dependency or lose control over timing and size.
 JS loop. Zero runtime dependencies beyond a browser. Full-screen centred QR,
 maximum square, black on white; keys for pause, step and fps.
 
+Still the decision after the Go port (ADR 0010: `airlift beam`, the player JS
+inline in the Go-emitted page) and after ADR 0011's amendment (2026-09-15: the
+frames are inline text and the page encodes the symbols itself) — one file,
+offline, nothing to install.
+
 ## Consequences
 
 - The beam is not a session participant and never talks to the tower. This

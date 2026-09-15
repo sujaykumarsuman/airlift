@@ -70,7 +70,7 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
 
         <section id="beam">
           <h2>Make a beam</h2>
-          <p>On the air-gapped machine, point <code>airlift beam</code> at what you want out. It bundles, compresses, chunks the payload into QR frames and writes <strong>one self-contained HTML file</strong>, then opens it in the browser.</p>
+          <p>On the air-gapped machine, point <code>airlift beam</code> at what you want out. It bundles, compresses, chunks the payload into QR frames and writes <strong>one self-contained HTML file</strong> — the frames as text plus a small encoder that draws each code in the page, so the file is about one and a half to two times the compressed payload — then opens it in the browser.</p>
           <h3>A folder</h3>
           <div class="cmd"><code>airlift beam ./my-repo</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
           <p>The folder becomes a <a href="https://github.com/sujaykumarsuman/airlift/blob/main/docs/BUNDLE.md">repobundle</a> — git-aware, so <code>.gitignore</code> is respected — named after the folder. The tower unpacks it back into a tree and offers it as a zip.</p>
@@ -83,14 +83,14 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
           <div class="cmd"><code>airlift beam --files-from list.txt      # list.txt: "name: evidence" then one path per line</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
           <h3>What it prints</h3>
           <pre><code>  bundle   text format
-  gzip          28591 bytes   39.5 % of input
-  chunks           22 × 1311 bytes
-  mode     sequential
+  gzip          30397 bytes   39.5 % of input
+  chunks           24 × 1311 bytes
+  mode     fountain (72 packets, LT/robust soliton)
   qr       version 30 (137×137 modules), ECC M, alphanumeric
-  loop             24 frames   manifest every 20   2.4 s per pass at 10 fps
-  session  0x82c2bb47
-  output   654.4 KB</code></pre>
-          <p>Small beams (under ~24 chunks) play their chunks in order and repeat; larger ones switch to a <em>fountain</em> code automatically, so every pass produces fresh packets and a missed frame never means waiting for the same one to come round. You do not choose — the mode is picked from the size.</p>
+  loop             76 frames   manifest every 20   7.6 s per pass at 10 fps
+  session  0x2417dd9b
+  output   165.3 KB</code></pre>
+          <p>Small beams (under 24 chunks) play their chunks in order and repeat; larger ones switch to a <em>fountain</em> code automatically, so every pass produces fresh packets and a missed frame never means waiting for the same one to come round. The mode is picked from the size unless <code>--mode</code> says otherwise.</p>
           <h3>Options</h3>
           <table class="opts">
             <tr><th><code>--name NAME</code></th><td>The beam's name (the tower shows it). Required for several files.</td></tr>
@@ -100,6 +100,7 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
             <tr><th><code>--ecc L|M|Q|H</code></th><td>QR error correction (default M). Higher survives glare better, at fewer bytes per frame.</td></tr>
             <tr><th><code>--manifest-every K</code></th><td>Re-insert the manifest frame every K frames (default 20), so a scanner that starts mid-loop learns the beam quickly.</td></tr>
             <tr><th><code>--format auto|text|base64</code></th><td>Bundle format for folders. <code>auto</code> (the default) bundles as text — about 30 % less to send — when every file is text and none holds a boundary marker, else as base64.</td></tr>
+            <tr><th><code>--mode auto|sequential|fountain</code></th><td>Frame layout. <code>auto</code> (the default) is sequential under 24 chunks and fountain from there; <code>sequential</code> gives the smallest page and a fixed pass, <code>fountain</code> shrugs off lost frames and lets two phones share the work.</td></tr>
             <tr><th><code>--out FILE</code> · <code>--no-open</code></th><td>Where to write the page (default <code>&lt;name&gt;.html</code>), and whether to open it.</td></tr>
           </table>
         </section>

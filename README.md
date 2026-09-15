@@ -82,10 +82,13 @@ what QR version 30 holds at `--ecc`, 1311 at M; at most 2712), `--ecc L|M|Q|H`, 
 `--manifest-every`, `--name`, `--format auto|text|base64` (auto bundles a
 folder as text when every file is text — about 30 % less gzip than base64 —
 and falls back to base64 when a file is binary or holds a boundary marker),
+`--mode auto|sequential|fountain` (the layout; auto picks by size, below),
 `--out FILE`, `--no-open`, `--seed`. The player is a
 black page with only the QR bright (on a white quiet-zone tile) and on-screen
 controls; keys: space pause · ←/→ step · +/- fps · [/] size · f fullscreen ·
-h hide chrome.
+h hide chrome. The page carries the frames as text and encodes each QR itself,
+so a beam is about 1.5 × the bytes of its frames — roughly 1.5 × the gzip for
+a sequential beam and 2 × for a fountain one (a 7 MB file makes a 14 MB page).
 
 ### Robust by default
 
@@ -93,8 +96,10 @@ Small payloads ship the chunks in order and repeat. Larger ones automatically
 switch to an LT fountain code: any ~1.2×N distinct frames rebuild the file, so
 loss only delays completion by the frames lost (a plain sequential loop waits a
 whole pass for every straggler), and a second phone on the same session roughly
-halves the time. There is no flag — `beam` picks the layout from the payload
-size and prints which it used.
+halves the time. By default `beam` picks the layout from the payload size
+(fountain from 24 chunks) and prints which it used; `--mode sequential` or
+`--mode fountain` overrides it — sequential for the smallest page and a
+predictable pass, fountain when frames get lost or two phones are scanning.
 
 ### Tuning
 
