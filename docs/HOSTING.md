@@ -1,5 +1,11 @@
 # Hosting airlift on a VPS
 
+> **Note (2026-09-15):** the live tower now runs on **k3s**, not Caddy + systemd.
+> See [`docs/build-plan/k3s-migration.md`](build-plan/k3s-migration.md) and
+> `deploy/k8s/` for the current deployment. The Caddy + systemd instructions
+> below are the previous setup, retired at the k3s cutover and kept for
+> reference/rollback.
+
 The tower runs as a plain-HTTP service on `127.0.0.1:8443`, with **Caddy** in
 front terminating TLS and reverse-proxying to it (ADR 0012). Caddy obtains and
 renews the certificate from Let's Encrypt automatically. This is the Phase 8

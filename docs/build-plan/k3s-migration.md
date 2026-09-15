@@ -1,6 +1,7 @@
 # Build plan — migrating the tower to k3s
 
-Status: **plan** (2026-09-15). Prepared alongside the wider move of
+Status: **executed 2026-09-15** (originally a plan; the migration below was
+carried out — the tower now runs on k3s). Prepared alongside the wider move of
 `projects.sujaykumar.dev` from a Caddy + systemd host to a single-node **k3s**
 cluster, with each project in its own namespace. This document is about the
 **airlift tower** specifically: what has to change to run it on Kubernetes, why
@@ -373,11 +374,11 @@ irreversible (⛔):
   `/var/lib/airlift` (wiped on start anyway).
 - ⛔ Retire Caddy: `systemctl disable --now caddy`, `apt-get purge caddy`, remove
   `/etc/caddy`. (TLS is Traefik's now.)
-- ♻ The standalone **Docker + containerd.io** packages are unused today (no
-  containers/images/volumes) and k3s ships its own containerd. They are only
-  needed *during* cutover to build the image (§8). Once the image is imported,
-  `apt-get purge docker-ce docker-ce-cli containerd.io` reclaims the space —
-  rebuild by re-installing Docker or by building elsewhere and importing.
+- ♻ **Docker + containerd.io** are **kept** (not removed at cutover): they were
+  idle residue before, but are now the image build tool — `make k3s-image` runs
+  `docker build` on the VPS and imports into k3s' own containerd. Purge only if
+  you move image builds off the box (then `apt-get purge docker-ce docker-ce-cli
+  containerd.io`).
 - ⛔ Remove the default `/var/www/html` and the old `/var/www/projects` webroot
   (the hub is a ConfigMap in k3s now).
 - ⛔ The careerdock backup was **tidied out of `/root` into
