@@ -199,9 +199,10 @@ that terminates real TLS** and forwards to `listen` over plain HTTP;
 `public_url` carries the public scheme, host and any path prefix (e.g.
 `https://host/airlift`), which the tower injects as `<base href>` and uses for
 every join link. There is no built-in certificate authority any more — the phone
-simply trusts the proxy's certificate. The `deploy/` tooling and
-[`docs/HOSTING.md`](docs/HOSTING.md) run the tower behind Caddy (automatic
-Let's Encrypt TLS) on a VPS; `make vps-bootstrap` then `make deploy`.
+simply trusts the proxy's certificate. The live tower runs on a single-node
+**k3s** cluster, deployed by **GitOps** (Flux + Helm) with **Traefik +
+cert-manager** TLS — see [`docs/HOSTING.md`](docs/HOSTING.md) and the
+`sujaykumarsuman/infra` repo.
 
 ### Zero-hop variant
 
@@ -243,8 +244,8 @@ make scan-e2e     # scans a real beam with the real scanner, no phone: player fr
 The binary is stamped with its version (`git describe --tags`, or the tag in the
 release workflow) and reports it at `GET /api/info` and in the landing footer.
 Releases: `git tag -a vX.Y.Z -m "…" && git push origin vX.Y.Z` — the workflow
-builds and publishes the binaries — then `make deploy` from that tag so the live
-tower shows a clean version.
+builds and publishes the binaries and the GHCR image, and Flux auto-deploys the
+image to the k3s cluster (see [`docs/HOSTING.md`](docs/HOSTING.md)).
 
 `go test` covers the whole pipeline end to end — bundle a tree, beam it, relay
 the frames through loss into a real tower, and check the restored tree — so no

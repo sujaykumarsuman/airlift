@@ -541,6 +541,29 @@ careerdock backup was tidied into `/root/backups/`.
 
 - **Phase 13 complete.**
 
+## Phase 14 — GitOps (Flux + Helm) + CI/CD (done, 2026-09-15)
+
+Deployment moved from hand-applied manifests / `make` targets to **GitOps**: Flux
++ Helm reconcile the cluster from the private `sujaykumarsuman/infra` repo, with
+GHCR as the registry.
+
+- **CI**: a reusable `build-push.yml` in `sujaykumarsuman/.github`; airlift's
+  `.github/workflows/deploy.yml` builds `ghcr.io/sujaykumarsuman/airlift:X.Y.Z` on
+  a release tag. (skriptvalley org CI deferred.)
+- **CD**: `sujaykumarsuman/infra` — a shared `project` Helm chart, one HelmRelease
+  per app (airlift, projects-hub), cert-manager as a HelmRelease, the LE issuers,
+  the shared cert + Traefik `TLSStore`, all reconciled by Flux. Image-automation
+  watches GHCR and auto-bumps the tag in git (auto-deploy). Secrets via SOPS + age.
+- **Migration**: cert-manager and both apps were re-created under Helm (the
+  `projects-tls` certificate preserved — no re-issue). The live tower is `v1.0.1`
+  via Flux, verified end-to-end (200 on the prod cert, admin token decrypted).
+- **Cleanup (this repo)**: removed `deploy/k8s/` and the Caddy/systemd
+  `deploy/{Caddyfile,airlift.service,bootstrap.sh}` plus the `vps-bootstrap` /
+  `deploy` / `k3s-*` make targets (all superseded); `deploy/Dockerfile` stays (CI
+  uses it). HOSTING.md rewritten for GitOps.
+
+- **Phase 14 complete.**
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender

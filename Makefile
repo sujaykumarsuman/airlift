@@ -10,15 +10,7 @@ PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS   := -s -w -X $(MODULE).Version=$(VERSION)
 
-# Deployment (Phase 8, docs/HOSTING.md). VPS is an ssh host alias; DOMAIN is the
-# public hostname whose A record points at the VPS; PREFIX is the path airlift is
-# mounted under (Caddy strips it, ADR 0012); PUBLIC_URL is what the tower advertises.
-VPS        ?= airlift-vps
-DOMAIN     ?= projects.sujaykumar.dev
-PREFIX     ?= /airlift
-PUBLIC_URL ?= https://$(DOMAIN)$(PREFIX)
-
-.PHONY: all web airlift airlift-all airlift-linux docs-shots scan-e2e go-test go-lint web-test web-lint test lint pre-commit setup clean vps-bootstrap deploy k3s-image k3s-deploy
+.PHONY: all web airlift airlift-all airlift-linux docs-shots scan-e2e go-test go-lint web-test web-lint test lint pre-commit setup clean
 
 all: web airlift
 
@@ -69,47 +61,10 @@ airlift-linux: web
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" \
 	  -o $(BIN)/$(AIRLIFT)-linux-amd64 ./cmd/airlift
 
-## ---- deploy (Phase 8; see docs/HOSTING.md) ----
-# One-time host setup: install the unit + Caddyfile, create the service user and
-# an 0600 config with an admin token, install Caddy. Idempotent.
-vps-bootstrap:
-	scp deploy/airlift.service $(VPS):/etc/systemd/system/airlift.service
-	sed -e 's/{{DOMAIN}}/$(DOMAIN)/g' -e 's|{{PREFIX}}|$(PREFIX)|g' deploy/Caddyfile | ssh $(VPS) 'cat > /etc/caddy/Caddyfile'
-	scp deploy/bootstrap.sh $(VPS):/tmp/airlift-bootstrap.sh
-	ssh $(VPS) 'bash /tmp/airlift-bootstrap.sh "$(PUBLIC_URL)" && rm -f /tmp/airlift-bootstrap.sh'
-	ssh $(VPS) 'systemctl restart airlift; systemctl reload caddy || systemctl restart caddy'
-
-# Build the Linux binary and roll it out with a zero-downtime rename + restart.
-# The tower reports the stamped VERSION (GET /api/info, the landing footer): a
-# tagged HEAD gives a clean "v1.2.3"; an untagged one still deploys, but says so.
-deploy: airlift-linux
-	@echo "deploying $(VERSION)"
-	@git describe --tags --exact-match >/dev/null 2>&1 || echo "  note: HEAD is not on a tag — the tower will report $(VERSION); tag a release for a clean version"
-	scp $(BIN)/$(AIRLIFT)-linux-amd64 $(VPS):/usr/local/bin/airlift.new
-	ssh $(VPS) 'chmod 755 /usr/local/bin/airlift.new && mv -f /usr/local/bin/airlift.new /usr/local/bin/airlift && systemctl restart airlift && sleep 1 && systemctl is-active airlift'
-
-## ---- k3s (see docs/build-plan/k3s-migration.md) ----
-# Run against the VPS over ssh once the cluster + the airlift-admin Secret exist
-# (deploy/k8s/cluster + deploy/k8s/airlift/README.md). VPS_REPO is a checkout on
-# the VPS (it has Docker + Go); the image is imported into k3s' containerd — no
-# registry. The `deploy`/`vps-bootstrap` targets above stay until cleanup, for
-# rollback to the Caddy + systemd path.
-VPS_REPO ?= /root/airlift
-K8S_NS   ?= airlift
-
-# Build the tower image on the VPS and import it into k3s.
-k3s-image:
-	ssh $(VPS) 'set -e; cd $(VPS_REPO) && git pull --ff-only; \
-	  V=$$(git describe --tags); echo "building airlift:$$V"; \
-	  docker build -f deploy/Dockerfile --build-arg VERSION=$$V -t airlift:$$V -t airlift:latest .; \
-	  docker save airlift:$$V airlift:latest | k3s ctr images import -'
-
-# Apply the airlift manifests and roll the deployment.
-k3s-deploy: k3s-image
-	ssh $(VPS) 'set -e; export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd $(VPS_REPO); \
-	  k3s kubectl apply -k deploy/k8s/airlift; \
-	  k3s kubectl -n $(K8S_NS) rollout restart deploy/airlift; \
-	  k3s kubectl -n $(K8S_NS) rollout status deploy/airlift'
+## ---- deploy ----
+# Deployment is GitOps: CI (.github/workflows/deploy.yml) builds the image to GHCR
+# on a release tag, and Flux deploys it to the k3s cluster. See docs/HOSTING.md and
+# the sujaykumarsuman/infra repo. `make` only builds; it never deploys.
 
 go-lint:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt:"; echo "$$out"; exit 1; fi
