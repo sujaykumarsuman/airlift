@@ -491,6 +491,21 @@ new runtime dep — CLAUDE.md holds).
   password (exit 130, echo back on) and during the wait (request withdrawn,
   sender gone).
 
+- **Join field keeps the session-id shape (2026-09-15)**, on request: the home
+  page's session-id input takes letters only (lowercased, nine at most) and
+  places the hyphens itself as groups fill; a typed hyphen lands in its place,
+  backspace always removes something, a tenth letter is refused, pasted text is
+  tidied, a pasted share link fills in its id (keeping its token only for this
+  tower's link and an unchanged id), and an incomplete id says how many letters
+  are missing. A composing keyboard's word is left alone until it lands, so
+  keyboards that compose whole words (Samsung with predictive text) get the
+  hyphens then rather than letter by letter — rewriting mid-composition
+  duplicates letters in Chrome. `web/src/shared/sid.ts` (pure, 17 tests incl. a
+  randomised invariant) and `web/src/tower/joinfield.ts`; checked in headless
+  Chrome over CDP with real editing commands, paste and IME composition (20
+  scenarios). Still to try on the Android phone: letter-by-letter hyphens with
+  Gboard.
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.

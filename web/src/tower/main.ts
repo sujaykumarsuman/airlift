@@ -4,6 +4,7 @@ import { decodeBitmap } from "../shared/bitmap";
 import { renderChunkMarks } from "../shared/chunks";
 import { bindCopyButtons } from "../shared/copy";
 import { $, html, raw, type Raw } from "../shared/dom";
+import { attachSessionIdField } from "./joinfield";
 import { icon } from "../shared/icons";
 import { formatBytes, formatDuration } from "../shared/format";
 import { enter } from "../shared/motion";
@@ -291,7 +292,8 @@ async function renderHome(): Promise<void> {
     <div id="tab-join" class="card" ${homeTab === "join" ? "" : raw("hidden")}>
       <p class="section-label">${icon("key")} Join a session</p>
       <form id="join-form" class="create-options">
-        <label>Session id <input id="join-sid" type="text" placeholder="e.g. qkf-mzt-bwp" autocomplete="off" spellcheck="false" /></label>
+        <label>Session id <input id="join-sid" type="text" placeholder="e.g. qkf-mzt-bwp" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" writingsuggestions="false" enterkeyhint="go" aria-describedby="join-error" /></label>
+        <p id="join-error" class="warn" role="alert" hidden></p>
         <p><button class="btn primary" type="submit">${icon("key")} Join</button></p>
       </form>
     </div>`.html;
@@ -321,10 +323,11 @@ async function renderHome(): Promise<void> {
       joiners_admin: $<HTMLInputElement>("#opt-admin", sessionEl).checked || undefined,
     });
   });
+  const joinField = attachSessionIdField($<HTMLInputElement>("#join-sid", sessionEl), $<HTMLElement>("#join-error", sessionEl), new URL(appBase));
   $<HTMLFormElement>("#join-form", sessionEl).addEventListener("submit", (e) => {
     e.preventDefault();
-    const sid = $<HTMLInputElement>("#join-sid", sessionEl).value.trim().toLowerCase();
-    if (sid) location.href = new URL(sid, appBase).toString();
+    const target = joinField.target();
+    if (target) location.href = target;
   });
   heroEl.hidden = false;
   landingEl.hidden = false;
