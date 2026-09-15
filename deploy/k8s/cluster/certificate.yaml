@@ -1,0 +1,17 @@
+# The one shared certificate for the hostname. It lives in kube-system alongside
+# Traefik so the default TLSStore can adopt it (tlsstore.yaml), and every
+# project's IngressRoute across namespaces gets TLS with `tls: {}` — no
+# per-namespace secret, no duplicate issuance. ISSUER_PLACEHOLDER is substituted
+# by bootstrap.sh (staging → prod).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: projects-tls
+  namespace: kube-system
+spec:
+  secretName: projects-tls
+  dnsNames:
+    - projects.sujaykumar.dev
+  issuerRef:
+    name: ISSUER_PLACEHOLDER   # substituted by bootstrap.sh (staging → prod)
+    kind: ClusterIssuer
