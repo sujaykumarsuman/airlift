@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getInfo, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, rememberClientKey, resolveKnock } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getInfo, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, rememberClientKey, resolveKnock, resolveUpload } from "../shared/api";
 import { decodeBitmap } from "../shared/bitmap";
 import { renderChunkMarks } from "../shared/chunks";
 import { bindCopyButtons } from "../shared/copy";
@@ -10,7 +10,7 @@ import { enter } from "../shared/motion";
 import { cleanupCountdown, expiryCountdown, instantMs, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
-import type { Beam, ClientSummary, CreateOptions, KnockView, Snapshot, State, Verdict } from "../shared/types";
+import type { Beam, ClientSummary, CreateOptions, KnockView, Snapshot, State, UploadView, Verdict } from "../shared/types";
 import { renderQR } from "./qr";
 import { type BeamView, failedStage, initialView, reduce, tick, type View } from "./state";
 
@@ -666,6 +666,12 @@ function renderStatus(): void {
                 <ul class="knocks">${s.knocks.map((k) => knockRow(k))}</ul>`
             : ""
         }
+        ${
+          iAmAdmin && s.uploads?.length
+            ? html`<p class="section-label">${icon("upload")} Upload requests <span class="count">${s.uploads.length}</span></p>
+                <ul class="knocks uploads">${s.uploads.map((u) => uploadRow(u))}</ul>`
+            : ""
+        }
       </div>
     </div>`.html;
   if (listScroll) {
@@ -705,6 +711,12 @@ function renderStatus(): void {
   );
   placeEl.querySelectorAll<HTMLButtonElement>("[data-deny]").forEach((btn) =>
     btn.addEventListener("click", () => void resolveKnockClick(btn.dataset.deny ?? "", "deny")),
+  );
+  placeEl.querySelectorAll<HTMLButtonElement>("[data-approve-upload]").forEach((btn) =>
+    btn.addEventListener("click", () => void resolveUploadClick(btn.dataset.approveUpload ?? "", "approve")),
+  );
+  placeEl.querySelectorAll<HTMLButtonElement>("[data-deny-upload]").forEach((btn) =>
+    btn.addEventListener("click", () => void resolveUploadClick(btn.dataset.denyUpload ?? "", "deny")),
   );
   placeEl.querySelector<HTMLFormElement>("#ext-form")?.addEventListener("submit", onExtensionSubmit);
   placeEl.querySelector<HTMLButtonElement>("#reopen-btn")?.addEventListener("click", onReopen);
@@ -895,9 +907,33 @@ function updateClocks(now: number): void {
 function knockRow(k: KnockView): Raw {
   return html`<li>
     <span class="who">${k.name || "(anonymous)"}</span>
-    <button class="btn small primary sym" data-admit="${k.id}" title="Admit" aria-label="Admit">${icon("check")} <span class="lbl">Admit</span></button>
-    <button class="btn small sym" data-deny="${k.id}" title="Deny" aria-label="Deny">${icon("cross")} <span class="lbl">Deny</span></button>
+    <span class="acts">
+      <button class="btn small primary sym" data-admit="${k.id}" title="Admit" aria-label="Admit">${icon("check")} <span class="lbl">Admit</span></button>
+      <button class="btn small sym" data-deny="${k.id}" title="Deny" aria-label="Deny">${icon("cross")} <span class="lbl">Deny</span></button>
+    </span>
   </li>`;
+}
+
+/** A pending direct upload (ADR 0023): who is sending what, and how big. */
+function uploadRow(u: UploadView): Raw {
+  return html`<li>
+    <span class="who">${u.name}</span>
+    <span class="tags">${u.client} · ${formatBytes(u.bytes)} · ${u.chunks} chunk${u.chunks === 1 ? "" : "s"}</span>
+    <span class="acts">
+      <button class="btn small primary sym" data-approve-upload="${u.id}" title="Approve" aria-label="Approve upload">${icon("check")} <span class="lbl">Approve</span></button>
+      <button class="btn small sym" data-deny-upload="${u.id}" title="Deny" aria-label="Deny upload">${icon("cross")} <span class="lbl">Deny</span></button>
+    </span>
+  </li>`;
+}
+
+async function resolveUploadClick(uid: string, decision: "approve" | "deny"): Promise<void> {
+  if (!current || !uid) return;
+  try {
+    await resolveUpload(current.sid, current.token, current.client_id, uid, decision);
+  } catch (err) {
+    notice = `Could not ${decision} the upload: ${err instanceof Error ? err.message : String(err)}`;
+    renderStatus();
+  }
 }
 
 async function resolveKnockClick(kid: string, decision: "admit" | "deny"): Promise<void> {

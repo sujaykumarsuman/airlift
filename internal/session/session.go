@@ -141,7 +141,8 @@ type Beam struct {
 	ticks      []time.Time // per-beam decode-fps window
 
 	outcome Outcome
-	removed bool // operator removed it (or it was auto-evicted at the cap)
+	removed bool   // operator removed it (or it was auto-evicted at the cap)
+	upload  string // the approved direct upload that created it (ADR 0023); "" for a scanned beam
 }
 
 // bid is the beam's identifier for URLs, downloads and the web: eight hex
@@ -201,6 +202,9 @@ type Session struct {
 	knocks     map[string]*Knock // admission requests by id (ADR 0021)
 	knockAddr  map[string]string // address → knock id, for the poll
 	knockOrder []string          // knock ids in arrival order, for a stable snapshot
+
+	uploads     map[string]*Upload // direct-upload requests by id (ADR 0023)
+	uploadOrder []string           // upload ids in arrival order
 
 	label        string
 	joinersAdmin bool
@@ -276,7 +280,7 @@ type KnockView struct {
 // LifecycleEvent is one entry of the session's append-only lifecycle log.
 type LifecycleEvent struct {
 	At     time.Time `json:"at"`
-	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminating | termination_cancelled | terminated | extension_requested | reopened | rejected | max_age_extended | knock | admitted | knock_denied
+	Event  string    `json:"event"` // created | beam_ready | beam_failed | terminating | termination_cancelled | terminated | extension_requested | reopened | rejected | max_age_extended | knock | admitted | knock_denied | upload_requested | upload_approved | upload_denied
 	By     string    `json:"by,omitempty"`
 	Reason string    `json:"reason,omitempty"`
 	BID    string    `json:"bid,omitempty"`
@@ -640,7 +644,7 @@ func (s *Session) KnockState(addr string) (state, token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id, ok := s.knockAddr[addr]
-	if !ok {
+	if !ok || !s.status.Live() { // an ended session holds no request open
 		return "none", ""
 	}
 	if k := s.knocks[id]; k.State == "admitted" {
@@ -733,6 +737,7 @@ func (s *Session) removeBeamLocked(sender uint32) {
 		return
 	}
 	b.removed = true
+	s.spendUploadLocked(b) // a removed beam takes its approval with it
 	delete(s.beams, sender)
 	for i, id := range s.order {
 		if id == sender {
@@ -806,6 +811,13 @@ func (s *Session) Unsubscribe(sub *Subscriber) {
 	if len(s.subs) == 0 {
 		s.lastEmptyAt = s.now()
 	}
+	// A direct sender is one run of `airlift beam`: once its last stream closes
+	// with no request still open, it has gone, so it leaves the list at once
+	// rather than idling there for ClientIdleTTL (ADR 0023). Parking keeps the
+	// record; any keyed call brings it back.
+	if c := sub.client; c != nil && c.Sender && !s.streamingLocked(c) && s.openUploadLocked(c.ID) == nil {
+		c.parkedAt = s.now()
+	}
 	s.notifyLocked()
 }
 
@@ -844,7 +856,13 @@ type IngestResult struct {
 // Ingest parses relayed frames and routes each to its beam by sender u32,
 // creating a beam on a new MANIFEST and holding DATA/FOUNTAIN frames that arrive
 // before their MANIFEST. Every beam decodes, verifies and completes on its own.
-func (s *Session) Ingest(texts []string) IngestResult {
+func (s *Session) Ingest(texts []string) IngestResult { return s.IngestOnly(texts, nil) }
+
+// IngestOnly is Ingest for a direct sender holding an approval (ADR 0023): with
+// a pin, frames count as bad unless they build exactly the approved beam — its
+// sender u32, a manifest matching what was declared, and only a beam that
+// approval created. A nil pin is plain Ingest.
+func (s *Session) IngestOnly(texts []string, pin *UploadPin) IngestResult {
 	s.mu.Lock()
 	if !s.status.Live() { // a terminated/reviewing session's transfer is frozen
 		s.mu.Unlock()
@@ -856,17 +874,17 @@ func (s *Session) Ingest(texts []string) IngestResult {
 	var evicted []string
 	for _, text := range texts {
 		fr, err := proto.ParseText(text)
-		if err != nil {
+		if err != nil || (pin != nil && fr.Session != pin.sender) {
 			r.Bad++
 			continue
 		}
 		switch fr.Type {
 		case proto.TypeManifest:
-			if b := s.ingestManifestLocked(fr, now, &r, &evicted); b != nil {
+			if b := s.ingestManifestLocked(fr, now, &r, &evicted, pin); b != nil {
 				completed = append(completed, b)
 			}
 		case proto.TypeData, proto.TypeFountain:
-			if b := s.ingestPayloadLocked(fr, now, &r); b != nil {
+			if b := s.ingestPayloadLocked(fr, now, &r, pin); b != nil {
 				completed = append(completed, b)
 			}
 		default:
@@ -878,6 +896,11 @@ func (s *Session) Ingest(texts []string) IngestResult {
 	// (the inactive clock), not Ingest.
 	if r.Accepted+r.Dup > 0 {
 		s.notifyLocked()
+	}
+	if pin != nil && r.Accepted > 0 { // only frames that moved the beam keep its approval fresh
+		if u := s.uploads[pin.id]; u != nil {
+			u.LastUsed = now
+		}
 	}
 	for _, b := range completed {
 		r.CompletedBeams = append(r.CompletedBeams, b.BID())
@@ -904,13 +927,17 @@ func (s *Session) Ingest(texts []string) IngestResult {
 // make room (appending its bid to *evicted for disk cleanup), rejecting only
 // when nothing is terminal. Returns the beam if it completed from its drained
 // hold bucket.
-func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestResult, evicted *[]string) *Beam {
-	if _, ok := s.beams[fr.Session]; ok {
+func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestResult, evicted *[]string, pin *UploadPin) *Beam {
+	if b, ok := s.beams[fr.Session]; ok {
+		if !pin.owns(b) {
+			r.Bad++ // an approval never reaches a beam it did not create
+			return nil
+		}
 		r.Dup++ // the every-20-frames re-loop, for a beam in any state
 		return nil
 	}
 	m, err := proto.ParseManifest(fr.Payload)
-	if err != nil || int(fr.Total) != m.Total() {
+	if err != nil || int(fr.Total) != m.Total() || !pin.allowsManifest(m.Name, m.GzSize, m.Total()) {
 		r.Bad++
 		return nil
 	}
@@ -930,6 +957,9 @@ func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestR
 		state:     StateReceiving,
 		startedAt: now,
 	}
+	if pin != nil {
+		b.upload = pin.id
+	}
 	s.beams[fr.Session] = b
 	s.order = append(s.order, fr.Session)
 	r.Accepted++
@@ -941,6 +971,7 @@ func (s *Session) ingestManifestLocked(fr proto.Frame, now time.Time, r *IngestR
 		b.finishedAt = now
 		b.outcome = Outcome{Err: fmt.Sprintf("manifest gz_size %d exceeds the %d-byte limit", m.GzSize, s.maxGz)}
 		s.dropHeldLocked(fr.Session)
+		s.spendUploadLocked(b)
 		return nil
 	}
 	b.decoder = proto.NewDecoder(m.Total(), m.Chunk)
@@ -971,10 +1002,14 @@ func (s *Session) dropHeldLocked(sender uint32) {
 
 // ingestPayloadLocked routes a DATA/FOUNTAIN frame to its beam, or holds it when
 // the beam's MANIFEST has not arrived yet. Returns the beam if it completed.
-func (s *Session) ingestPayloadLocked(fr proto.Frame, now time.Time, r *IngestResult) *Beam {
+func (s *Session) ingestPayloadLocked(fr proto.Frame, now time.Time, r *IngestResult, pin *UploadPin) *Beam {
 	b, ok := s.beams[fr.Session]
 	if !ok {
 		s.holdLocked(fr, r)
+		return nil
+	}
+	if !pin.owns(b) {
+		r.Bad++
 		return nil
 	}
 	if !b.state.Accepting() {
@@ -1128,6 +1163,7 @@ func (s *Session) FinishBeam(b *Beam, o Outcome) {
 		b.state = StateReady
 		s.events = append(s.events, LifecycleEvent{At: b.finishedAt, Event: "beam_ready", BID: b.BID()})
 	}
+	s.spendUploadLocked(b) // a direct upload's approval is spent with its beam
 	s.notifyLocked()
 }
 
@@ -1171,6 +1207,7 @@ type Snapshot struct {
 	Reopenable  bool             `json:"reopenable"`   // opening the link would revive an inactivity-suspended session (ADR 0018)
 	HasPassword bool             `json:"has_password"` // a join password is set, so the share link omits the token (ADR 0020)
 	Knocks      []KnockView      `json:"knocks"`       // pending admission requests, oldest first (ADR 0021)
+	Uploads     []UploadView     `json:"uploads"`      // pending direct-upload requests, oldest first (ADR 0023)
 }
 
 // BeamSnapshot is one beam's state within a place.
@@ -1197,7 +1234,7 @@ func (s *Session) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, Knocks: []KnockView{}, ExpiresAt: s.bindingDeadlineLocked(), Reopenable: s.reopenableLocked(), HasPassword: s.passHash != nil}
+	snap := Snapshot{SID: s.ID, Status: s.status, Beams: []BeamSnapshot{}, Clients: []ClientSnapshot{}, Knocks: []KnockView{}, Uploads: s.pendingUploadsLocked(), ExpiresAt: s.bindingDeadlineLocked(), Reopenable: s.reopenableLocked(), HasPassword: s.passHash != nil}
 	for _, id := range s.knockOrder {
 		if k := s.knocks[id]; k != nil && k.State == "pending" {
 			snap.Knocks = append(snap.Knocks, KnockView{ID: k.ID, Name: k.Name, At: k.At})
@@ -1241,6 +1278,9 @@ func (s *Session) Snapshot() Snapshot {
 			if roleSet[id][role] {
 				roles = append(roles, string(role))
 			}
+		}
+		if c.Sender {
+			roles = append(roles, string(RoleSender))
 		}
 		snap.Clients = append(snap.Clients, ClientSnapshot{
 			ID: c.ID, Name: c.Name, Roles: roles, SessionAdmin: c.SessionAdmin,

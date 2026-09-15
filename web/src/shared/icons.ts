@@ -14,6 +14,7 @@ const PATHS = {
   bell: '<path d="M6 15V11a6 6 0 0 1 12 0v4l1.6 2.2H4.4L6 15z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
   clock: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4.2l2.8 1.8"/>',
   download: '<path d="M12 4v10m0 0l-4-4m4 4l4-4"/><path d="M5 18h14"/>',
+  upload: '<path d="M12 20V10m0 0l-4 4m4-4l4 4"/><path d="M5 6h14"/>',
   trash: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l.9 12a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7"/>',
   settings: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.6v3M12 18.4v3M21.4 12h-3M5.6 12h-3M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M18.4 18.4l-2.1-2.1M7.7 7.7L5.6 5.6"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7"/>',

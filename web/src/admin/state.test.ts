@@ -15,6 +15,7 @@ const row = (sid: string, status: Status, over: Partial<AdminRow> = {}): AdminRo
   reopenable: false,
   has_password: false,
   knocks: [],
+  uploads: [],
   label: "",
   addresses: {},
   ...over,

@@ -32,6 +32,7 @@ const place = (beams: Beam[]): Snapshot => ({
   reopenable: false,
   has_password: false,
   knocks: [],
+  uploads: [],
 });
 
 test("empty place has no beam views", () => {

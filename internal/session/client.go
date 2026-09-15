@@ -18,14 +18,17 @@ const ClientIdleTTL = 10 * time.Minute
 // Role is a stream's role within a session.
 type Role string
 
-// Stream roles.
+// Roles: relay and viewer are stream roles (the union of a client's open
+// streams); sender is a registration role — a direct uploader (ADR 0023), whose
+// frames need an approved upload.
 const (
 	RoleRelay  Role = "relay"
 	RoleViewer Role = "viewer"
+	RoleSender Role = "sender"
 )
 
 // Valid reports whether r is a known role.
-func (r Role) Valid() bool { return r == RoleRelay || r == RoleViewer }
+func (r Role) Valid() bool { return r == RoleRelay || r == RoleViewer || r == RoleSender }
 
 // Client is one participant — one device (ADR 0022; ADR 0017 keyed clients by
 // address, which folded every device behind one NAT into a single participant).
@@ -41,6 +44,7 @@ type Client struct {
 	Name         string
 	Addr         string
 	SessionAdmin bool
+	Sender       bool // a direct uploader (ADR 0023): frames need an approved upload
 	key          string
 	createdAt    time.Time
 	lastActive   time.Time
@@ -168,6 +172,16 @@ func (s *Session) VerifyClient(c *Client, addr, key string) bool {
 	return true
 }
 
+// streamingLocked reports whether c holds an open stream.
+func (s *Session) streamingLocked(c *Client) bool {
+	for sub := range s.subs {
+		if sub.client == c {
+			return true
+		}
+	}
+	return false
+}
+
 // connectedLocked is the set of clients with at least one open stream.
 func (s *Session) connectedLocked() map[string]bool {
 	connected := map[string]bool{}
@@ -214,7 +228,11 @@ func (s *Session) AllClients() []ClientSnapshot {
 		if c == nil {
 			continue
 		}
-		out = append(out, ClientSnapshot{ID: c.ID, Name: c.Name, Roles: []string{}, SessionAdmin: c.SessionAdmin, Connected: connected[id], LastActive: c.lastActive})
+		roles := []string{}
+		if c.Sender {
+			roles = append(roles, string(RoleSender)) // the receipt says who sent directly (ADR 0023)
+		}
+		out = append(out, ClientSnapshot{ID: c.ID, Name: c.Name, Roles: roles, SessionAdmin: c.SessionAdmin, Connected: connected[id], LastActive: c.lastActive})
 	}
 	return out
 }
@@ -272,6 +290,7 @@ func (s *Session) EvictClientByID(cid, byAddr string) (string, bool) {
 	kept := s.clientOrder[:0]
 	for _, id := range s.clientOrder {
 		if cl := s.clients[id]; cl != nil && gone(cl) {
+			s.endOpenUploadsLocked(id, s.now()) // an evicted sender's request goes with it
 			delete(s.clients, id)
 		} else {
 			kept = append(kept, id)

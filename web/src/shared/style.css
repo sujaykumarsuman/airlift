@@ -251,7 +251,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem;
 .clients li.off::before { background: var(--muted); box-shadow: none; }
 .clients li.off .who { color: var(--muted); }
 .clients .tags, .knocks .tags { color: var(--muted); font-size: 0.78rem; border: 1px solid var(--border); border-radius: 999px; padding: 0.05rem 0.5rem; }
-.clients li .btn, .knocks li .btn { margin-left: auto; }
+.clients li .btn { margin-left: auto; }
+/* a request's actions stay together, pushed right, and wrap as one unit */
+.knocks li .acts { margin-left: auto; display: inline-flex; gap: 0.4rem; }
 
 /* badges / pills */
 .badge {

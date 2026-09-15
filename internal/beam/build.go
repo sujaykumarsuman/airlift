@@ -9,6 +9,9 @@ type Options struct {
 	ManifestEvery int
 	Seed          *int64 // nil for a random sender session
 	Mode          Mode   // ModeAuto unless overridden
+	// Progress, when set, hears compression progress (bytes consumed of the
+	// payload); the rest of a build is quick.
+	Progress func(done, total int64)
 }
 
 // Result is a built beam: the self-contained HTML page and the facts a caller
@@ -42,7 +45,7 @@ func Build(data []byte, name string, o Options) (*Result, error) {
 		o.ManifestEvery = 20
 	}
 	session := NewSession(o.Seed)
-	d, err := Encode(data, name, o.Chunk, session, o.Mode, 0)
+	d, err := EncodeWith(data, name, o.Chunk, session, o.Mode, 0, o.Progress)
 	if err != nil {
 		return nil, err
 	}

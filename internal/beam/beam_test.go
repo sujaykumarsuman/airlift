@@ -2,6 +2,7 @@ package beam
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"math/rand"
 	"os"
@@ -254,5 +255,33 @@ func TestDefaultsAreVersion30(t *testing.T) {
 	}
 	if _, err := Encode(make([]byte, 5000), "big", MaxChunk+1, 1, ModeSequential, 0); err == nil {
 		t.Fatal("Encode accepted a chunk over the wire limit")
+	}
+}
+
+// TestCompressSlicingIsInvisible: compress feeds gzip a mebibyte at a time so
+// a caller can show progress; the stream must be byte-identical to one write,
+// or chunk counts (and the frozen vectors) would drift.
+func TestCompressSlicingIsInvisible(t *testing.T) {
+	data := make([]byte, 5<<20+12345)
+	rand.New(rand.NewSource(3)).Read(data[:len(data)/2]) // half noise, half zeros
+	var calls int
+	got, err := compress(data, func(done, total int64) {
+		calls++
+		if total != int64(len(data)) || done > total {
+			t.Fatalf("progress %d/%d", done, total)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var one bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&one, gzip.BestCompression)
+	zw.Write(data)
+	zw.Close()
+	if !bytes.Equal(got, one.Bytes()) {
+		t.Fatal("sliced compression differs from a single write")
+	}
+	if calls != 6 {
+		t.Fatalf("progress called %d times, want 6", calls)
 	}
 }

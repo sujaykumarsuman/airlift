@@ -16,6 +16,7 @@ POST   /api/sessions                  public → body {label?,password?,joiners_
                                                max_gz_bytes?,idle_ttl?}
                                              → {sid, token, client_id, name, resume_key, join_url, expires_at}
 POST   /api/sessions/{sid}/join       public → body {password, name?} → {token, client_id, name, resume_key}
+                                             (an empty password is 401 without spending the rate budget)
 POST   /api/sessions/{sid}/clients    token  → body {name?, role?, resume_key?} → {client_id, name, session_admin, roles, resume_key}
                                              (reopens a session suspended by inactivity — ADR 0018)
 GET    /api/sessions/{sid}            client → place snapshot
@@ -28,8 +29,16 @@ GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes
 PATCH  /api/sessions/{sid}            s-admin → body {password} (set or, with "", clear)
 POST   /api/sessions/{sid}/max-age    s-admin → 200 {expires_at}; +1h before the max_age cap (ADR 0018)
 POST   /api/sessions/{sid}/knock      public → body {name?} → {id, status}; ask to be admitted (ADR 0021)
-GET    /api/sessions/{sid}/knock      public → {status: pending|admitted|denied|none, token?} (poll)
+GET    /api/sessions/{sid}/knock      public → {status: pending|admitted|denied|none, token?} (poll; none once not live)
 POST   /api/sessions/{sid}/knock/{kid}  s-admin → body {decision:"admit"|"deny"}; resolve a pending knock
+POST   /api/sessions/{sid}/uploads    client → body {name, bytes, chunks, sender_session} → {id, status: pending|approved}
+                                             ask leave to send one beam directly (ADR 0023; rate_join; 403 unless
+                                             a sender; 409 for a beam already present, an approval still open
+                                             for another beam, or the pending caps)
+GET    /api/sessions/{sid}/uploads/{uid}  client → {id, status: pending|approved|denied|expired|cancelled|done, by?}
+                                             (the requester, or a session admin; else 404; 409 once not live)
+DELETE /api/sessions/{sid}/uploads/{uid}  client → 204; the requester withdraws its open request
+POST   /api/sessions/{sid}/uploads/{uid}  s-admin → body {decision:"approve"|"deny"} → 204; deny also revokes an approval
 DELETE /api/sessions/{sid}/clients/{cid}  s-admin → evict a client's address
 DELETE /api/sessions/{sid}/beams/{bid}    s-admin → remove a beam and its files
 DELETE /api/sessions/{sid}[?hard]     s-admin → soft-terminate (freeze, keep files), or ?hard purge now
@@ -97,9 +106,10 @@ the moment its device speaks again with the key. There are four tiers:
 - **token** — a valid token, no client needed: register a client.
 - **client** — token + a registered, non-evicted client proved by its key (or,
   keyless, by its bound address): snapshot, events, frames, ping, extension,
-  download.
+  download, and a direct sender's upload request/poll/withdraw.
 - **s-admin** (session admin) — a client that is a session admin: delete the
-  session, evict a client, set the password, remove a beam, extend the max_age cap.
+  session, evict a client, set the password, remove a beam, extend the max_age cap,
+  approve or deny a direct upload.
 - **a-admin** (airlift admin) — the operator, holding the tower's `admin_token`
   (ADR 0014). A fifth, orthogonal tier: `/api/admin/*` checks only the token,
   ignores `X-Airlift-Client`, and never touches the four session tiers. The token
@@ -110,8 +120,24 @@ the moment its device speaks again with the key. There are four tiers:
   when the bucket is empty, else a `401` — while a valid token is never throttled.
 
 A client's roles are the union of its open streams' roles (`?role=relay` on the
-event stream marks a scanner). The creator is the first session admin; password/
-token joiners are admins iff `joiners_admin` was set.
+event stream marks a scanner), plus `sender` for a client registered with
+`role: "sender"` — a direct sender (ADR 0023), honoured for a fresh client or a
+keyed resume only, whose own stream (`?role=sender`) adds no viewer or relay
+role. A sender's frames need an **approved upload**: without one `POST …/frames`
+is `403 upload not approved`, and with one a frame counts as `bad` unless it
+builds exactly the approved beam — its `sender_session`, a manifest matching
+the declared name, gzip size and chunk count, and a beam that approval created.
+An approved request cannot be changed (a changed pending one becomes a new
+request). The approval ends (`done`) when its beam reaches READY or FAILED —
+failing on arrival included — or is removed; a session admin revokes it by
+denying; a withdrawn, revoked or expired approval discards its unfinished
+beam. A pending request expires after 10 minutes, an approval with no accepted
+frame for 10 minutes; at most 10 pending per session and 3 per address; ended
+records are forgotten after 10 minutes; an evicted client's open request is
+cancelled. A sender with no stream and no open request is parked. This is
+consent for the command-line path, not an access control: any client can relay
+frames without approval, as a scanner does. The creator is the first session
+admin; password/token joiners are admins iff `joiners_admin` was set.
 
 There is no query-string fallback, so browsers use `fetch` throughout: a
 streaming `fetch` with a small SSE parser instead of `EventSource`, and
@@ -197,6 +223,7 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `reopenable` | bool | true when the session was suspended by inactivity and opening its link would revive it (ADR 0018); while true, access is revoked (downloads `409`) |
 | `has_password` | bool | a join password is set, so the share link is the id alone (no token) and joiners enter the password (ADR 0020) |
 | `knocks` | object[] | pending admission requests `{id, name, at}` (no address), oldest first — a session admin admits/denies each (ADR 0021) |
+| `uploads` | object[] | pending direct-upload requests `{id, client_id, client, name, bytes, chunks, at}` — the requesting participant, the beam's name, its gzip size and chunk count (no address), oldest first — a session admin approves/denies each (ADR 0023) |
 
 Each entry of `beams` is:
 
@@ -323,7 +350,8 @@ accepted extension) — and `state` otherwise (entering `PENDING_REVIEW` include
 when the viewer's address has been evicted (the stream then ends). The snapshot
 `status` is authoritative; the event name is only a hint, and clients re-render on
 any name. `?role=relay` counts the connection under `relays` and adds `relay` to
-the client's roles.
+the client's roles; `?role=sender`, from a direct sender (ADR 0023), is presence
+only — no relay count and no viewer role.
 
 ```
 event: state

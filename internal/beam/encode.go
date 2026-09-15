@@ -94,13 +94,20 @@ func NewSession(seed *int64) uint32 {
 // manifest frame followed by either N DATA frames or K FOUNTAIN packets, per
 // mode. In fountain layout, packets ≤ 0 selects proto.DefaultPackets(N).
 func Encode(data []byte, name string, chunk int, sender uint32, mode Mode, packets int) (*Dump, error) {
+	return EncodeWith(data, name, chunk, sender, mode, packets, nil)
+}
+
+// EncodeWith is Encode reporting compression progress — the slow step for a
+// large payload — as bytes of data consumed so far, out of len(data). progress
+// may be nil.
+func EncodeWith(data []byte, name string, chunk int, sender uint32, mode Mode, packets int, progress func(done, total int64)) (*Dump, error) {
 	if chunk < 1 || chunk > 0xFFFF {
 		return nil, fmt.Errorf("chunk must be 1..65535, got %d", chunk)
 	}
 	if chunk > MaxChunk {
 		return nil, fmt.Errorf("chunk %d makes %d-character frames; the wire limit is %d characters (%d bytes)", chunk, textLen(proto.HeaderLen+chunk), proto.MaxFrameText, MaxChunk)
 	}
-	blob, err := compress(data)
+	blob, err := compress(data, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -153,14 +160,23 @@ func Encode(data []byte, name string, chunk int, sender uint32, mode Mode, packe
 
 // compress gzips at level 9 with a zeroed mtime and no filename, so a given
 // input yields the same blob on a given zlib (docs/PROTOCOL.md).
-func compress(data []byte) ([]byte, error) {
+func compress(data []byte, progress func(done, total int64)) ([]byte, error) {
 	var buf bytes.Buffer
 	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := zw.Write(data); err != nil {
-		return nil, err
+	// Feeding the writer in slices changes nothing about the stream (gzip's
+	// output depends on the bytes, not on how they arrive) and lets a caller
+	// show progress.
+	const step = 1 << 20
+	for off := 0; off < len(data); off += step {
+		if _, err := zw.Write(data[off:min(off+step, len(data))]); err != nil {
+			return nil, err
+		}
+		if progress != nil {
+			progress(int64(min(off+step, len(data))), int64(len(data)))
+		}
 	}
 	if err := zw.Close(); err != nil {
 		return nil, err

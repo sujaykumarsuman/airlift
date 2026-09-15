@@ -32,7 +32,7 @@
       <article>
         <section id="licence">
           <h1>Licence, terms and privacy</h1>
-          <p class="lede">airlift is a personal project, published as free software. This page says what you may do with the software, what using the hosted tower at <code>projects.sujaykumar.dev/airlift</code> means, and — because the tower is built to be ephemeral — exactly what it handles and for how long. Last updated 14 September 2026.</p>
+          <p class="lede">airlift is a personal project, published as free software. This page says what you may do with the software, what using the hosted tower at <code>projects.sujaykumar.dev/airlift</code> means, and — because the tower is built to be ephemeral — exactly what it handles and for how long. Last updated 15 September 2026.</p>
           <h2>Licence</h2>
           <p>The software — the <code>airlift</code> binary, its source and this web UI — is released under the <strong>MIT Licence</strong>, copyright © 2026 Sujay Kumar. You may use, copy, modify, merge, publish, distribute, sublicense and sell copies of it, for any purpose, provided the copyright and permission notice stays with it. It comes <strong>without warranty of any kind</strong>. The full text is in <a href="https://github.com/sujaykumarsuman/airlift/blob/main/LICENSE"><code>LICENSE</code></a> in the repository.</p>
           <p>Running your own tower is entirely yours to do under that licence; the terms and privacy notes below apply only to the instance hosted here.</p>
@@ -59,7 +59,8 @@
           <ul>
             <li>A random session id and token.</li>
             <li>For each participating device: a random client id and a random resume key (the device's proof that it is that participant, never shown to anyone); a name — generated (like <em>brave badger</em>) or the one you typed; which roles the device is using (viewer, relay); and the network address it last connected from, used for rate limiting and eviction. Addresses are visible only to the operator's admin console, never to other participants.</li>
-            <li>The relayed QR frames and the files reassembled from them, written under the tower's data directory so they can be verified and downloaded, plus a small session receipt.</li>
+            <li>Requests to send a beam directly from the command line: the requesting participant, the beam's name and size, and the session admin's decision — never an address.</li>
+            <li>The relayed QR frames (from a scanner, or sent directly by the command line) and the files reassembled from them, written under the tower's data directory so they can be verified and downloaded, plus a small session receipt.</li>
           </ul>
           <h3>How long</h3>
           <ul>
@@ -69,7 +70,7 @@
             <li>Every session and file is wiped whenever the tower restarts — there is no persistence, by design. Rate-limit counters live in memory and expire on their own.</li>
           </ul>
           <h3>On your device</h3>
-          <p>The dashboard keeps each session it has opened — the session's id, token, your participant id and name, and a random <em>resume key</em> that proves this device is that participant — in the browser's <code>localStorage</code>, so a reload or a re-scanned link is still you. The scanner keeps the same identity and the last session it joined, so its home-screen shortcut can reopen it. Nothing there identifies you or the device beyond the session. No cookies are set. Clearing the site's data removes it all; the tower forgets the session on its own schedule regardless.</p>
+          <p>The dashboard keeps each session it has opened — the session's id, token, your participant id and name, and a random <em>resume key</em> that proves this device is that participant — in the browser's <code>localStorage</code>, so a reload or a re-scanned link is still you. The scanner keeps the same identity and the last session it joined, so its home-screen shortcut can reopen it. Nothing there identifies you or the device beyond the session. No cookies are set. Clearing the site's data removes it all; the tower forgets the session on its own schedule regardless. The command-line <code>airlift beam --to-session</code> keeps nothing on disk: its participant identity lives only for the run, and it never prints the session's token or a password.</p>
           <h3>The camera</h3>
           <p>The scanner reads QR codes on the phone itself; only the decoded text of each frame is sent to the tower. No video or images ever leave the device. The beam page shown on the air-gapped machine is a fully offline file and contacts nothing.</p>
           <h3>Logs, analytics, third parties</h3>

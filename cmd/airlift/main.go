@@ -1,7 +1,8 @@
 // Command airlift is the single binary for optical file transfer out of an
 // air-gapped machine. Two user-facing subcommands:
 //
-//	beam    bundle a folder/file(s) into a named beam and open its QR page
+//	beam    bundle a folder/file(s) into a named beam and open its QR page,
+//	        or send it straight to a session from a connected machine (-s)
 //	tower   host the airlift server that scanners relay to
 //
 // Bundling, the frame codec, QR rendering, reassembly and the dev replay all
@@ -24,7 +25,8 @@ const usage = `airlift — optical file transfer out of an air-gapped machine.
 usage: airlift <command> [flags]
 
 commands:
-  beam    bundle a folder or file(s) into a named beam (an offline QR page)
+  beam    bundle a folder or file(s) into a named beam: an offline QR page,
+          or with -s LINK straight to a session (not air-gapped)
   tower   host a session, decode relayed frames, verify and serve
 
 Run "airlift <command> -h" for a command's flags.

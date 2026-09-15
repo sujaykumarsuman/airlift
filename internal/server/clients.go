@@ -148,17 +148,26 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 		return
 	}
 	srv.reopenOnOpen(s, c)
+	// A fresh client, or a device that proved it holds the key, may become a
+	// direct sender (ADR 0023); a keyless resume may not turn someone else's
+	// client — same address, public id — into one.
+	proven := c.ID != r.Header.Get("X-Airlift-Client") || req.ResumeKey != ""
+	roles := []string{}
+	if req.Role == string(session.RoleSender) && proven {
+		s.SetSender(c)
+		roles = append(roles, string(session.RoleSender))
+	}
 	reply := map[string]any{
 		"client_id":     c.ID,
 		"name":          c.Name,
 		"session_admin": s.ClientIsAdmin(c),
-		"roles":         []string{},
+		"roles":         roles,
 	}
 	// The key goes to a fresh client or to a device that proved it already holds
 	// it — never to a keyless resume, which the bound address alone let through
 	// (that path exists for pages without a key and must not escalate a shared
 	// address into a permanent identity).
-	if c.ID != r.Header.Get("X-Airlift-Client") || req.ResumeKey != "" {
+	if proven {
 		reply["resume_key"] = c.ResumeKey()
 	}
 	writeJSON(w, http.StatusOK, reply)
@@ -184,14 +193,6 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		writeError(w, http.StatusNotFound, "no such session")
 		return
 	}
-	if d, ok := srv.lim.allow(rlJoin, addr); !ok {
-		retryAfter(w, d)
-		return
-	}
-	if d, ok := srv.lim.allow(rlJoin, "sid:"+s.ID); !ok {
-		retryAfter(w, d)
-		return
-	}
 	if s.Evicted(addr) {
 		writeError(w, http.StatusForbidden, "evicted")
 		return
@@ -208,6 +209,21 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 			return
 		}
 		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
+		return
+	}
+	// An empty password can never be right (clearing the password removes the
+	// gate), so it answers "a password is needed" without spending the join
+	// budget — `airlift beam -s` asks this way before prompting (ADR 0023).
+	if req.Password == "" {
+		writeError(w, http.StatusUnauthorized, "wrong password")
+		return
+	}
+	if d, ok := srv.lim.allow(rlJoin, addr); !ok {
+		retryAfter(w, d)
+		return
+	}
+	if d, ok := srv.lim.allow(rlJoin, "sid:"+s.ID); !ok {
+		retryAfter(w, d)
 		return
 	}
 	if !s.CheckPassword(req.Password) {

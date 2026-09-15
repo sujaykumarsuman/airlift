@@ -120,6 +120,10 @@ The player cycles frames at `--fps` (default 10):
 One pass is `N + ⌈N / 20⌉` frames, so `(N + ⌈N/20⌉) / fps` seconds; real runs
 need more than one pass because frames are missed.
 
+Frames reach the tower from a scanner relaying what it decodes, or — from a
+machine that is not air-gapped — straight from `airlift beam --to-session`
+over the same HTTP ingest (ADR 0023); the frames are identical either way.
+
 The player is one self-contained HTML file (ADR 0003): a `<canvas>` the inline
 encoder (`qrjs.js`, ADR 0011 amended) paints per frame from the frames' text
 and the `PLAN`, an inline loop driven by `requestAnimationFrame`, and keys for

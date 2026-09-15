@@ -263,6 +263,23 @@ export async function resolveKnock(
   if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
 }
 
+/** Approve or deny a pending direct upload by id (session admin, ADR 0023). */
+export async function resolveUpload(
+  sid: string,
+  token: string,
+  clientId: string,
+  uid: string,
+  decision: "approve" | "deny",
+  fetchFn: FetchFn = fetch,
+): Promise<void> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/uploads/${uid}`), {
+    method: "POST",
+    headers: { ...clientHeaders(token, clientId), "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
+}
+
 /** True for the 403 {error:"evicted"} an evicted address receives. */
 export function isEvicted(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 && err.message === "evicted";

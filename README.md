@@ -51,8 +51,9 @@ same links and a walkthrough at `/docs`.
 ## The two commands
 
 ```
-airlift beam PATH [PATH...]   bundle a folder/file(s) into a named QR page and open it
-airlift tower                 host the server that scanners relay to
+airlift beam PATH [PATH...]          bundle a folder/file(s) into a named QR page and open it
+airlift beam PATH [PATH...] -s LINK  or send it straight to a session (not air-gapped)
+airlift tower                        host the server that scanners relay to
 ```
 
 Bundling, the frame codec, QR rendering, reassembly and the camera-free dev
@@ -89,6 +90,34 @@ controls; keys: space pause · ←/→ step · +/- fps · [/] size · f fullscre
 h hide chrome. The page carries the frames as text and encodes each QR itself,
 so a beam is about 1.5 × the bytes of its frames — roughly 1.5 × the gzip for
 a sequential beam and 2 × for a fountain one (a 7 MB file makes a 14 MB page).
+
+### Straight to a session (not air-gapped)
+
+On a machine that has a network, skip the page, the screen and the camera:
+
+```bash
+airlift beam ./my-repo -s 'https://projects.sujaykumar.dev/airlift/qkf-mzt-bwp#t=…'
+```
+
+`-s LINK` (`--to-session`) bundles and encodes exactly as for a page, joins the
+session as a **sender** and asks its session admins for leave to upload: they
+see the beam's name and size under **Upload requests** on the dashboard and
+tap Approve or Deny (a sender that is itself a session admin is approved at
+once), and the tower then takes exactly that beam and verifies it as it does
+a scanned one. The CLI shows a countdown while it waits, a progress bar while
+it sends, and the tower's verdicts at the end, then prints the dashboard link
+to download from. The link decides how it gets in: a share link carries the
+token; a password session's link makes it ask for the password (typed without
+echo); a public session's bare id makes it knock and wait to be let in. Quote
+the link — its `#` and `&` mean something to a shell. `--wait 5m` changes how
+long it waits for an admin (default 3m). If the run ends early for any reason —
+the wait runs out, Ctrl-C, a lost connection — the request is withdrawn and a
+half-sent beam discarded; it exits 0 only when the beam is READY on the tower.
+The approval is the admins' say over what the command line adds, not a lock:
+anyone holding the session's token can already relay frames, as a phone's
+scanner does. Run `airlift beam` with no arguments on a terminal and it asks
+what to beam and where. The beam page stays the only way out of an air gap —
+`-s` is for machines that are already connected (ADR 0023).
 
 ### Robust by default
 

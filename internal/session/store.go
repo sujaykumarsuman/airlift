@@ -296,6 +296,7 @@ func (st *Store) Sweep(now time.Time) []string {
 	var terminated, deleted []*Session
 	for id, s := range st.sessions {
 		s.ParkIdleClients(now)
+		s.ExpireUploads(now)
 		switch s.sweepStep(now) {
 		case sweepTerminated:
 			terminated = append(terminated, s)

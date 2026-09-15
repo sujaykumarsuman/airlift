@@ -445,6 +445,52 @@ new runtime dep — CLAUDE.md holds).
   threshold and the refusal of anything else; README, the docs page, CLAUDE.md
   and ADR 0010 updated.
 
+- **Direct send and a friendlier `airlift beam` (2026-09-15, ADR 0023)**, on
+  request: from a machine that is not air-gapped, `airlift beam PATH -s LINK`
+  (`--to-session`) relays the frames over HTTP instead of writing a page. It
+  gets in by the link's token, the password (asked on a terminal with echo off,
+  three tries) or a knock (a public session's bare id); registers as a
+  `sender` participant holding a presence stream (`?role=sender`); and asks
+  leave with `POST …/uploads` — approved at once for a session-admin sender,
+  else pending until a session admin taps Approve/Deny under **Upload requests**
+  on the dashboard (snapshot `uploads`: who, the beam's name, size and chunks,
+  no address). The tower then takes exactly the declared beam (its u32, a
+  manifest matching name/size/chunks, a beam the approval created) and nothing
+  else from that sender; an approved request cannot change; the approval ends
+  with its beam (READY/FAILED — on arrival too — or removed) or an admin's
+  revoke, and a withdrawn, revoked or expired one discards its half-sent beam;
+  10 min expiry; 10 pending per session, 3 per address; ended records pruned.
+  The approval is consent for the command-line path, not an access control (a
+  token holder can relay frames as a scanner does) — the docs say so. The CLI
+  waits `--wait` (default 3m) with a countdown; any early end (timeout, Ctrl-C,
+  a lost connection, a refusal) withdraws the request; it sends in batches
+  (429/413/timeouts handled, only repeat-safe calls retried), stops after the
+  first batch if the tower failed the beam on arrival, resends gaps from the
+  bitmap, then prints the verdicts and the dashboard link; exit 0 only for READY,
+  1 for other outcomes, 2 usage, 130 interrupted; an older tower is named as
+  needing v0.1.7. A sender with no stream and no open request leaves the list at
+  once. Also: on a terminal (stdin and stderr, checked with the driver),
+  `airlift beam` with no PATH asks what to beam and where; several files ask for
+  a name; an interrupt ends any question with echo restored; long steps draw a
+  live line on stderr cut to the terminal's width (bundling, gzip, waits, a
+  progress bar with rate and ETA, verification) and one line per milestone off
+  a terminal; the page summary adds "built in"; the help is grouped.
+  `internal/term` (termios/window-size ioctls, console mode/screen buffer; the
+  standard library only). Two adversarial reviews (server authorization; CLI and
+  docs) found 26 confirmed defects between them — all fixed, each with a
+  regression test. Tests: server (approval, the exact-beam pin, a squatted u32,
+  swaps, revoke, removal, arrival failure, caps, keyless promotion, eviction,
+  expiry by accepted frames only, pruning, presence, parking, the free
+  empty-password probe) and CLI against an in-process tower (share link,
+  password, knock, admin sender, deny, timeout, interrupts mid-wait and
+  mid-upload, early stop, session ending mid-wait, an `/s` prefix, a non-tower,
+  an older tower, seed ignored, refusals, guided questions, prompt interrupt,
+  width, link parsing and redaction, path splitting, usage), all under `-race`;
+  by hand on a local tower — approve, deny and knock from the dashboard at
+  desktop and 375 px, and on a real pty the password without echo, Ctrl-C at the
+  password (exit 130, echo back on) and during the wait (request withdrawn,
+  sender gone).
+
 - **Phase 12 complete.** Next: nothing scheduled — the plan in prompts/002 is
   exhausted (Phases 5–8) and Phases 9–12 were driven by operator feedback; see
   "Open questions" and the hardware items above for what remains.

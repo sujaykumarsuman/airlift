@@ -29,6 +29,7 @@
         <a href="docs#beam">Make a beam</a>
         <a href="docs#show">Show it</a>
         <a href="docs#receive">Receive it</a>
+        <a href="docs#direct">Send directly</a>
         <a href="docs#sessions">Sessions &amp; people</a>
         <a href="docs#tips">Tips &amp; troubleshooting</a>
         <a href="docs#reference">Reference</a>
@@ -83,26 +84,29 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
           <div class="cmd"><code>airlift beam --files-from list.txt      # list.txt: "name: evidence" then one path per line</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
           <h3>What it prints</h3>
           <pre><code>  bundle   text format
-  gzip          30397 bytes   39.5 % of input
-  chunks           24 × 1311 bytes
-  mode     fountain (72 packets, LT/robust soliton)
+  gzip          34158 bytes   39.3 % of input
+  chunks           27 × 1311 bytes
+  mode     fountain (79 packets, LT/robust soliton)
   qr       version 30 (137×137 modules), ECC M, alphanumeric
-  loop             76 frames   manifest every 20   7.6 s per pass at 10 fps
-  session  0x2417dd9b
-  output   165.3 KB</code></pre>
+  loop             83 frames   manifest every 20   8.3 s per pass at 10 fps
+  session  0x59e7812e
+  output   179.0 KB   built in 4 ms</code></pre>
           <p>Small beams (under 24 chunks) play their chunks in order and repeat; larger ones switch to a <em>fountain</em> code automatically, so every pass produces fresh packets and a missed frame never means waiting for the same one to come round. The mode is picked from the size unless <code>--mode</code> says otherwise.</p>
           <h3>Options</h3>
           <table class="opts">
             <tr><th><code>--name NAME</code></th><td>The beam's name (the tower shows it). Required for several files.</td></tr>
             <tr><th><code>--fps N</code></th><td>Initial frames per second, 1–60 (default 10). Raise it once the scanner reports more decoded/s than that; 12 and 15 sit cleanly on a 60 Hz screen.</td></tr>
-            <tr><th><code>--chunk BYTES</code></th><td>Payload bytes per frame (default: what QR version 30 holds at <code>--ecc</code>, 1311 at M; at most 2712). Bigger chunks mean fewer frames but denser codes.</td></tr>
+            <tr><th><code>--chunk BYTES</code></th><td>Payload bytes per frame (default: what QR version 30 holds at <code>--ecc</code>, 1311 at M; at most 2712 — and 2712 when sending with <code>-s</code>). Bigger chunks mean fewer frames but denser codes.</td></tr>
             <tr><th><code>--version-target V</code></th><td>Pick the largest chunk that fits QR version V (1–40) instead of <code>--chunk</code>.</td></tr>
             <tr><th><code>--ecc L|M|Q|H</code></th><td>QR error correction (default M). Higher survives glare better, at fewer bytes per frame.</td></tr>
             <tr><th><code>--manifest-every K</code></th><td>Re-insert the manifest frame every K frames (default 20), so a scanner that starts mid-loop learns the beam quickly.</td></tr>
             <tr><th><code>--format auto|text|base64</code></th><td>Bundle format for folders. <code>auto</code> (the default) bundles as text — about 30 % less to send — when every file is text and none holds a boundary marker, else as base64.</td></tr>
-            <tr><th><code>--mode auto|sequential|fountain</code></th><td>Frame layout. <code>auto</code> (the default) is sequential under 24 chunks and fountain from there; <code>sequential</code> gives the smallest page and a fixed pass, <code>fountain</code> shrugs off lost frames and lets two phones share the work.</td></tr>
+            <tr><th><code>--mode auto|sequential|fountain</code></th><td>Frame layout. <code>auto</code> (the default) is sequential under 24 chunks and fountain from there (always sequential with <code>-s</code>, where nothing is lost); <code>sequential</code> gives the smallest page and a fixed pass, <code>fountain</code> shrugs off lost frames and lets two phones share the work.</td></tr>
             <tr><th><code>--out FILE</code> · <code>--no-open</code></th><td>Where to write the page (default <code>&lt;name&gt;.html</code>), and whether to open it.</td></tr>
+            <tr><th><code>-s LINK</code> · <code>--to-session LINK</code></th><td>Skip the page and send straight to the session at <code>LINK</code> — only from a machine that is not air-gapped. See <a href="docs#direct">Send directly</a>.</td></tr>
+            <tr><th><code>--wait DURATION</code></th><td>With <code>-s</code>: how long to wait for a session admin to let you in and to approve the upload (default <code>3m</code>).</td></tr>
           </table>
+          <p>Leave out the path on a terminal — just <code>airlift beam</code> — and it asks what to beam and where; several files without <code>--name</code> are asked for a name. In a script nothing is asked: a missing input is an error naming the flag.</p>
         </section>
 
         <section id="show">
@@ -137,11 +141,38 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
           </ol>
         </section>
 
+        <section id="direct">
+          <h2>Send directly</h2>
+          <p>When the machine with the files <em>is</em> on a network, the page, the screen and the camera are overhead. Give <code>airlift beam</code> the session's link instead:</p>
+          <div class="cmd"><code>airlift beam ./my-repo -s 'https://projects.sujaykumar.dev/airlift/qkf-mzt-bwp#t=…'</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
+          <p>It bundles and checks the payload exactly as for a page, joins the session as a <strong>sender</strong> and asks leave to upload. Quote the link — the <code>#</code> and <code>&amp;</code> in it mean something to a shell.</p>
+          <ul>
+            <li><b>Getting in.</b> A share link carries the session's token, so it joins at once. A password session's link (the id alone) makes it ask for the password, typed without echo. A public session's bare id makes it <em>knock</em>, and it waits for a session admin to let it in.</li>
+            <li><b>Approval.</b> Session admins see the beam's name, size and chunk count under <b>Upload requests</b> on the dashboard, with <em>Approve</em> and <em>Deny</em>; the sender shows among the participants with a <code>sender</code> tag while it waits. An approval admits exactly the beam that was described, once. A sender that is itself a session admin is approved at once.</li>
+            <li><b>Waiting.</b> The CLI counts down <code>--wait</code> (default 3 minutes). If the run ends early for any reason — nobody decides in time, Ctrl-C, a lost connection — it withdraws the request and any half-sent beam is discarded, so nothing is left for an admin to approve.</li>
+            <li><b>Sending.</b> A progress bar shows frames sent, the rate and the time left; then the tower verifies the sha256 chain and unpacks the bundle, and the CLI prints the verdicts and the dashboard link to download from. It exits <code>0</code> only when the beam is READY.</li>
+          </ul>
+          <p>A run against a tower on the same machine, approved from its dashboard:</p>
+          <pre><code>airlift beam  adr → session frc-fuz-dob
+  input         86994 bytes   sha256 9a35bd26ba9129da…
+  bundle   text format
+  gzip          34158 bytes   39.3 % of input
+  chunks           13 × 2712 bytes
+  mode     sequential
+  tower    127.0.0.1:8797 (v0.1.6-dirty) · session frc-fuz-dob
+  access   share link · you are "clever swift"
+  approval approved by nimble sparrow
+  sent     14 frames · 33.4 KB in 2 ms (13.2 MB/s)
+  verify   gzip sha256 ok · input sha256 ok · bundle ok (23 files, 82.4 KB)
+  ready    beam 94b68ddc "adr" — download it from http://127.0.0.1:8797/frc-fuz-dob</code></pre>
+          <p>The approval gives a session's admins the say over what the command line adds; it is not a lock — anyone holding the session's link can already relay frames, as a phone's scanner does. And this is for connected machines only: on an air-gapped machine the page is still the way out — nothing there can reach a tower, and it never tries.</p>
+        </section>
+
         <section id="sessions">
           <h2>Sessions &amp; people</h2>
           <ul>
             <li><b>A public session's link carries its token</b> — anyone with the link is in. A <b>password session's</b> link is the id alone; joiners enter the password. Someone with only the id can <em>knock</em>, and a session admin admits or denies them.</li>
-            <li><b>Participants</b> are devices: your laptop and your phone are two entries, each with its roles (<code>viewer</code>, <code>relay</code>). A session admin can evict one.</li>
+            <li><b>Participants</b> are devices: your laptop and your phone are two entries, each with its roles (<code>viewer</code>, <code>relay</code>, or <code>sender</code> for a CLI sending directly). A session admin can evict one. A sender leaves the list once its run ends.</li>
             <li><b>Lifetime</b> — a session stays alive while anyone is connected, up to 24 h; the last 30 minutes show a countdown and a <em>+1 h</em> for admins. If everyone leaves for 30 minutes it is suspended: opening its link reopens it. <em>End session</em> keeps the downloads for an hour; <em>Delete now</em> removes everything at once. Both live under the ⏻ menu in the nav.</li>
           </ul>
         </section>

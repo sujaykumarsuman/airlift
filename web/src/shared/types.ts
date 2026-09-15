@@ -57,6 +57,17 @@ export interface KnockView {
   at: string;
 }
 
+/** A pending direct upload from `airlift beam --to-session` (ADR 0023): who asks, what and how big; no address. */
+export interface UploadView {
+  id: string;
+  client_id: string;
+  client: string; // the requesting participant's name
+  name: string; // the beam's name
+  bytes: number; // gzip size
+  chunks: number;
+  at: string;
+}
+
 /** The five lifecycle states (ADR 0013/0014). Live() = OPEN | TERMINATING. */
 export type Status = "OPEN" | "TERMINATING" | "TERMINATED" | "PENDING_REVIEW" | "REJECTED";
 
@@ -84,6 +95,7 @@ export interface Snapshot {
   reopenable: boolean; // suspended by inactivity — opening the link revives it (ADR 0018)
   has_password: boolean; // a join password is set — the share link omits the token (ADR 0020)
   knocks: KnockView[]; // pending admission requests, oldest first (ADR 0021)
+  uploads: UploadView[]; // pending direct-upload requests, oldest first (ADR 0023)
 }
 
 /** One row of GET /api/admin/config (a setting's value, source and mutability). */

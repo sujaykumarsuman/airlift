@@ -33,18 +33,26 @@ format), `docs/API.md` (HTTP API), `docs/adr/` (locked decisions), `STATUS.md`
   dashboard's *Scan a beam* button, never by the join link itself. Any
   camera-bearing client can open it; it relays decoded frames and stops itself
   once the beam is received. Multiple scanners may feed one session.
+- **Direct sender** — `airlift beam PATH -s LINK` on a machine that is **not**
+  air-gapped (ADR 0023): the CLI joins the session as a `sender` participant and
+  relays the frames over HTTP once a session admin approves that one beam on the
+  dashboard. The approval is consent for the command-line path, not an access
+  control — any token holder can relay frames as a scanner does. It never
+  replaces the beam page for an air-gapped machine.
 
 A device's role is decided by capability and page, never by a "sender mode": the
 join link always lands on the dashboard, and a camera-bearing client *can* open
-the scanner on demand. Nothing joins the session as a sender. The sender is the
-offline beam, by construction. If a machine is already on the LAN, it is not a
-sender — it would just upload to tower directly (out of scope; see non-goals).
+the scanner on demand. Inside an air gap the sender is the offline beam, by
+construction, and nothing joins the session on its behalf. A machine that is
+already on the network can send directly with `--to-session` — as an explicit,
+admin-approved participant, never silently.
 
 ## Components
 
 - `cmd/airlift/` — Go, single static binary `airlift`. Module at repo root.
   Two user-facing subcommands only (ADR 0010): `beam` (bundle a folder/file(s)
-  into a named QR page and open it — runs inside the air gap) and `tower` (host
+  into a named QR page and open it — inside the air gap; or, with `-s LINK`, send
+  it straight to a session from a connected machine, ADR 0023) and `tower` (host
   the server on the operator's laptop). Everything else is an internal process,
   not a command. `tower` owns sessions, protocol decode, reassembly,
   verification, bundle unpack, downloads, TLS; it serves the embedded web UI.
@@ -71,6 +79,8 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
   SVG symbol set), `shared/chunks.ts` (tally chunk marks + minimap, tested),
   `shared/motion.ts` (the one entry-animation hook), `shared/copy.ts` (copy
   buttons), `shared/style.css` (tokens + every component).
+- `internal/term` — the terminal check and echo control the CLI's questions use
+  (standard library only: termios on Unix, the console mode on Windows).
 - `web/tools/scan-e2e.mjs` (`make scan-e2e`) — the scanner's end-to-end check
   without a phone: records the beam player's frames into an MJPEG, feeds it to
   headless Chrome as a fake camera on the real scan page of a throw-away tower,
@@ -179,6 +189,24 @@ sender — it would just upload to tower directly (out of scope; see non-goals).
     address, a keyless call passes only from the bound address; a client idle
     with no stream for 10 min is parked (hidden, kept) until its next keyed
     call. (ADR 0022)
+23. Direct send (not air-gapped): `airlift beam PATH -s|--to-session LINK` relays
+    the frames over HTTP instead of writing a page. The CLI gets in by the
+    link's token, the password (asked on a terminal, echo off) or a knock;
+    registers with `role: "sender"` (fresh or keyed only); and `POST …/uploads
+    {name, bytes, chunks, sender_session}` asks leave — approved at once for a
+    session-admin sender, else pending until a session admin approves/denies it
+    on the dashboard (Upload requests; snapshot `uploads`, no address). A
+    sender's frames are `403` without an approved request and `bad` unless they
+    build exactly the declared beam (u32, manifest name/size/chunks, a beam the
+    approval created); an approved request cannot change; the approval ends
+    with its beam (READY/FAILED/removed) or a revoke, and a withdrawn, revoked
+    or expired one discards the unfinished beam; 10 min expiry, 10 pending per
+    session and 3 per address. `--wait` (default 3m) bounds the CLI's waits;
+    any early end withdraws the request (`DELETE …/uploads/{uid}`). A sender
+    with no stream and no open request is parked. The approval is consent for
+    the CLI path, not an access control (a token holder can relay frames). The
+    CLI asks for what is missing only on a terminal and draws progress on
+    stderr. (ADR 0023)
 
 ## Non-goals
 

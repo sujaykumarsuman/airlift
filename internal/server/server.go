@@ -143,6 +143,10 @@ func (srv *Server) routes() {
 	m.HandleFunc("POST /api/sessions/{sid}/knock", srv.withSession(srv.knock))
 	m.HandleFunc("GET /api/sessions/{sid}/knock", srv.withSession(srv.knockPoll))
 	m.HandleFunc("POST /api/sessions/{sid}/knock/{kid}", srv.sessionAdmin(srv.knockResolve))
+	m.HandleFunc("POST /api/sessions/{sid}/uploads", srv.client(srv.requestUpload))
+	m.HandleFunc("GET /api/sessions/{sid}/uploads/{uid}", srv.client(srv.uploadPoll))
+	m.HandleFunc("POST /api/sessions/{sid}/uploads/{uid}", srv.sessionAdmin(srv.uploadResolve))
+	m.HandleFunc("DELETE /api/sessions/{sid}/uploads/{uid}", srv.client(srv.uploadCancel))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.client(srv.download))
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.sessionAdmin(srv.deleteSession))
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
@@ -458,6 +462,11 @@ func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Ses
 		writeError(w, http.StatusConflict, "session is not open")
 		return
 	}
+	pin, ok := s.UploadGate(c) // a direct sender needs an approved upload, for its one beam (ADR 0023)
+	if !ok {
+		writeError(w, http.StatusForbidden, "upload not approved")
+		return
+	}
 	if d, ok := srv.lim.allow(rlFrames, srv.clientAddr(r)); !ok {
 		retryAfter(w, d)
 		return
@@ -479,7 +488,7 @@ func (srv *Server) frames(w http.ResponseWriter, r *http.Request, s *session.Ses
 		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("at most %d frames per request", srv.opts.MaxFrames))
 		return
 	}
-	res := s.Ingest(req.Frames)
+	res := s.IngestOnly(req.Frames, pin)
 	if res.Accepted+res.Dup > 0 {
 		s.MarkActivity(c) // real progress resets the inactive clock
 	}
@@ -503,8 +512,13 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 		return
 	}
 	role := session.RoleViewer
-	if r.URL.Query().Get("role") == "relay" {
+	switch r.URL.Query().Get("role") {
+	case "relay":
 		role = session.RoleRelay
+	case "sender": // a direct sender's presence stream (ADR 0023): no viewer tag
+		if s.ClientIsSender(c) {
+			role = session.RoleSender
+		}
 	}
 	sub := s.Subscribe(c, role)
 	defer s.Unsubscribe(sub)
