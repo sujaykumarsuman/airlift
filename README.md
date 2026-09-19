@@ -163,6 +163,24 @@ with an icon, opens full-screen, works offline once loaded, and reopens the
 session it last joined. A torch button appears on cameras that have one; it
 rarely helps with a monitor.
 
+### Without the Go binary — a standalone Python beam
+
+[`sender/airlift_beam.py`](sender/airlift_beam.py) writes the same beam page
+using nothing but the Python 3 standard library — no `pip install`, no build —
+so it runs on an air-gapped machine that has Python but not the compiled
+`airlift`:
+
+```bash
+python3 airlift_beam.py ./my-repo
+```
+
+It is wire-compatible with `airlift beam`: identical frames (header, base45,
+manifest, fountain) and the same in-browser QR encoder, so a tower reassembles
+its beams exactly as it does the Go binary's. It mirrors the page flags
+(`--name --format --mode --chunk --version-target --ecc --fps --manifest-every
+--seed --out --no-open`). It only writes a page — the tower, the scanner and the
+direct `-s` send stay the Go binary's job.
+
 ## Tower (on the laptop, or hosted)
 
 The hosted tower is at [projects.sujaykumar.dev/airlift](https://projects.sujaykumar.dev/airlift);
