@@ -4,6 +4,10 @@
 # stray `go build ./cmd/airlift` output (the real build goes to bin/)
 /airlift
 
+# Python (the standalone sender/airlift_beam.py)
+__pycache__/
+*.pyc
+
 # Web
 web/node_modules/
 web/dist/*
