@@ -31,7 +31,7 @@ tagging a release is the whole deploy.
 | config (`public_url`, `listen=0.0.0.0:8443`, `trusted_proxies=10.42.0.0/16`) | the HelmRelease `values.configFile` in `apps/airlift.yaml` |
 | admin token | a SOPS-encrypted Secret `airlift-admin` (`apps/secrets/airlift-admin.enc.yaml`), decrypted in-cluster by Flux |
 | TLS | Traefik + cert-manager (Let's Encrypt) on the default `TLSStore`; `infrastructure/` in the infra repo |
-| session data | ephemeral pod storage under a `local-path` PVC; emptied on start (memory-only sessions, ADR 0005) |
+| session data | a small `longhorn-static` PVC (Longhorn, Delete-reclaim); the session `data_dir` is emptied on start regardless — memory-only sessions, ADR 0005 |
 
 ## Changing configuration
 
