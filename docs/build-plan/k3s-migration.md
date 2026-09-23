@@ -8,6 +8,12 @@ carried out — the tower now runs on k3s).
 > `make k3s-*` targets this document references were removed from the airlift repo
 > and reworked as a shared Helm chart there. This doc stays as the record of the
 > initial (kubectl-applied) migration.
+>
+> **Storage updated (2026-09-23):** the PVC moved from k3s `local-path` to Longhorn
+> (`longhorn-static`, Delete-reclaim), consolidating all persistent data onto
+> Longhorn. The `local-path` references below are the original migration's choice;
+> the volume is now Longhorn-backed. Behaviour is otherwise identical — a single RWO
+> writer with `Recreate`, sessions still emptied on start.
 
 Prepared alongside the wider move of
 `projects.sujaykumar.dev` from a Caddy + systemd host to a single-node **k3s**
