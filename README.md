@@ -99,14 +99,21 @@ On a machine that has a network, skip the page, the screen and the camera:
 airlift beam ./my-repo -s 'https://projects.sujaykumar.dev/airlift/qkf-mzt-bwp#t=…'
 ```
 
-`-s LINK` (`--to-session`) bundles and encodes exactly as for a page, joins the
-session as a **sender** and asks its session admins for leave to upload: they
-see the beam's name and size under **Upload requests** on the dashboard and
-tap Approve or Deny (a sender that is itself a session admin is approved at
-once), and the tower then takes exactly that beam and verifies it as it does
-a scanned one. The CLI shows a countdown while it waits, a progress bar while
-it sends, and the tower's verdicts at the end, then prints the dashboard link
-to download from. The link decides how it gets in: a share link carries the
+`-s LINK` (`--to-session`) joins the session as a **sender** and asks its
+session admins for leave to upload: they see the beam's name and size under
+**Upload requests** on the dashboard and tap Approve or Deny (a sender that is
+itself a session admin is approved at once). The file then **streams as it is**,
+from disk to the tower's disk — a folder or several files are bundled into a
+temporary file first — so neither end holds it in memory, compressible parts go
+gzip-encoded, and a dropped connection resumes where the tower's copy ends. The
+tower checks its sha256 (and unpacks a bundle) and it is READY. A direct send
+can be up to the tower's `max_upload_bytes` — **5 GiB** by default, against
+`max_gz_bytes` (64 MiB) for a beam scanned off a screen — and the tower refuses
+up front what its disk cannot hold (ADR 0024). The CLI shows a countdown while
+it waits, a progress bar while it sends, and the tower's verdicts at the end,
+then prints the dashboard link to download from; the dashboard hands the
+download to the browser's own download manager, so a large file goes straight
+to disk. The link decides how it gets in: a share link carries the
 token; a password session's link makes it ask for the password (typed without
 echo); a public session's bare id makes it knock and wait to be let in. Quote
 the link — its `#` and `&` mean something to a shell. `--wait 5m` changes how

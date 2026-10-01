@@ -33,6 +33,7 @@ type beamMeta struct {
 	OrigSize      int64                  `json:"orig_size"`
 	GzSHA256      string                 `json:"gz_sha256"`
 	OrigSHA256    string                 `json:"orig_sha256"`
+	Stream        bool                   `json:"stream,omitempty"` // streamed straight, not in frames (ADR 0024): no gzip blob
 	Verdicts      session.Verdicts       `json:"verdicts"`
 	Bundle        *session.BundleSummary `json:"bundle"`
 	Downloads     []string               `json:"downloads"`
@@ -127,6 +128,7 @@ func (srv *Server) removeSessionDir(sid string) {
 		srv.opts.Logf("refusing to remove suspicious session dir %q", sid)
 		return
 	}
+	srv.dropSessionReceivers(sid)
 	if err := os.RemoveAll(filepath.Join(srv.opts.DataDir, sid)); err != nil {
 		srv.opts.Logf("session %s: data cleanup failed: %v", sid, err)
 	}
@@ -142,6 +144,7 @@ func (srv *Server) removeBeamDir(sid, bid string) {
 		srv.opts.Logf("refusing to remove suspicious beam dir %q/%q", sid, bid)
 		return
 	}
+	srv.dropReceiver(sid, bid) // a streamed beam's staged upload (ADR 0024)
 	if err := os.RemoveAll(filepath.Join(srv.opts.DataDir, sid, bid)); err != nil {
 		srv.opts.Logf("session %s beam %s: data cleanup failed: %v", sid, bid, err)
 	}

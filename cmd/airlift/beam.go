@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/beam"
-	"github.com/sujaykumarsuman/airlift/internal/bundle"
 	"github.com/sujaykumarsuman/airlift/internal/proto"
 )
 
@@ -31,11 +29,11 @@ what to send
   --name NAME                       beam name (default: the folder or file name)
   --files-from LIST                 read paths from LIST, one per line ("name: X" sets the name)
   --format auto|text|base64         bundle format (default auto: text unless a file is binary)
-  --mode auto|sequential|fountain   frame layout (default auto)
-  --chunk BYTES                     payload bytes per frame (a page: what QR version 30
-                                    holds at --ecc; a session: 2712, the most a frame carries)
 
 a QR page (the default)
+  --mode auto|sequential|fountain   frame layout (default auto)
+  --chunk BYTES                     payload bytes per frame (default: what QR version 30
+                                    holds at --ecc)
   --out FILE                        where to write it (default <name>.html)
   --no-open                         do not open it in a browser
   --fps N                           initial frames per second, 1..60 (default 10)
@@ -47,7 +45,9 @@ a QR page (the default)
 straight to a session (not air-gapped)
   -s, --to-session LINK             the session's link from its dashboard; without its
                                     token you are asked for the password, or a session
-                                    admin is asked to let you in
+                                    admin is asked to let you in. The file streams as it
+                                    is (a folder as a bundle, staged in the temp dir), up
+                                    to the tower's max_upload_bytes (5 GiB by default)
   --wait DURATION                   how long to wait for a session admin to let you in and
                                     to approve the upload (default 3m)
 `
@@ -143,7 +143,7 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 			return fail(errors.New("--out writes a QR page and --to-session sends straight to a session: use one or the other"))
 		}
 		var ignored []string
-		for _, f := range []string{"no-open", "fps", "ecc", "version-target", "manifest-every", "seed"} {
+		for _, f := range []string{"mode", "chunk", "no-open", "fps", "ecc", "version-target", "manifest-every", "seed"} {
 			if set[f] {
 				ignored = append(ignored, "--"+f)
 			}
@@ -151,51 +151,31 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 		if len(ignored) > 0 {
 			fmt.Fprintf(stderr, "airlift beam: ignoring page-only flags with --to-session: %s\n", strings.Join(ignored, ", "))
 		}
-		seedPtr = nil // a fixed sender id could name a beam already in the session
 	}
 
-	data, beamName, bundleFormat, err := resolveBeam(inputs, *name, listName, *format, stderr, ask, st)
-	st.clear()
+	src, err := resolveSource(inputs, *name, listName, ask)
 	if err != nil {
 		return fail(err)
 	}
-
-	ch := *chunk
-	switch {
-	case direct && ch == 0:
-		ch = beam.MaxChunk // over HTTP a frame's size costs nothing to decode
-	case direct:
-	case *versionTarget != 0:
-		if ch, err = beam.ChunkForVersion(*versionTarget, *ecc); err != nil {
-			return fail(err)
-		}
-	case ch == 0:
-		// The default is a version-30 symbol whatever the ECC: 1311 bytes at M,
-		// more at L, fewer at Q and H.
-		if ch, err = beam.ChunkForVersion(30, *ecc); err != nil {
-			return fail(err)
-		}
-	}
+	beamName := src.name
 
 	if direct {
-		if *mode == "auto" {
-			layout = beam.ModeSequential // HTTP loses nothing, so a fountain's surplus buys nothing
-		}
-		d, err := beam.EncodeWith(data, beamName, ch, beam.NewSession(seedPtr), layout, 0, compressProgress(st))
-		st.clear()
+		// Straight to a session the payload streams from disk as it is (ADR
+		// 0024): no frames, so neither the file nor the tower holds it in memory.
+		p, err := src.stage(*format, stderr, st)
 		if err != nil {
 			return fail(err)
 		}
+		defer p.remove()
 		fmt.Fprintf(stdout, "airlift beam  %s → session %s\n", beamName, link.SID)
-		packets := 0
-		if d.Fountain != nil {
-			packets = d.Fountain.Packets
+		fmt.Fprintf(stdout, "  input    %10d bytes   sha256 %s…\n", p.size, p.sha256[:16])
+		if p.format != "" {
+			fmt.Fprintf(stdout, "  bundle   %s format\n", p.format)
 		}
-		printPayload(stdout, d.Manifest, bundleFormat, ch, packets)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 		defer stop()
 		ask.ctx = ctx // Ctrl-C ends a question too, echo restored
-		job := &sendJob{link: link, dump: d, name: beamName, wait: *wait, out: stdout, st: st, ask: ask}
+		job := &sendJob{link: link, p: p, sender: beam.NewSession(nil), name: beamName, wait: *wait, out: stdout, st: st, ask: ask}
 		err = job.run(ctx)
 		st.clear()
 		withdrawn := ""
@@ -215,6 +195,25 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "airlift beam: %v\n", err)
 		}
 		return 1
+	}
+
+	data, bundleFormat, err := src.bytes(*format, stderr, st)
+	st.clear()
+	if err != nil {
+		return fail(err)
+	}
+	ch := *chunk
+	switch {
+	case *versionTarget != 0:
+		if ch, err = beam.ChunkForVersion(*versionTarget, *ecc); err != nil {
+			return fail(err)
+		}
+	case ch == 0:
+		// The default is a version-30 symbol whatever the ECC: 1311 bytes at M,
+		// more at L, fewer at Q and H.
+		if ch, err = beam.ChunkForVersion(30, *ecc); err != nil {
+			return fail(err)
+		}
 	}
 
 	started := time.Now()
@@ -282,108 +281,6 @@ func compressProgress(st *status) func(done, total int64) {
 		}
 		st.live(fmt.Sprintf("  gzip     %s %3d %%  %s of %s  %s", bar(done, total, 20), 100*done/total, humanBytes(done), humanBytes(total), rate(done, time.Since(start))))
 	}
-}
-
-// resolveBeam turns the input paths into the payload bytes and the beam name.
-// One directory is bundled (git-aware); one file is sent as-is; several files
-// are bundled, rooted at the working directory, and need a name — from --name,
-// a `name:` line in --files-from, or a prompt on a terminal. The third result
-// is the bundle format written ("" for a single file, sent as-is).
-func resolveBeam(inputs []string, flagName, listName, format string, stderr io.Writer, ask *prompter, st *status) ([]byte, string, string, error) {
-	name := flagName
-	if name == "" {
-		name = listName
-	}
-	if len(inputs) == 1 {
-		info, err := os.Stat(inputs[0])
-		if err != nil {
-			return nil, "", "", err
-		}
-		if info.IsDir() {
-			if name == "" {
-				abs, err := filepath.Abs(inputs[0])
-				if err != nil {
-					return nil, "", "", err
-				}
-				name = filepath.Base(abs)
-			}
-			var buf bytes.Buffer
-			used, err := packBundle(&buf, inputs[0], format, nil, "", stderr, st)
-			if err != nil {
-				return nil, "", "", err
-			}
-			return buf.Bytes(), name, used, nil
-		}
-		if !info.Mode().IsRegular() {
-			return nil, "", "", fmt.Errorf("%s is not a regular file", inputs[0])
-		}
-		if name == "" {
-			name = filepath.Base(inputs[0])
-		}
-		data, err := os.ReadFile(inputs[0])
-		return data, name, "", err
-	}
-	if name == "" {
-		line, err := ask.ask("name", "a name for these files")
-		switch {
-		case errors.Is(err, errNotInteractive):
-			return nil, "", "", errors.New("several files need a name: pass --name NAME")
-		case err != nil:
-			return nil, "", "", err
-		case line == "":
-			return nil, "", "", errors.New("a name is required: pass --name NAME")
-		}
-		name = line
-	}
-	abs := make([]string, len(inputs))
-	for i, p := range inputs {
-		a, err := filepath.Abs(p)
-		if err != nil {
-			return nil, "", "", err
-		}
-		abs[i] = a
-	}
-	root := commonDir(abs)
-	explicit, err := bundle.ResolveExplicit(root, abs)
-	if err != nil {
-		return nil, "", "", err
-	}
-	var buf bytes.Buffer
-	used, err := packBundle(&buf, root, format, explicit, "", stderr, st)
-	if err != nil {
-		return nil, "", "", err
-	}
-	return buf.Bytes(), name, used, nil
-}
-
-// packBundle writes the bundle in the requested format and reports the one
-// written. "auto" tries text — the smaller, human-readable form, about 30 %
-// less gzip than base64 for source trees — and falls back to base64 when a
-// file is binary (text would drop it) or holds a boundary marker (text
-// refuses it), so nothing is ever silently left out of a beam.
-func packBundle(buf *bytes.Buffer, root, format string, explicit []string, excludeAbs string, stderr io.Writer, st *status) (string, error) {
-	w := &countingWriter{w: buf, report: func(n int64) { st.live("  bundle   reading files · " + humanBytes(n)) }}
-	if format != "auto" {
-		rep, err := bundle.Pack(w, root, format, explicit, excludeAbs)
-		if err == nil && len(rep.Skipped) > 0 {
-			// An explicit text bundle drops binaries by design; say so rather than
-			// letting a file go missing quietly.
-			st.clear()
-			fmt.Fprintf(stderr, "airlift beam: text format skipped %d binary file(s): %s\n", len(rep.Skipped), strings.Join(rep.Skipped, ", "))
-		}
-		return format, err
-	}
-	rep, err := bundle.Pack(w, root, "text", explicit, excludeAbs)
-	if err == nil && len(rep.Skipped) == 0 {
-		return "text", nil
-	}
-	if err != nil && !errors.Is(err, bundle.ErrBoundary) {
-		return "", err
-	}
-	buf.Reset()
-	w.n = 0
-	_, err = bundle.Pack(w, root, "base64", explicit, excludeAbs)
-	return "base64", err
 }
 
 // commonDir is the deepest directory that contains every absolute file path,

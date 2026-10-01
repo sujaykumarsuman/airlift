@@ -40,8 +40,8 @@ func TestDefaults(t *testing.T) {
 	if c.IdleTTL != 30*time.Minute || c.TerminatedTTL != time.Hour {
 		t.Fatalf("ttls idle=%v terminated=%v", c.IdleTTL, c.TerminatedTTL)
 	}
-	if c.MaxGzBytes != 64<<20 || c.MaxBody != 8<<20 {
-		t.Fatalf("bytes %d %d", c.MaxGzBytes, c.MaxBody)
+	if c.MaxGzBytes != 64<<20 || c.MaxBody != 8<<20 || c.MaxUploadBytes != 5<<30 {
+		t.Fatalf("bytes %d %d %d", c.MaxGzBytes, c.MaxBody, c.MaxUploadBytes)
 	}
 	if c.RateFrames != (Rate{30, time.Second}) || c.RateCreate != (Rate{5, time.Minute}) {
 		t.Fatalf("rates %+v %+v", c.RateFrames, c.RateCreate)

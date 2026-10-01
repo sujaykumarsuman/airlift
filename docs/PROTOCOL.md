@@ -120,9 +120,11 @@ The player cycles frames at `--fps` (default 10):
 One pass is `N + ⌈N / 20⌉` frames, so `(N + ⌈N/20⌉) / fps` seconds; real runs
 need more than one pass because frames are missed.
 
-Frames reach the tower from a scanner relaying what it decodes, or — from a
-machine that is not air-gapped — straight from `airlift beam --to-session`
-over the same HTTP ingest (ADR 0023); the frames are identical either way.
+Frames reach the tower from a scanner relaying what it decodes. A machine that
+is not air-gapped does not need them: `airlift beam --to-session` streams the
+payload's own bytes over HTTP instead (ADR 0024, superseding ADR 0023's relayed
+frames for the CLI), so none of the limits above — 65 535 chunks, a frame's
+2 712 bytes — bound it. A tower still takes a sender's frames from an older CLI.
 
 The player is one self-contained HTML file (ADR 0003): a `<canvas>` the inline
 encoder (`qrjs.js`, ADR 0011 amended) paints per frame from the frames' text

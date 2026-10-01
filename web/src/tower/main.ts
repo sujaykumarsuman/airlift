@@ -1,5 +1,5 @@
 import "../shared/style.css";
-import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, fetchDownload, getInfo, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, rememberClientKey, resolveKnock, resolveUpload } from "../shared/api";
+import { ApiError, createSession, deleteBeam, deleteClient, deleteSession, eventsURL, getInfo, getKnockStatus, joinSession, postExtension, postExtendMaxAge, postKnock, postPing, registerClient, rememberClientKey, requestDownloadLink, resolveKnock, resolveUpload } from "../shared/api";
 import { decodeBitmap } from "../shared/bitmap";
 import { renderChunkMarks } from "../shared/chunks";
 import { bindCopyButtons } from "../shared/copy";
@@ -549,18 +549,20 @@ function syncPinger(): void {
   else if (!live && pinger) stopPinging();
 }
 
+// download hands the browser a short-lived link to the file (ADR 0024): its
+// download manager shows progress, resumes, and writes a large result straight
+// to disk; the link names the file with Content-Disposition.
 async function download(bid: string, as: string): Promise<void> {
   if (!current || !bid) return;
   try {
-    const { blob, filename } = await fetchDownload(current.sid, current.token, bid, as, current.client_id);
-    const url = URL.createObjectURL(blob);
+    const url = await requestDownloadLink(current.sid, current.token, bid, as, current.client_id);
     const a = document.createElement("a");
     a.href = url;
-    a.download = filename;
+    a.download = "";
+    a.rel = "noopener";
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
   } catch (err) {
     notice = `Download failed: ${err instanceof Error ? err.message : String(err)}`;
     renderStatus();
@@ -919,9 +921,10 @@ function knockRow(k: KnockView): Raw {
 
 /** A pending direct upload (ADR 0023): who is sending what, and how big. */
 function uploadRow(u: UploadView): Raw {
+  const how = u.stream ? "streamed" : `${u.chunks} chunk${u.chunks === 1 ? "" : "s"}`;
   return html`<li>
     <span class="who">${u.name}</span>
-    <span class="tags">${u.client} · ${formatBytes(u.bytes)} · ${u.chunks} chunk${u.chunks === 1 ? "" : "s"}</span>
+    <span class="tags">${u.client} · ${formatBytes(u.bytes)} · ${how}</span>
     <span class="acts">
       <button class="btn small primary sym" data-approve-upload="${u.id}" title="Approve" aria-label="Approve upload">${icon("check")} <span class="lbl">Approve</span></button>
       <button class="btn small sym" data-deny-upload="${u.id}" title="Deny" aria-label="Deny upload">${icon("cross")} <span class="lbl">Deny</span></button>
@@ -974,10 +977,10 @@ function beamCard(bv: BeamView, iAmAdmin: boolean, fresh: boolean): Raw {
       ${iAmAdmin ? html`<button class="btn small sym" data-remove-beam="${b.bid}" title="Remove" aria-label="Remove">${icon("trash")} <span class="lbl">Remove</span></button>` : ""}
     </div>
     <div class="progress">
-      <div class="big">${b.total > 0 ? `${b.have} / ${b.total}` : "— / —"}</div>
+      <div class="big">${progressText(b)}</div>
       <div id="grid-${b.bid}" class="chunks" ${b.total > 0 ? "" : raw("hidden")}></div>
       <div class="metrics">
-        <span><b>${b.fps.toFixed(1)}</b> fps decoded</span>
+        ${b.stream ? html`<span><b>${formatBytes(streamRate(b))}/s</b> received</span>` : html`<span><b>${b.fps.toFixed(1)}</b> fps decoded</span>`}
         <span>elapsed <b>${formatDuration(bv.elapsedMs)}</b></span>
         <span>ETA <b>${bv.etaSec === null ? "—" : formatDuration(bv.etaSec * 1000)}</b></span>
       </div>
@@ -985,6 +988,17 @@ function beamCard(bv: BeamView, iAmAdmin: boolean, fresh: boolean): Raw {
     ${b.state === "READY" ? resultCard(b) : ""}
     ${b.state === "FAILED" ? failedCard(b) : ""}
   </div>`;
+}
+
+/** A beam's progress line: chunks for a beam in frames, bytes for a streamed one. */
+function progressText(b: Beam): string {
+  if (b.stream) return `${formatBytes(b.received ?? 0)} / ${formatBytes(b.size ?? 0)}`;
+  return b.total > 0 ? `${b.have} / ${b.total}` : "— / —";
+}
+
+/** A streamed beam's rate in bytes a second: its fps counts units of size/total bytes. */
+function streamRate(b: Beam): number {
+  return b.total > 0 ? Math.round((b.fps * (b.size ?? 0)) / b.total) : 0;
 }
 
 function verdictRow(label: string, v: Verdict | null): Raw {

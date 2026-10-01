@@ -19,7 +19,7 @@ const (
 	KSecret               // admin_token — like KString but masked in dumps/errors
 	KList                 // trusted_proxies (comma-separated IPs or CIDRs)
 	KInt                  // sessions, max_beams
-	KBytes                // max_gz_bytes, max_body ("64MiB")
+	KBytes                // max_gz_bytes, max_upload_bytes, max_body ("64MiB")
 	KDuration             // *_ttl, max_age ("10m"; "0"/"off" = zero)
 	KRate                 // rate_* ("5/min")
 )
@@ -44,6 +44,7 @@ var registry = []key{
 	{"sessions", KInt, "32", true},
 	{"max_beams", KInt, "10", true},
 	{"max_gz_bytes", KBytes, "64MiB", true},
+	{"max_upload_bytes", KBytes, "5GiB", true},
 	{"idle_ttl", KDuration, "30m", true},
 	{"max_age", KDuration, "24h", true},
 	{"warning_ttl", KDuration, "1m", true},

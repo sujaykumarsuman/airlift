@@ -65,7 +65,7 @@ func (srv *Server) adminConfig(w http.ResponseWriter, _ *http.Request) {
 func (srv *Server) applyLive(cfg *config.Config) {
 	srv.live.Store(&liveCfg{
 		MaxBody:    cfg.MaxBody,
-		Caps:       Caps{MaxGzBytes: cfg.MaxGzBytes, IdleTTL: cfg.IdleTTL, MaxAge: cfg.MaxAge, Sessions: cfg.Sessions},
+		Caps:       Caps{MaxGzBytes: cfg.MaxGzBytes, MaxUploadBytes: cfg.MaxUploadBytes, IdleTTL: cfg.IdleTTL, MaxAge: cfg.MaxAge, Sessions: cfg.Sessions},
 		WarningTTL: cfg.WarningTTL,
 		ReviewTTL:  cfg.ReviewTTL,
 	})

@@ -289,22 +289,26 @@ export function eventsURL(sid: string, role: "relay" | "viewer"): string {
   return apiURL(`api/sessions/${sid}/events${role === "relay" ? "?role=relay" : ""}`);
 }
 
-/** Downloads go through fetch so the token can travel in the header. Each
- *  download names its beam by bid (a place may hold several). */
-export async function fetchDownload(
+/** A download is a short-lived link the browser's own download manager fetches
+ *  (ADR 0024): the token travels in this request's header, never in the link,
+ *  and a result of gigabytes streams to disk instead of into a blob. Each
+ *  download names its beam by bid (a place may hold several). Returns the
+ *  link's absolute URL. */
+export async function requestDownloadLink(
   sid: string,
   token: string,
   bid: string,
   as: string,
   clientId?: string,
   fetchFn: FetchFn = fetch,
-): Promise<{ blob: Blob; filename: string }> {
-  const query = `beam=${encodeURIComponent(bid)}&as=${encodeURIComponent(as)}`;
-  const resp = await fetchFn(apiURL(`api/sessions/${sid}/download?${query}`), {
-    headers: clientHeaders(token, clientId),
+): Promise<string> {
+  const resp = await fetchFn(apiURL(`api/sessions/${sid}/download-link`), {
+    method: "POST",
+    headers: { ...clientHeaders(token, clientId), "Content-Type": "application/json" },
+    body: JSON.stringify({ beam: bid, as }),
   });
-  if (!resp.ok) throw new ApiError(resp.status, await errorMessage(resp));
-  return { blob: await resp.blob(), filename: parseFilename(resp.headers.get("Content-Disposition"), as) };
+  const { path } = await expectJSON<{ path: string; expires_at: string }>(resp);
+  return apiURL(path);
 }
 
 // ---- admin surface (ADR 0014): the admin_token is the Bearer on every call ----

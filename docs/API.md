@@ -26,17 +26,25 @@ POST   /api/sessions/{sid}/frames     client → body {frames:[base45,...]}
 POST   /api/sessions/{sid}/ping       client → 204; activity, resets the inactive clock
 POST   /api/sessions/{sid}/extension  client → body {reason?}; 204; request more time (→ PENDING_REVIEW)
 GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes (409 while suspended)
+POST   /api/sessions/{sid}/download-link  client → body {beam, as} → {path: "api/dl/<ticket>", expires_at}
+                                             a 15-minute link to one download (ADR 0024; 409 while suspended)
+GET    /api/dl/{ticket}               public → bytes; the ticket is the credential (Range-aware; 404 once expired)
 PATCH  /api/sessions/{sid}            s-admin → body {password} (set or, with "", clear)
 POST   /api/sessions/{sid}/max-age    s-admin → 200 {expires_at}; +1h before the max_age cap (ADR 0018)
 POST   /api/sessions/{sid}/knock      public → body {name?} → {id, status}; ask to be admitted (ADR 0021)
 GET    /api/sessions/{sid}/knock      public → {status: pending|admitted|denied|none, token?} (poll; none once not live)
 POST   /api/sessions/{sid}/knock/{kid}  s-admin → body {decision:"admit"|"deny"}; resolve a pending knock
-POST   /api/sessions/{sid}/uploads    client → body {name, bytes, chunks, sender_session} → {id, status: pending|approved}
-                                             ask leave to send one beam directly (ADR 0023; rate_join; 403 unless
-                                             a sender; 409 for a beam already present, an approval still open
-                                             for another beam, or the pending caps)
-GET    /api/sessions/{sid}/uploads/{uid}  client → {id, status: pending|approved|denied|expired|cancelled|done, by?}
-                                             (the requester, or a session admin; else 404; 409 once not live)
+POST   /api/sessions/{sid}/uploads    client → body {name, bytes, sha256, bundle?, sender_session} → {id, status: pending|approved}
+                                             ask leave to stream one payload directly (ADR 0024; rate_join; 403 unless
+                                             a sender; 413 over max_upload_bytes; 507 when the disk cannot hold it;
+                                             409 for a beam already present, an approval still open for another
+                                             beam, or the pending caps). Without sha256 the body is ADR 0023's
+                                             {name, bytes, chunks, sender_session}: a beam sent in frames
+POST   /api/sessions/{sid}/uploads/{uid}/data?offset=N  client → the payload's bytes from N (at most max_body,
+                                             optionally Content-Encoding: gzip) → {received, state}; 409 {received}
+                                             when N is not where the tower's copy ends (ADR 0024)
+GET    /api/sessions/{sid}/uploads/{uid}  client → {id, status: pending|approved|denied|expired|cancelled|done, by?,
+                                             received?} (the requester, or a session admin; else 404; 409 once not live)
 DELETE /api/sessions/{sid}/uploads/{uid}  client → 204; the requester withdraws its open request
 POST   /api/sessions/{sid}/uploads/{uid}  s-admin → body {decision:"approve"|"deny"} → 204; deny also revokes an approval
 DELETE /api/sessions/{sid}/clients/{cid}  s-admin → evict a client's address
@@ -63,8 +71,9 @@ GET    /legal                         MIT licence, terms of use, privacy notes (
 ```
 
 `GET /api/info` is unauthenticated (the pages call it before any session
-exists) and never logged; `caps` carries `{max_gz_bytes, idle_ttl,
-max_age, sessions}` (the `*_ttl`/`max_age` in seconds).
+exists) and never logged; `caps` carries `{max_gz_bytes, max_upload_bytes,
+idle_ttl, max_age, sessions}` (the `*_ttl`/`max_age` in seconds; `max_upload_bytes`
+is `0` when the tower keeps no `data_dir` and so takes no streamed upload).
 
 ## Client address and X-Forwarded-For
 
@@ -106,7 +115,8 @@ the moment its device speaks again with the key. There are four tiers:
 - **token** — a valid token, no client needed: register a client.
 - **client** — token + a registered, non-evicted client proved by its key (or,
   keyless, by its bound address): snapshot, events, frames, ping, extension,
-  download, and a direct sender's upload request/poll/withdraw.
+  download and download link, and a direct sender's upload request/poll/withdraw
+  and its streamed parts.
 - **s-admin** (session admin) — a client that is a session admin: delete the
   session, evict a client, set the password, remove a beam, extend the max_age cap,
   approve or deny a direct upload.
@@ -139,9 +149,17 @@ consent for the command-line path, not an access control: any client can relay
 frames without approval, as a scanner does. The creator is the first session
 admin; password/token joiners are admins iff `joiners_admin` was set.
 
-There is no query-string fallback, so browsers use `fetch` throughout: a
-streaming `fetch` with a small SSE parser instead of `EventSource`, and
-`fetch` → blob → object URL instead of a bare download link.
+A request that carries `sha256` is **streamed** (ADR 0024): its approval admits
+no frames (`403`), only `POST …/uploads/{uid}/data` parts from its own sender,
+each starting where the tower's copy ends. Everything above about approval,
+expiry (a part that lands keeps it fresh), withdrawal and parking holds for it.
+
+There is no query-string fallback for the token, so browsers use `fetch`: a
+streaming `fetch` with a small SSE parser instead of `EventSource`. A download
+is a **link** the client asks for with the token in the header — `POST
+…/download-link` returns `api/dl/<ticket>`, a random 128-bit ticket good for one
+download of one beam for 15 minutes — which the browser's own download manager
+fetches (ADR 0024). The token itself never appears in a URL.
 
 Unknown `sid` → `404`. Missing or wrong token → `401`. A valid token with no or
 an unknown client → `401`; a client id from a different address, a non-admin on
@@ -159,6 +177,10 @@ Session expiry is no longer refreshed by every call — see Lifecycle.
 | Limit | Value | Response |
 | --- | ---: | --- |
 | Request body | `max_body` (default 8 MiB) | `413` |
+| Streamed part | `max_body` bytes of the payload, encoded or not | `413 {received}`: what fit is kept |
+| Beam in frames (a QR scan) | `max_gz_bytes` (default 64 MiB) of gzip | the beam fails on arrival |
+| Streamed upload | `max_upload_bytes` (default 5 GiB) | `413` on the request |
+| Disk for a streamed upload | free space under `data_dir`, less uploads in flight and 64 MiB; a bundle needs 3× its size | `507` on the request or the first part; mid-upload, the beam fails |
 | Frames per `POST /frames` | 500 | `413` |
 | Frame string | 4096 characters | counted as `bad` |
 | Beams per place | `max_beams` (default 10) | over-cap MANIFEST auto-evicts the oldest terminal beam, else counted as `bad` |
@@ -178,7 +200,8 @@ limit); the frames rate check runs before the body is read.
 A session is a *place*: a named join field holding a list of beams (ADR 0015).
 Each beam is one payload, identified by its sender-session u32 from the frame
 header (`bid` = eight hex digits). A beam is born the instant its MANIFEST
-arrives and runs its own state machine; beams in one place decode, verify and
+arrives (a streamed direct upload's, with its first part — ADR 0024) and runs its
+own state machine; beams in one place decode, verify and
 complete independently. There is no place-level transfer state — an empty place
 simply has no beams yet.
 
@@ -223,7 +246,7 @@ Returned by `GET /api/sessions/{sid}` and pushed as each SSE event.
 | `reopenable` | bool | true when the session was suspended by inactivity and opening its link would revive it (ADR 0018); while true, access is revoked (downloads `409`) |
 | `has_password` | bool | a join password is set, so the share link is the id alone (no token) and joiners enter the password (ADR 0020) |
 | `knocks` | object[] | pending admission requests `{id, name, at}` (no address), oldest first — a session admin admits/denies each (ADR 0021) |
-| `uploads` | object[] | pending direct-upload requests `{id, client_id, client, name, bytes, chunks, at}` — the requesting participant, the beam's name, its gzip size and chunk count (no address), oldest first — a session admin approves/denies each (ADR 0023) |
+| `uploads` | object[] | pending direct-upload requests `{id, client_id, client, name, bytes, chunks, stream, at}` — the requesting participant, the beam's name and size (a streamed payload's own size, else its gzip size and chunk count; no address), oldest first — a session admin approves/denies each (ADR 0023, ADR 0024) |
 
 Each entry of `beams` is:
 
@@ -242,8 +265,11 @@ Each entry of `beams` is:
 | `downloads` | string[] | subset of `raw`, `file`, `zip`; empty unless `READY` |
 | `saved_path` | string or null | the beam's directory under `data_dir` once written (ADR 0016); null before it verifies, for a FAILED beam, or when the on-disk write failed and it is served from memory |
 | `error` | string or null | the failure reason in `FAILED` |
-| `started_at` | RFC 3339 or null | when the beam's MANIFEST arrived |
+| `started_at` | RFC 3339 or null | when the beam's MANIFEST (or, streamed, its first part) arrived |
 | `finished_at` | RFC 3339 or null | when the beam's verification ended, either way |
+| `stream` | bool | a streamed direct upload (ADR 0024): `size`/`received` count its bytes; `total`/`have` count units of `size/total` bytes (1 MiB, doubled past 8 192 units), `fps` units per second, and `gz_sha` stays null |
+| `size` | int | a streamed beam's payload size; 0 otherwise |
+| `received` | int | the bytes of a streamed beam the tower holds; 0 otherwise |
 
 `expected` and `actual` are hex digests for `gz_sha` and `orig_sha`. For
 `bundle` they are prose: `"7 files, each matching its sha256"` against
@@ -389,6 +415,25 @@ source after a `PATCH` — the dump shows it, so a pinned key is visibly pinned
 rather than silently ignored. The change survives a restart via the overrides file
 (which lives under the tower's home, never `data_dir`).
 
+## Streamed upload
+
+An approved streamed request (ADR 0024) is sent as `POST
+/api/sessions/{sid}/uploads/{uid}/data?offset=N` parts, `Content-Type:
+application/octet-stream`, optionally `Content-Encoding: gzip`, rate-limited
+like frames (`rate_frames`). `N` must be the byte the tower's copy ends at —
+`0` for the first part, which creates the beam (RECEIVING; at the beam cap it
+evicts the oldest finished beam, else `409`) — and anything else is `409
+{"error":"offset mismatch","received":R}`. A part carries at most `max_body`
+bytes of the payload: more is `413 {received}` with what fit kept. A body that
+breaks off keeps what arrived; the sender resumes from the `received` a poll
+of the request reports. The reply is `{received, state}`. The tower appends to
+`<data_dir>/<sid>/.<bid>.upload/raw/<name>` and hashes as it goes; when every
+byte is in, the beam is VERIFYING, the sha256 is compared, a repobundle is
+unpacked from the file into `tree/` and zipped, and the directory is renamed to
+`<sid>/<bid>/` — READY, or FAILED with nothing kept. `403` once the approval
+has ended (withdrawn, revoked, expired, spent), `404` for another sender's
+request, `415` for another encoding, `507` when the disk is full.
+
 ## Downloads
 
 `GET /api/sessions/{sid}/download?beam=<bid>&as=…`. `beam` is the eight-hex-digit
@@ -409,6 +454,13 @@ file via `http.ServeContent`, so responses carry `Content-Length` and honour
 carry `Content-Disposition: attachment`, the content type, and
 `Cache-Control: no-store`, and the token stays in the header.
 
+The dashboard downloads by link (ADR 0024): `POST …/download-link {beam, as}`
+makes the same checks (`400`/`404`/`409` as above, `409` while suspended), counts
+as activity, and returns `{path, expires_at}`; `GET <base>/<path>` — `api/dl/<ticket>`
+— then serves the download with no other credential for 15 minutes, `Range`
+included, so the browser's download manager can show progress and resume. An
+unknown or expired ticket is `404`.
+
 ## On disk
 
 On READY a beam's verified output is written under `<data_dir>/<sid>/<bid>/`
@@ -424,6 +476,9 @@ On READY a beam's verified output is written under `<data_dir>/<sid>/<bid>/`
     <stem>.zip       the zip of the tree (a bundle of more than one file)
     meta.json        sid, bid, sender_session, name, state, sizes, hashes,
                      verdicts, bundle summary, downloads, started_at, finished_at
+                     (stream: true for a streamed upload, which has no gzip blob)
+<sid>/.<bid>.upload/ a streamed upload while it arrives and verifies (ADR 0024),
+                     renamed to <bid>/ when READY, deleted otherwise
 ```
 
 `session.json` is (re)written on each beam READY and on every lifecycle

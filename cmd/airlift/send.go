@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,28 +11,35 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/sujaykumarsuman/airlift"
-	"github.com/sujaykumarsuman/airlift/internal/beam"
 	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
 // Direct send (ADR 0023): on a machine that is not air-gapped,
-// `airlift beam PATH --to-session LINK` skips the QR page and relays the
-// frames to the session over HTTP, as a scanner would — after a session admin
-// approves the upload on the dashboard.
+// `airlift beam PATH --to-session LINK` skips the QR page and sends the
+// payload to the session over HTTP — after a session admin approves the upload
+// on the dashboard. It streams the payload's own bytes from disk, a part at a
+// time, resuming where the tower's copy ends (ADR 0024), so a file of
+// gigabytes goes as easily as a note.
+
+// streamSince is the first release whose tower takes streamed uploads.
+const streamSince = "v1.1.0"
 
 var (
-	pollEvery      = 1500 * time.Millisecond // admission, approval and verification polls
-	verifyTimeout  = 5 * time.Minute         // how long the tower may take to verify
-	maxBatchFrames = 500                     // the tower's frames-per-POST cap (server.DefaultMaxFrames)
-	maxBatchChars  = 4 << 20                 // and a body well inside its 8 MiB default
-	// httpClient bounds the wait for a reply, not the whole request: a batch of
-	// frames on a slow uplink may take minutes to go up and must not be cut off.
+	pollEvery     = 1500 * time.Millisecond // admission, approval and verification polls
+	verifyTimeout = 5 * time.Minute         // how long the tower may take to verify, plus a second per verifyRate bytes
+	verifyRate    = int64(4 << 20)          // bytes a second a tower is assumed to unpack a bundle, at worst
+	partSize      = int64(4 << 20)          // payload bytes per POST: well inside the tower's 8 MiB max_body
+	minPart       = int64(64 << 10)         // halving on a timeout or a 413 stops here
+	stallPause    = time.Second             // the pause after a dropped part, times the drops in a row
+	// httpClient bounds the wait for a reply, not the whole request: a part on
+	// a slow uplink may take a while to go up and must not be cut off.
 	httpClient   = &http.Client{Transport: sendTransport()}
 	streamClient = &http.Client{Transport: sendTransport()} // the presence stream runs for the whole send
 )
@@ -281,13 +288,14 @@ func (t *tower) beam(ctx context.Context, bid string) (*beamView, error) {
 
 // sendJob is one direct send: what to send and how the run talks.
 type sendJob struct {
-	link sessionLink
-	dump *beam.Dump
-	name string
-	wait time.Duration
-	out  io.Writer // the permanent record (stdout)
-	st   *status   // the live line (stderr)
-	ask  *prompter
+	link   sessionLink
+	p      *payload
+	sender uint32 // the beam's id in the session (its bid in hex)
+	name   string
+	wait   time.Duration
+	out    io.Writer // the permanent record (stdout)
+	st     *status   // the live line (stderr)
+	ask    *prompter
 
 	t        *tower
 	request  string // the open upload request, withdrawn if the run ends early
@@ -327,8 +335,15 @@ func (j *sendJob) run(ctx context.Context) error {
 	}
 	host := strings.TrimPrefix(strings.TrimPrefix(j.t.base, "https://"), "http://")
 	j.say("  tower    %s (%s) · session %s", host, info.Version, j.link.SID)
-	if info.Caps.MaxGzBytes > 0 && j.dump.Manifest.GzSize > info.Caps.MaxGzBytes {
-		return outcome("this tower takes at most %s of gzip per beam; this one is %s", humanBytes(info.Caps.MaxGzBytes), humanBytes(j.dump.Manifest.GzSize))
+	switch limit := info.Caps.MaxUploadBytes; {
+	case limit <= 0:
+		return outcome("this tower (%s) does not take streamed uploads — it needs airlift %s or later", info.Version, streamSince)
+	case j.p.size > limit:
+		have, most := humanBytes(j.p.size), humanBytes(limit)
+		if have == most { // rounding hides the difference: say it in bytes
+			have, most = fmt.Sprintf("%d bytes", j.p.size), fmt.Sprintf("%d bytes", limit)
+		}
+		return outcome("this tower takes at most %s per upload; this one is %s", most, have)
 	}
 
 	access, err := j.join(ctx)
@@ -351,18 +366,22 @@ func (j *sendJob) run(ctx context.Context) error {
 	}
 	j.say("  approval %s", by)
 
-	sent, took, err := j.upload(ctx)
+	wire, took, err := j.upload(ctx)
 	if err != nil {
 		return err
 	}
-	j.say("  sent     %d frames · %s in %s (%s)", sent, humanBytes(j.dump.Manifest.GzSize), elapsed(took), rate(j.dump.Manifest.GzSize, took))
+	line := fmt.Sprintf("  sent     %s in %s (%s)", humanBytes(j.p.size), elapsed(took), rate(j.p.size, took))
+	if wire < j.p.size*9/10 {
+		line += fmt.Sprintf(", %s on the wire", humanBytes(wire))
+	}
+	j.say("%s", line)
 	return j.verify(ctx)
 }
 
 type towerInfo struct {
 	Version string `json:"version"`
 	Caps    struct {
-		MaxGzBytes int64 `json:"max_gz_bytes"`
+		MaxUploadBytes int64 `json:"max_upload_bytes"`
 	} `json:"caps"`
 }
 
@@ -536,7 +555,7 @@ func (j *sendJob) withdraw() {
 
 // approval asks leave to upload and waits for a session admin's decision.
 func (j *sendJob) approval(ctx context.Context) (string, error) {
-	t, m := j.t, j.dump.Manifest
+	t, p := j.t, j.p
 	path := "/api/sessions/" + t.sid + "/uploads"
 	request := func() (string, error) {
 		var r struct {
@@ -544,7 +563,7 @@ func (j *sendJob) approval(ctx context.Context) (string, error) {
 			Status string `json:"status"`
 		}
 		err := t.callPatient(ctx, http.MethodPost, path, map[string]any{
-			"name": j.name, "bytes": m.GzSize, "chunks": m.Total(), "sender_session": j.dump.SenderSession,
+			"name": j.name, "bytes": p.size, "sha256": p.sha256, "bundle": p.format != "", "sender_session": j.sender,
 		}, &r)
 		switch statusOf(err) {
 		case 0:
@@ -554,8 +573,8 @@ func (j *sendJob) approval(ctx context.Context) (string, error) {
 			j.request = r.ID
 			return r.Status, nil
 		case http.StatusNotFound:
-			return "", outcome("this tower does not take direct uploads — it needs airlift v0.1.7 or later")
-		case http.StatusConflict, http.StatusForbidden:
+			return "", outcome("this tower does not take direct uploads — it needs airlift %s or later", streamSince)
+		case http.StatusConflict, http.StatusForbidden, http.StatusRequestEntityTooLarge, http.StatusInsufficientStorage:
 			return "", outcome("the tower refused the upload request: %s", err.(*apiError).msg)
 		}
 		return "", fmt.Errorf("upload request: %w", err)
@@ -574,19 +593,13 @@ func (j *sendJob) approval(ctx context.Context) (string, error) {
 			j.withdraw()
 			return "", outcome("no session admin approved the upload within %s (--wait); the request was withdrawn", j.wait)
 		}
-		j.st.set("approval", fmt.Sprintf("  waiting  for a session admin to approve %q (%s) · %s left", j.name, humanBytes(m.GzSize), clock(left)))
+		j.st.set("approval", fmt.Sprintf("  waiting  for a session admin to approve %q (%s) · %s left", j.name, humanBytes(p.size), clock(left)))
 		if err := sleepCtx(ctx, min(pollEvery, left)); err != nil {
 			return "", err
 		}
-		var r struct {
-			Status string `json:"status"`
-			By     string `json:"by"`
-		}
-		if err := t.callPatient(ctx, http.MethodGet, path+"/"+j.request, nil, &r); err != nil {
-			if statusOf(err) == http.StatusConflict {
-				return "", outcome("the session is not open any more")
-			}
-			return "", fmt.Errorf("upload request: %w", err)
+		r, err := j.poll(ctx)
+		if err != nil {
+			return "", err
 		}
 		switch r.Status {
 		case session.UploadApproved:
@@ -610,152 +623,223 @@ func (j *sendJob) approval(ctx context.Context) (string, error) {
 	}
 }
 
-// upload posts every frame in batches, then fills any gap the tower reports.
-func (j *sendJob) upload(ctx context.Context) (int, time.Duration, error) {
-	t, d := j.t, j.dump
-	bid := fmt.Sprintf("%08x", d.SenderSession)
-	total := int64(len(d.Frames))
-	chunk := int64(d.Manifest.Chunk)
+// uploadPoll is a request's state as its sender polls it.
+type uploadPoll struct {
+	Status   string `json:"status"`
+	By       string `json:"by"`
+	Received int64  `json:"received"`
+}
+
+func (j *sendJob) poll(ctx context.Context) (uploadPoll, error) {
+	var r uploadPoll
+	err := j.t.callPatient(ctx, http.MethodGet, "/api/sessions/"+j.t.sid+"/uploads/"+j.request, nil, &r)
+	if err != nil {
+		if statusOf(err) == http.StatusConflict {
+			j.request = ""
+			return r, outcome("the session is not open any more")
+		}
+		return r, fmt.Errorf("upload request: %w", err)
+	}
+	return r, nil
+}
+
+// partReply is the tower's answer to a part: where its copy ends, and the
+// beam's state.
+type partReply struct {
+	Received *int64        `json:"received"`
+	State    session.State `json:"state"`
+	Error    string        `json:"error"`
+}
+
+// sendPart POSTs one part of the payload at offset, gzip-encoded when enc says.
+func (t *tower) sendPart(ctx context.Context, path string, offset int64, body []byte, enc string) (partReply, error) {
+	var r partReply
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.base+path+"?offset="+strconv.FormatInt(offset, 10), bytes.NewReader(body))
+	if err != nil {
+		return r, err
+	}
+	t.headers(req)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if enc != "" {
+		req.Header.Set("Content-Encoding", enc)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return r, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return r, err
+	}
+	if json.Unmarshal(data, &r) != nil && resp.StatusCode < 300 {
+		return r, errBadReply
+	}
+	if resp.StatusCode >= 300 {
+		ae := &apiError{status: resp.StatusCode, msg: r.Error}
+		if ae.msg == "" {
+			ae.msg = strings.TrimSpace(string(data))
+		}
+		if len(ae.msg) > 200 {
+			ae.msg = ae.msg[:200] + "…"
+		}
+		if n, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil {
+			ae.retryAfter = time.Duration(n) * time.Second
+		}
+		return r, ae
+	}
+	return r, nil
+}
+
+// gzipPart compresses a part, at the speed end: a link is slower than gzip.
+func gzipPart(p []byte) []byte {
+	var buf bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	zw.Write(p)
+	zw.Close()
+	return buf.Bytes()
+}
+
+// upload streams the payload, a part at a time, from where the tower's copy
+// ends: a part the tower answers with another offset is sent again from
+// there, a dropped connection resumes from the offset a poll reports, and a
+// part that is too big or too slow is halved. A part goes gzip-encoded when
+// that saves a tenth; once one does not, the next few go as they are. It
+// returns the bytes that went on the wire.
+func (j *sendJob) upload(ctx context.Context) (int64, time.Duration, error) {
+	t, size := j.t, j.p.size
+	f, err := os.Open(j.p.path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	path := "/api/sessions/" + t.sid + "/uploads/" + j.request + "/data"
 	start := time.Now()
-	var sent int64
+	var offset, wire int64
+	part, ceiling := partSize, partSize // ceiling: the most the tower takes (its max_body), once a 413 says
+	buf := make([]byte, part)
+	plain, stalls, smooth := 0, 0, 0
 	show := func() {
 		el := time.Since(start)
 		eta := "—"
-		if sent > 0 && el > 0 {
-			eta = clock(time.Duration(float64(el) * float64(total-sent) / float64(sent)))
+		if offset > 0 && el > 0 {
+			eta = clock(time.Duration(float64(el) * float64(size-offset) / float64(offset)))
 		}
-		j.st.set("send "+quarter(sent, total), fmt.Sprintf("  sending  %s %3d %%  %d/%d frames  %s  %s left",
-			bar(sent, total, 20), 100*sent/max(total, 1), sent, total, rate(min(sent*chunk, d.Manifest.GzSize), el), eta))
+		j.st.set("send "+quarter(offset, size), fmt.Sprintf("  sending  %s %3d %%  %s of %s  %s  %s left",
+			bar(offset, size, 20), 100*offset/max(size, 1), humanBytes(offset), humanBytes(size), rate(offset, el), eta))
 	}
-	// refused explains why the tower stopped taking frames: the beam failed on
-	// arrival (its reason), or the approval ended.
-	refused := func(msg string) error {
-		if b, err := t.beam(ctx, bid); err == nil && b != nil && b.State == session.StateFailed && b.Error != nil {
-			j.request = ""
-			return outcome("the beam failed on the tower: %s", *b.Error)
+	show()
+	// Done once a part has been taken and the tower holds every byte (an empty
+	// payload is one empty part).
+	for taken := false; !taken || offset < size; {
+		n := min(part, size-offset)
+		chunk := buf[:n]
+		if m, err := f.ReadAt(chunk, offset); int64(m) < n {
+			return wire, time.Since(start), fmt.Errorf("reading %s: %v (did it change while being sent?)", j.p.path, err)
 		}
-		j.request = ""
-		return outcome("the tower stopped taking this upload (%s) — a session admin withdrew the approval, or it expired", msg)
-	}
-	posted, batch, checked := 0, maxBatchFrames, false
-	postAll := func(frames []string) error {
-		for i, stalls := 0, 0; i < len(frames); {
-			n, chars := 0, 0
-			for i+n < len(frames) && n < batch && chars+len(frames[i+n]) <= maxBatchChars {
-				chars += len(frames[i+n])
-				n++
-			}
-			n = max(n, 1)
-			var r struct {
-				Accepted int `json:"accepted"`
-			}
-			err := t.call(ctx, http.MethodPost, "/api/sessions/"+t.sid+"/frames", map[string]any{"frames": frames[i : i+n]}, &r)
-			var ae *apiError
-			switch {
-			case err == nil:
-			case errors.As(err, &ae) && ae.status == http.StatusTooManyRequests:
-				if err := sleepCtx(ctx, max(ae.retryAfter, time.Second)); err != nil {
-					return err
-				}
-				continue
-			case errors.As(err, &ae) && ae.status == http.StatusRequestEntityTooLarge:
-				if batch == 1 {
-					return fmt.Errorf("the tower refuses even a single frame as too large: %w", err)
-				}
-				batch = max(1, n/2)
-				continue
-			case errors.As(err, &ae) && ae.status == http.StatusForbidden:
-				return refused(ae.msg)
-			case errors.As(err, &ae) && ae.status == http.StatusConflict:
-				j.request = ""
-				return outcome("the session is not open any more")
-			case ctx.Err() == nil && isNetErr(err) && stalls < 4:
-				stalls++ // frames are safe to repeat; a slow link gets smaller batches
-				if isTimeout(err) {
-					batch = max(1, n/2)
-				}
-				if err := sleepCtx(ctx, time.Duration(stalls)*time.Second); err != nil {
-					return err
-				}
-				continue
-			default:
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				return fmt.Errorf("frames: %w", err)
-			}
-			i += n
-			posted += n
-			sent = min(sent+int64(n), total)
-			show()
-			if !checked { // the first batch carried the manifest: did the tower take the beam?
-				checked = true
-				b, err := t.beam(ctx, bid)
-				switch {
-				case err != nil:
-					return fmt.Errorf("session: %w", err)
-				case b == nil:
-					return outcome("the tower did not take the beam — the session may be full of beams still receiving")
-				case b.State == session.StateFailed:
-					j.request = ""
-					reason := "refused"
-					if b.Error != nil {
-						reason = *b.Error
-					}
-					return outcome("the beam failed on the tower: %s", reason)
-				}
-			}
+		body, enc := chunk, ""
+		if plain > 0 {
+			plain--
+		} else if z := gzipPart(chunk); len(z) < len(chunk)*9/10 {
+			body, enc = z, "gzip"
+		} else {
+			plain = 8
 		}
-		return nil
-	}
-	if err := postAll(d.Frames); err != nil {
-		return posted, time.Since(start), err
-	}
-	// HTTP loses nothing, so a gap means the tower dropped frames; resend what
-	// it lacks, twice at most.
-	for round := 0; ; round++ {
-		b, err := t.beam(ctx, bid)
+		r, err := t.sendPart(ctx, path, offset, body, enc)
+		var ae *apiError
 		switch {
-		case err != nil:
-			return posted, time.Since(start), fmt.Errorf("session: %w", err)
-		case b == nil:
+		case err == nil && r.Received == nil:
+			return wire, time.Since(start), errBadReply
+		case err == nil:
+			stalls, taken = 0, true
+			wire += int64(len(body))
+			offset = *r.Received
+			if smooth++; part < ceiling && smooth >= 4 { // the link recovered: grow the parts back
+				part, smooth = min(ceiling, part*2), 0
+			}
+			if r.State == session.StateFailed {
+				return wire, time.Since(start), j.failed(ctx)
+			}
+		case errors.As(err, &ae) && ae.status == http.StatusConflict && r.Received != nil:
+			offset = *r.Received // the tower's copy ends elsewhere: go on from there
+		case errors.As(err, &ae) && ae.status == http.StatusRequestEntityTooLarge:
+			smooth = 0
+			if part == minPart {
+				return wire, time.Since(start), fmt.Errorf("the tower refuses even a %s part: %w", humanBytes(part), err)
+			}
+			part = max(minPart, part/2)
+			ceiling = part
+			if r.Received != nil {
+				offset = *r.Received
+			}
+		case errors.As(err, &ae) && ae.status == http.StatusTooManyRequests:
+			if err := sleepCtx(ctx, max(ae.retryAfter, time.Second)); err != nil {
+				return wire, time.Since(start), err
+			}
+		case errors.As(err, &ae) && ae.status == http.StatusForbidden:
+			return wire, time.Since(start), j.refused(ctx, ae.msg)
+		case errors.As(err, &ae) && ae.status == http.StatusConflict && ae.msg == "session is not open":
 			j.request = ""
-			return posted, time.Since(start), outcome("the beam was removed from the session")
-		case b.Have >= b.Total || b.State != session.StateReceiving:
-			return posted, time.Since(start), nil
-		case round == 2:
-			return posted, time.Since(start), outcome("the tower still lacks %d of %d chunks after resending", b.Total-b.Have, b.Total)
+			return wire, time.Since(start), outcome("the session is not open any more")
+		case errors.As(err, &ae) && (ae.status == http.StatusConflict || ae.status == http.StatusInsufficientStorage ||
+			ae.status == http.StatusInternalServerError):
+			j.request = ""
+			if b, berr := t.beam(ctx, fmt.Sprintf("%08x", j.sender)); berr == nil && b != nil && b.State == session.StateFailed && b.Error != nil {
+				return wire, time.Since(start), outcome("the beam failed on the tower: %s", *b.Error)
+			}
+			return wire, time.Since(start), outcome("the tower did not take the upload: %s", ae.msg)
+		case ctx.Err() == nil && isNetErr(err) && stalls < 6:
+			// Parts are safe to repeat. One that did not get through in one go —
+			// a timeout, or a proxy cutting a slow request — is too big for this
+			// link: halve it. The tower keeps what arrived, so a link that only
+			// moves a piece of each part is still moving.
+			stalls, smooth = stalls+1, 0
+			part = max(minPart, part/2)
+			if err := sleepCtx(ctx, time.Duration(stalls)*stallPause); err != nil {
+				return wire, time.Since(start), err
+			}
+			if p, perr := j.poll(ctx); perr == nil && p.Status == session.UploadApproved {
+				if p.Received > offset {
+					stalls = 0
+				}
+				offset = p.Received
+			}
+		default:
+			if ctx.Err() != nil {
+				return wire, time.Since(start), ctx.Err()
+			}
+			return wire, time.Since(start), fmt.Errorf("upload: %w", err)
 		}
-		if err := postAll(missingFrames(d, b)); err != nil {
-			return posted, time.Since(start), err
-		}
+		show()
 	}
+	return wire, time.Since(start), nil
 }
 
-// missingFrames is what to resend for a beam the tower reports incomplete:
-// exactly the missing chunks for a sequential dump, every packet again for a
-// fountain one (any packets help), with the manifest first.
-func missingFrames(d *beam.Dump, b *beamView) []string {
-	if d.Fountain != nil {
-		return d.Frames
+// refused explains why the tower stopped taking the upload: the beam failed
+// (its reason), or the approval ended.
+func (j *sendJob) refused(ctx context.Context, msg string) error {
+	j.request = ""
+	if b, err := j.t.beam(ctx, fmt.Sprintf("%08x", j.sender)); err == nil && b != nil && b.State == session.StateFailed && b.Error != nil {
+		return outcome("the beam failed on the tower: %s", *b.Error)
 	}
-	bits, err := base64.StdEncoding.DecodeString(b.Bitmap)
-	if err != nil {
-		return d.Frames
+	return outcome("the tower stopped taking this upload (%s) — a session admin withdrew the approval, or it expired", msg)
+}
+
+// failed reports a beam the tower failed while it was still arriving.
+func (j *sendJob) failed(ctx context.Context) error {
+	j.request = ""
+	reason := "refused"
+	if b, err := j.t.beam(ctx, fmt.Sprintf("%08x", j.sender)); err == nil && b != nil && b.Error != nil {
+		reason = *b.Error
 	}
-	out := []string{d.Frames[0]}
-	for i := 0; i < len(d.Frames)-1; i++ {
-		if i/8 >= len(bits) || bits[i/8]&(0x80>>(i%8)) == 0 {
-			out = append(out, d.Frames[1+i])
-		}
-	}
-	return out
+	return outcome("the beam failed on the tower: %s", reason)
 }
 
 // verify waits for the tower's verdict and reports it.
 func (j *sendJob) verify(ctx context.Context) error {
-	bid := fmt.Sprintf("%08x", j.dump.SenderSession)
-	deadline := time.Now().Add(verifyTimeout)
+	bid := fmt.Sprintf("%08x", j.sender)
+	limit := verifyTimeout + time.Duration(j.p.size/verifyRate)*time.Second // a large bundle takes a while to unpack
+	deadline := time.Now().Add(limit)
 	spin := 0
 	for {
 		b, err := j.t.beam(ctx, bid)
@@ -782,10 +866,14 @@ func (j *sendJob) verify(ctx context.Context) error {
 			return outcome("the beam failed on the tower: %s", reason)
 		}
 		if time.Now().After(deadline) {
-			return outcome("the tower did not finish verifying within %s", verifyTimeout)
+			return outcome("the tower did not finish verifying within %s", limit)
 		}
 		spin++
-		j.st.set("verify", "  checking sha256 and unpacking on the tower "+strings.Repeat(".", 1+spin%3))
+		what := "  checking sha256 on the tower "
+		if j.p.format != "" {
+			what = "  checking sha256 and unpacking on the tower "
+		}
+		j.st.set("verify", what+strings.Repeat(".", 1+spin%3))
 		if err := sleepCtx(ctx, min(pollEvery, 500*time.Millisecond)); err != nil {
 			return err
 		}
@@ -803,7 +891,10 @@ func verdictLine(b *beamView) string {
 		}
 		return label + " MISMATCH"
 	}
-	parts := []string{stage("gzip sha256", b.Verdicts.GzSHA), stage("input sha256", b.Verdicts.OrigSHA)}
+	parts := []string{stage("input sha256", b.Verdicts.OrigSHA)}
+	if b.Verdicts.GzSHA != nil { // a beam sent in frames (an older path) checks its gzip blob first
+		parts = append([]string{stage("gzip sha256", b.Verdicts.GzSHA)}, parts...)
+	}
 	if b.Verdicts.Bundle != nil {
 		p := stage("bundle", b.Verdicts.Bundle)
 		if b.Bundle != nil {

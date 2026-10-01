@@ -30,6 +30,11 @@ export interface Beam {
   error: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+  /** A streamed direct upload (ADR 0024) counts in bytes: size is the payload's,
+   *  received what the tower holds; total/have count size/total-byte units. */
+  stream?: boolean;
+  size?: number;
+  received?: number;
 }
 
 /** One participant of a place, as it appears in the snapshot. */
@@ -63,8 +68,9 @@ export interface UploadView {
   client_id: string;
   client: string; // the requesting participant's name
   name: string; // the beam's name
-  bytes: number; // gzip size
-  chunks: number;
+  bytes: number; // the payload's size when streamed, else its gzip size
+  chunks: number; // 0 when streamed
+  stream?: boolean; // the payload's own bytes, not frames (ADR 0024)
   at: string;
 }
 
@@ -119,6 +125,7 @@ export interface Info {
   admin_enabled: boolean;
   caps: {
     max_gz_bytes: number;
+    max_upload_bytes?: number; // a streamed direct upload's cap (ADR 0024)
     idle_ttl: number;
     max_age: number;
     sessions: number;
