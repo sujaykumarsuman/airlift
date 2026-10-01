@@ -865,7 +865,7 @@ func TestSendSurvivesLostReplies(t *testing.T) {
 		case off+r.ContentLength == int64(len(payload)) && !lost.Load(): // noise: parts go uncompressed
 			lost.Store(true)
 			tw.ts.Config.Handler.ServeHTTP(httptest.NewRecorder(), r) // the tower takes the last part…
-			conn, _, _ := w.(http.Hijacker).Hijack()                   // …and its reply is lost
+			conn, _, _ := w.(http.Hijacker).Hijack()                  // …and its reply is lost
 			conn.Close()
 		default:
 			tw.ts.Config.Handler.ServeHTTP(w, r)
