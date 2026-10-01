@@ -163,21 +163,13 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 	if direct {
 		// Straight to a session the file streams from disk and is kept as it is
 		// (ADR 0024): no frames and no bundle, so neither end holds it in memory
-		// and the tower stores exactly what was sent. A folder goes as one zip.
-		p, err := src.stage(st)
-		if err != nil {
-			return fail(err)
-		}
-		defer p.remove()
-		fmt.Fprintf(stdout, "airlift beam  %s → session %s\n", p.name, link.SID)
-		if p.temp {
-			fmt.Fprintf(stdout, "  archive  zip of %d file(s), sent as it is\n", p.files)
-		}
-		fmt.Fprintf(stdout, "  input    %10d bytes   sha256 %s…\n", p.size, p.sha256[:16])
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+		// and the tower stores exactly what was sent. A folder goes as one zip,
+		// staged once the tower has said how much it takes.
+		fmt.Fprintf(stdout, "airlift beam  %s → session %s\n", src.uploadName(), link.SID)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
 		defer stop()
 		ask.ctx = ctx // Ctrl-C ends a question too, echo restored
-		job := &sendJob{link: link, p: p, sender: beam.NewSession(nil), name: p.name, wait: *wait, out: stdout, st: st, ask: ask}
+		job := &sendJob{link: link, src: src, sender: beam.NewSession(nil), name: src.uploadName(), wait: *wait, out: stdout, st: st, ask: ask}
 		err = job.run(ctx)
 		st.clear()
 		withdrawn := ""

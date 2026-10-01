@@ -233,10 +233,12 @@ func (s *Session) forgetEndedLocked(clientID string) {
 	s.uploadOrder = kept
 }
 
-// endOpenUploadsLocked cancels a client's open request (it was evicted).
+// endOpenUploadsLocked cancels a client's open request (it was evicted) and,
+// like a withdraw, discards the beam it had started: nobody else can finish it.
 func (s *Session) endOpenUploadsLocked(clientID string, now time.Time) {
 	if u := s.openUploadLocked(clientID); u != nil {
 		u.State, u.EndedAt = UploadCancelled, now
+		s.discardUnfinishedLocked(u)
 	}
 }
 

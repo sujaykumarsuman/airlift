@@ -54,7 +54,10 @@ encoding is transport only). The first part creates the beam, RECEIVING, under
 `<data_dir>/<sid>/.<bid>.upload/raw/<name>`; the sha256 is computed
 incrementally, so when the last byte lands verification is a comparison, not a
 pass over gigabytes. A part cut short keeps what arrived and the sender resumes
-from `received`; a dropped connection costs at most one part. There is **no
+from `received`; a dropped connection costs at most one part. A part's body
+must keep moving (each read within 60 s, the part within 15 minutes) and no
+cleanup ever waits on a part in flight, so a stalled sender holds nothing but
+its own upload. Only progress keeps an approval fresh. There is **no
 bundle stage**: whatever the file holds — a repobundle included — it is the
 result, downloadable as `raw`. On a match the staging directory is renamed to
 `<data_dir>/<sid>/<bid>/` (ADR 0016's layout, `raw/` and `meta.json`, which
@@ -74,7 +77,8 @@ dashboard now asks `POST /api/sessions/{sid}/download-link {beam, as}` (client
 tier, the same checks as a download, counted as activity) for a path
 `api/dl/<ticket>` and hands it to the browser's download manager: progress,
 `Range` resume, straight to disk. The ticket is 128 random bits, names one
-download of one beam, lasts 15 minutes and is held only in memory; the session
+download of one beam for the participant who asked (an evicted participant's
+links stop working), lasts 15 minutes and is held only in memory; the session
 token still never appears in a URL. The admin console keeps its token-header
 download.
 

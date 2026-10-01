@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/flate"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -121,10 +122,27 @@ func (p *payload) remove() {
 	}
 }
 
+// uploadName is what the tower keeps a direct send as: the file's own name,
+// or <name>.zip for a folder or several files.
+func (src beamSource) uploadName() string {
+	if src.file != "" || strings.EqualFold(filepath.Ext(src.name), ".zip") {
+		return src.name
+	}
+	return src.name + ".zip"
+}
+
+// errTooBig is a payload over the tower's max_upload_bytes, found while
+// staging: size is the file's, or 0 for a zip stopped at the limit.
+type errTooBig struct{ limit, size int64 }
+
+func (e errTooBig) Error() string { return fmt.Sprintf("over %d bytes", e.limit) }
+
 // stage readies the payload for a direct send without holding it in memory:
 // a single file is hashed where it is; a folder or several files are zipped
-// to a temporary file, hashed as it is written.
-func (src beamSource) stage(st *status) (*payload, error) {
+// to a temporary file, hashed as it is written. It stops — removing what it
+// wrote — as soon as the payload passes limit (> 0) or ctx ends, so an
+// oversized or interrupted run costs neither the disk nor the wait.
+func (src beamSource) stage(ctx context.Context, st *status, limit int64) (*payload, error) {
 	if src.file != "" {
 		f, err := os.Open(src.file)
 		if err != nil {
@@ -135,8 +153,11 @@ func (src beamSource) stage(st *status) (*payload, error) {
 		if err != nil {
 			return nil, err
 		}
+		if limit > 0 && info.Size() > limit {
+			return nil, errTooBig{limit, info.Size()}
+		}
 		h := sha256.New()
-		n, err := io.Copy(h, &progressReader{r: f, total: info.Size(), st: st, verb: "hashing", start: time.Now()})
+		n, err := io.Copy(h, &progressReader{ctx: ctx, r: f, total: info.Size(), st: st, verb: "hashing", start: time.Now()})
 		st.clear()
 		if err != nil {
 			return nil, err
@@ -154,13 +175,9 @@ func (src beamSource) stage(st *status) (*payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	name := src.name
-	if !strings.EqualFold(filepath.Ext(name), ".zip") {
-		name += ".zip"
-	}
-	p := &payload{path: f.Name(), name: name, temp: true}
+	p := &payload{path: f.Name(), name: src.uploadName(), temp: true}
 	h := sha256.New()
-	n, err := zipFiles(io.MultiWriter(f, h), src.root, files, st)
+	n, err := zipFiles(ctx, io.MultiWriter(f, h), src.root, files, st, limit)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -181,9 +198,10 @@ func (src beamSource) stage(st *status) (*payload, error) {
 // zipFiles writes a zip of the regular files rel (slash paths under root) to
 // w, each streamed from disk with its path, mode and time, and returns how
 // many went in. Symlinks and anything not a regular file are skipped, as a
-// bundle skips them; archive/zip moves to zip64 for a file over 4 GiB.
-func zipFiles(w io.Writer, root string, rels []string, st *status) (int, error) {
-	cw := &countingWriter{w: w}
+// bundle skips them; archive/zip moves to zip64 for a file over 4 GiB. It
+// stops when the zip passes limit (> 0) or ctx ends.
+func zipFiles(ctx context.Context, w io.Writer, root string, rels []string, st *status, limit int64) (int, error) {
+	cw := &countingWriter{w: &limitWriter{w: w, limit: limit}}
 	zw := zip.NewWriter(cw)
 	zw.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
 		return flate.NewWriter(out, flate.BestSpeed) // the link is slower than this
@@ -209,7 +227,7 @@ func zipFiles(w io.Writer, root string, rels []string, st *status) (int, error) 
 			return n, err
 		}
 		cw.report = func(b int64) { st.live(fmt.Sprintf("  zipping  %d files · %s", n+1, humanBytes(b))) }
-		_, err = io.Copy(zf, in)
+		_, err = io.Copy(zf, &progressReader{ctx: ctx, r: in})
 		in.Close()
 		if err != nil {
 			return n, err
@@ -252,8 +270,26 @@ func packBundle(w io.Writer, reset func() error, root, format string, explicit [
 	return "base64", err
 }
 
-// progressReader draws a bar for a long read (a large file being hashed).
+// limitWriter fails a write that would take the output past limit (> 0).
+type limitWriter struct {
+	w     io.Writer
+	n     int64
+	limit int64
+}
+
+func (l *limitWriter) Write(p []byte) (int, error) {
+	if l.limit > 0 && l.n+int64(len(p)) > l.limit {
+		return 0, errTooBig{l.limit, 0}
+	}
+	n, err := l.w.Write(p)
+	l.n += int64(n)
+	return n, err
+}
+
+// progressReader stops a long read when ctx ends and, given a total and a
+// status, draws a bar for it (a large file being hashed).
 type progressReader struct {
+	ctx   context.Context
 	r     io.Reader
 	n     int64
 	total int64
@@ -263,9 +299,12 @@ type progressReader struct {
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
+	if err := p.ctx.Err(); err != nil {
+		return 0, err
+	}
 	n, err := p.r.Read(b)
 	p.n += int64(n)
-	if p.total >= 64<<20 {
+	if p.st != nil && p.total >= 64<<20 {
 		p.st.live(fmt.Sprintf("  %-8s %s %3d %%  %s of %s  %s", p.verb, bar(p.n, p.total, 20), 100*min(p.n, p.total)/p.total,
 			humanBytes(p.n), humanBytes(p.total), rate(p.n, time.Since(p.start))))
 	}

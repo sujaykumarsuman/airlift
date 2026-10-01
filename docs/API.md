@@ -27,8 +27,10 @@ POST   /api/sessions/{sid}/ping       client → 204; activity, resets the inact
 POST   /api/sessions/{sid}/extension  client → body {reason?}; 204; request more time (→ PENDING_REVIEW)
 GET    /api/sessions/{sid}/download?beam=<bid>&as=raw|file|zip  client → bytes (409 while suspended)
 POST   /api/sessions/{sid}/download-link  client → body {beam, as} → {path: "api/dl/<ticket>", expires_at}
-                                             a 15-minute link to one download (ADR 0024; 409 while suspended)
-GET    /api/dl/{ticket}               public → bytes; the ticket is the credential (Range-aware; 404 once expired)
+                                             a 15-minute link to one download (ADR 0024; rate_frames; 409 while
+                                             suspended; a repeat by the same client reuses its link)
+GET    /api/dl/{ticket}               public → bytes; the ticket is the credential (Range-aware; 404 once expired,
+                                             403 once its participant has been evicted)
 PATCH  /api/sessions/{sid}            s-admin → body {password} (set or, with "", clear)
 POST   /api/sessions/{sid}/max-age    s-admin → 200 {expires_at}; +1h before the max_age cap (ADR 0018)
 POST   /api/sessions/{sid}/knock      public → body {name?} → {id, status}; ask to be admitted (ADR 0021)
@@ -151,7 +153,10 @@ admin; password/token joiners are admins iff `joiners_admin` was set.
 
 A request that carries `sha256` is **streamed** (ADR 0024): its approval admits
 no frames (`403`), only `POST …/uploads/{uid}/data` parts from its own sender,
-each starting where the tower's copy ends, and the file is kept as sent. Large
+each starting where the tower's copy ends, and the file is kept as sent. Only a
+part that adds bytes keeps the approval fresh (an approval kept alive by empty
+parts still expires); evicting the sender, like a withdraw, discards its
+unfinished beam. Large
 files are this path's alone: `max_upload_bytes` bounds it, while a beam in
 frames stays within `max_gz_bytes`. Everything above about approval,
 expiry (a part that lands keeps it fresh), withdrawal and parking holds for it.
@@ -428,7 +433,9 @@ evicts the oldest finished beam, else `409`) — and anything else is `409
 {"error":"offset mismatch","received":R}`. A part carries at most `max_body`
 bytes of the file: more is `413 {received}` with what fit kept. A body that
 breaks off keeps what arrived; the sender resumes from the `received` a poll
-of the request reports. The reply is `{received, state}`. The tower appends to
+of the request reports. A body must keep moving — each read within 60 s, the
+whole part within 15 minutes — or it is cut, keeping what arrived. The reply is
+`{received, state}`. The tower appends to
 `<data_dir>/<sid>/.<bid>.upload/raw/<name>` and hashes as it goes; when every
 byte is in, the beam is VERIFYING, the sha256 is compared, and the directory is
 renamed to `<sid>/<bid>/` — READY with the file kept exactly as sent (no bundle
@@ -462,7 +469,11 @@ makes the same checks (`400`/`404`/`409` as above, `409` while suspended), count
 as activity, and returns `{path, expires_at}`; `GET <base>/<path>` — `api/dl/<ticket>`
 — then serves the download with no other credential for 15 minutes, `Range`
 included, so the browser's download manager can show progress and resume. An
-unknown or expired ticket is `404`.
+unknown or expired ticket is `404`; a ticket whose participant has since been
+evicted (or a caller at an evicted address) is `403`. The link call is
+rate-limited like frames, a repeat by the same client for the same download
+reuses its link while most of its life is left, and at most 4 096 links are
+outstanding on a tower (`503` + `Retry-After` beyond).
 
 ## On disk
 

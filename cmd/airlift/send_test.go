@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -441,7 +442,7 @@ func quietJob(t *testing.T, link, name string, data []byte, sender uint32) *send
 		t.Fatal(err)
 	}
 	st := newStatus(io.Discard)
-	p, err := beamSource{name: name, file: path}.stage(st)
+	p, err := beamSource{name: name, file: path}.stage(context.Background(), st, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,5 +838,110 @@ func zipMatchesTree(t *testing.T, path, root string) {
 		if got[k] != v {
 			t.Fatalf("zip entry %q differs from the tree", k)
 		}
+	}
+}
+
+// TestSendSurvivesLostReplies: a proxy that drops the reply to the final part
+// (the tower took it) and answers one part 502 — the CLI goes on and reports
+// READY, not a failure.
+func TestSendSurvivesLostReplies(t *testing.T) {
+	tw := startTower(t, 0)
+	old := stallPause
+	stallPause = time.Millisecond
+	t.Cleanup(func() { stallPause = old })
+	small(t, 64<<10)
+	payload := noiseBytes(300<<10, 41)
+	var parts atomic.Int32
+	var lost atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/data") {
+			tw.ts.Config.Handler.ServeHTTP(w, r)
+			return
+		}
+		off, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+		switch n := parts.Add(1); {
+		case n == 2: // a gateway hiccup: the tower never saw it
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+		case off+r.ContentLength == int64(len(payload)) && !lost.Load(): // noise: parts go uncompressed
+			lost.Store(true)
+			tw.ts.Config.Handler.ServeHTTP(httptest.NewRecorder(), r) // the tower takes the last part…
+			conn, _, _ := w.(http.Hijacker).Hijack()                   // …and its reply is lost
+			conn.Close()
+		default:
+			tw.ts.Config.Handler.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(proxy.Close)
+	a := tw.create(t, `{"joiners_admin":true}`)
+	src := filepath.Join(t.TempDir(), "lost.bin")
+	os.WriteFile(src, payload, 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"beam", src, "-s", proxy.URL + "/" + a.SID + "#t=" + a.Token}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, stdout.String(), stderr.String())
+	}
+	if !lost.Load() || !strings.Contains(stdout.String(), "ready    beam ") {
+		t.Fatalf("lost=%v stdout:\n%s", lost.Load(), stdout.String())
+	}
+}
+
+// TestSendStopsAnOversizeFolderEarly: a folder whose zip passes the tower's
+// limit is refused while zipping, and the partial zip is removed.
+func TestSendStopsAnOversizeFolderEarly(t *testing.T) {
+	tw := startTower(t, 4<<10)
+	a := tw.create(t, `{"joiners_admin":true}`)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"beam", multiTree, "-s", tw.ts.URL + "/" + a.SID + "#t=" + a.Token}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "takes at most 4.0 KB per upload; tree.zip comes to more") {
+		t.Fatalf("exit %d\n%s", code, stderr.String())
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Fatalf("the partial zip was left behind: %v", left)
+	}
+	if u := tw.snapshot(t, a).Uploads; len(u) != 0 {
+		t.Fatalf("nothing should have been asked: %+v", u)
+	}
+}
+
+// TestStageCancelled: an interrupt while zipping removes the partial zip.
+func TestStageCancelled(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	src := beamSource{name: "tree", root: multiTree}
+	if _, err := src.stage(ctx, newStatus(io.Discard), 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled stage: %v", err)
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Fatalf("the partial zip was left behind: %v", left)
+	}
+}
+
+// TestSendWithdrawsAfterAFirstPartRefusal: a tower whose disk fills between
+// the request and the first part refuses that part (507); the CLI withdraws
+// the still-open request rather than leaving it to expire.
+func TestSendWithdrawsAfterAFirstPartRefusal(t *testing.T) {
+	var calls atomic.Int32
+	tw := startTower(t, 0, func(o *server.Options) {
+		o.DiskFree = func(string) (int64, bool) {
+			if calls.Add(1) == 1 {
+				return 1 << 40, true // the request fits…
+			}
+			return 0, true // …the first part does not
+		}
+	})
+	a := tw.create(t, `{"joiners_admin":true}`)
+	src := filepath.Join(t.TempDir(), "full.bin")
+	os.WriteFile(src, noiseBytes(10<<10, 42), 0o644)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"beam", src, "-s", tw.ts.URL + "/" + a.SID + "#t=" + a.Token}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "the tower did not take the upload") || !strings.Contains(stderr.String(), "withdrawn") {
+		t.Fatalf("exit %d\n%s", code, stderr.String())
+	}
+	sess, _ := tw.store.Get(a.SID)
+	if b := sess.Snapshot().Beams; len(b) != 0 {
+		t.Fatalf("beams %+v", b)
 	}
 }

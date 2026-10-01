@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
@@ -16,39 +17,73 @@ import (
 // screen, not for gigabytes. A participant instead asks for a short-lived link
 // to one download of one beam and lets the browser's own download manager
 // fetch it: progress, resume (Range) and no copy in memory. The link carries a
-// random ticket, never the session token; it opens only that download, and
-// only for ticketTTL.
+// random ticket, never the session token; it opens only that download, only
+// for ticketTTL, and only while the participant who asked for it is still in
+// the session.
 
-const ticketTTL = 15 * time.Minute
+const (
+	ticketTTL  = 15 * time.Minute
+	maxTickets = 4096 // outstanding across the tower; a client asking again reuses its own
+)
 
 type ticket struct {
 	sid     string
 	sender  uint32
 	as      string
+	client  string // who asked: an evicted participant's links stop working
 	expires time.Time
 }
 
+func (t ticket) key() string { return fmt.Sprintf("%s/%08x/%s/%s", t.sid, t.sender, t.as, t.client) }
+
 type tickets struct {
-	mu sync.Mutex
-	m  map[string]ticket
+	mu     sync.Mutex
+	m      map[string]ticket
+	byKey  map[string]string // ticket.key() → id, so a repeat click reuses the link
+	pruned time.Time
 }
 
-func (ts *tickets) issue(t ticket, now time.Time) string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	id := base64.RawURLEncoding.EncodeToString(b[:])
+// issue mints a link for t, or hands back the one its client already holds
+// for the same download while most of its life is left. It refuses (false)
+// when maxTickets are outstanding.
+func (ts *tickets) issue(t ticket, now time.Time) (string, bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	if ts.m == nil {
-		ts.m = map[string]ticket{}
+		ts.m, ts.byKey = map[string]ticket{}, map[string]string{}
 	}
-	for k, old := range ts.m { // forget the expired as new ones are issued
-		if !now.Before(old.expires) {
-			delete(ts.m, k)
+	if now.Sub(ts.pruned) >= time.Minute || len(ts.m) >= maxTickets { // forget the expired, now and then
+		for id, old := range ts.m {
+			if !now.Before(old.expires) {
+				delete(ts.m, id)
+				if ts.byKey[old.key()] == id {
+					delete(ts.byKey, old.key())
+				}
+			}
+		}
+		ts.pruned = now
+	}
+	if id, ok := ts.byKey[t.key()]; ok {
+		if old, live := ts.m[id]; live && old.expires.Sub(now) > ticketTTL/2 {
+			return id, true
 		}
 	}
+	if len(ts.m) >= maxTickets {
+		return "", false
+	}
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	id := base64.RawURLEncoding.EncodeToString(b[:])
 	ts.m[id] = t
-	return id
+	ts.byKey[t.key()] = id
+	return id, true
+}
+
+// expiry is when ticket id lapses (zero once it has gone).
+func (ts *tickets) expiry(id string) time.Time {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.m[id].expires
 }
 
 func (ts *tickets) lookup(id string, now time.Time) (ticket, bool) {
@@ -68,10 +103,14 @@ func (srv *Server) now() time.Time {
 	return time.Now()
 }
 
-// downloadLink issues a link to one READY beam's download (client tier): the
-// same checks as a download, and like one it counts as activity. The reply's
-// path is relative to the tower's base.
+// downloadLink issues a link to one READY beam's download (client tier,
+// rate_frames): the same checks as a download, and like one it counts as
+// activity. The reply's path is relative to the tower's base.
 func (srv *Server) downloadLink(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
+	if d, ok := srv.lim.allow(rlFrames, srv.clientAddr(r)); !ok {
+		retryAfter(w, d)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, srv.maxBody())
 	var req struct {
 		Beam string `json:"beam"`
@@ -93,10 +132,17 @@ func (srv *Server) downloadLink(w http.ResponseWriter, r *http.Request, s *sessi
 	if !srv.downloadable(w, s, uint32(sender), req.As) {
 		return
 	}
-	s.MarkActivity(c)
 	now := srv.now()
-	id := srv.tickets.issue(ticket{sid: s.ID, sender: uint32(sender), as: req.As, expires: now.Add(ticketTTL)}, now)
-	writeJSON(w, http.StatusOK, map[string]any{"path": "api/dl/" + id, "expires_at": now.Add(ticketTTL)})
+	t := ticket{sid: s.ID, sender: uint32(sender), as: req.As, client: c.ID, expires: now.Add(ticketTTL)}
+	id, ok := srv.tickets.issue(t, now)
+	if !ok {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusServiceUnavailable, "too many download links outstanding; try again in a minute")
+		return
+	}
+	s.MarkActivity(c)
+	exp := srv.tickets.expiry(id)
+	writeJSON(w, http.StatusOK, map[string]any{"path": "api/dl/" + id, "expires_at": exp})
 }
 
 // downloadable answers the error a download of (sender, as) would get, and
@@ -128,6 +174,10 @@ func (srv *Server) ticketDownload(w http.ResponseWriter, r *http.Request) {
 	s, ok := srv.opts.Store.Get(t.sid)
 	if !ok {
 		writeError(w, http.StatusNotFound, "no such session")
+		return
+	}
+	if _, member := s.ClientByID(t.client); !member || s.Evicted(srv.clientAddr(r)) {
+		writeError(w, http.StatusForbidden, "this download link was for a participant who is no longer in the session")
 		return
 	}
 	if s.Reopenable() {

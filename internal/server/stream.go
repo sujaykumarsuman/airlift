@@ -15,7 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/sujaykumarsuman/airlift/internal/session"
 )
@@ -33,8 +35,36 @@ import (
 // the filesystem's own bookkeeping need somewhere to go.
 const diskMargin = 64 << 20
 
-// receiver is one streamed upload being written. Its mutex orders the parts;
-// left is guarded by Server.recvMu.
+// A part's body must keep moving: each read lands within partIdle and the
+// whole part within partMax, or the read fails and the tower keeps what
+// arrived. The tower sets no ReadTimeout of its own, and a stalled body would
+// otherwise hold its receiver indefinitely.
+var (
+	partIdle = 60 * time.Second
+	partMax  = 15 * time.Minute
+)
+
+// deadlineBody is a part's request body under those deadlines. A writer that
+// cannot set one (a test's recorder) leaves the read unbounded.
+type deadlineBody struct {
+	io.ReadCloser
+	rc    *http.ResponseController
+	until time.Time
+}
+
+func (d *deadlineBody) Read(p []byte) (int, error) {
+	dl := time.Now().Add(partIdle)
+	if dl.After(d.until) {
+		dl = d.until
+	}
+	_ = d.rc.SetReadDeadline(dl)
+	return d.ReadCloser.Read(p)
+}
+
+// receiver is one streamed upload being written. Its mutex orders the parts
+// and is never waited on by a cleanup path (a part may hold it for as long as
+// its body takes): those mark it dead instead. left is guarded by
+// Server.recvMu.
 type receiver struct {
 	mu       sync.Mutex
 	key      string // sid/bid
@@ -48,9 +78,9 @@ type receiver struct {
 	sha      string // as declared
 	hash     hash.Hash
 	received int64
-	left     int64 // disk reserved and not yet written
-	dead     bool  // withdrawn, revoked, expired or removed: take nothing more
-	done     bool  // every byte in: verifying, or finished
+	left     int64       // disk reserved and not yet written
+	dead     atomic.Bool // withdrawn, revoked, expired or removed: take nothing more
+	done     bool        // every byte in: verifying, or finished
 }
 
 // noRoom is a refusal for want of disk.
@@ -116,9 +146,10 @@ func (srv *Server) forget(rc *receiver) {
 }
 
 // discard drops a receiver that will take nothing more and its staged bytes.
-// The caller holds rc.mu.
+// It does not wait for a part in flight: that part sees the receiver dead when
+// its body ends, and what it still writes goes to a removed file.
 func (srv *Server) discard(rc *receiver) {
-	rc.dead = true
+	rc.dead.Store(true)
 	srv.forget(rc)
 	os.RemoveAll(rc.dir)
 }
@@ -138,9 +169,7 @@ func (srv *Server) dropReceiver(sid, bid string) {
 		return
 	}
 	srv.recvMu.Unlock()
-	rc.mu.Lock() // let a part in flight finish first
 	srv.discard(rc)
-	rc.mu.Unlock()
 }
 
 // dropSessionReceivers stops every upload into a session that is being
@@ -155,9 +184,7 @@ func (srv *Server) dropSessionReceivers(sid string) {
 	}
 	srv.recvMu.Unlock()
 	for _, rc := range gone {
-		rc.mu.Lock()
 		srv.discard(rc)
-		rc.mu.Unlock()
 	}
 }
 
@@ -261,7 +288,8 @@ func (srv *Server) uploadData(w http.ResponseWriter, r *http.Request, s *session
 		writeError(w, http.StatusBadRequest, "need ?offset=N, the payload byte this part starts at")
 		return
 	}
-	var src io.Reader = http.MaxBytesReader(w, r.Body, srv.maxBody())
+	body := &deadlineBody{ReadCloser: r.Body, rc: http.NewResponseController(w), until: time.Now().Add(partMax)}
+	var src io.Reader = http.MaxBytesReader(w, body, srv.maxBody())
 	switch enc := r.Header.Get("Content-Encoding"); enc {
 	case "", "identity":
 	case "gzip":
@@ -282,7 +310,7 @@ func (srv *Server) uploadData(w http.ResponseWriter, r *http.Request, s *session
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	switch {
-	case rc.dead:
+	case rc.dead.Load():
 		writeError(w, http.StatusForbidden, "upload not approved")
 		return
 	case offset != rc.received:
@@ -298,6 +326,10 @@ func (srv *Server) uploadData(w http.ResponseWriter, r *http.Request, s *session
 	n, rerr, werr := srv.appendPart(rc, io.LimitReader(src, part))
 	rc.received += n
 	srv.wrote(rc, n)
+	if rc.dead.Load() { // ended while the body arrived: its bytes went with the staging directory
+		writeError(w, http.StatusForbidden, "upload not approved")
+		return
+	}
 	if werr != nil {
 		srv.opts.Logf("session %s beam %s: write failed: %v", s.ID, rc.beam.BID(), werr)
 		msg, status := "the tower could not store the upload", http.StatusInternalServerError

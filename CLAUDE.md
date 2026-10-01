@@ -222,8 +222,10 @@ admin-approved participant, never silently.
     modes kept) staged in the temp dir. `max_upload_bytes` (live, default 5 GiB)
     bounds it; `max_gz_bytes` stays the limit for beams in frames (QR scans,
     older CLIs) — large files are the CLI's alone. Free disk under `data_dir`
-    less uploads in flight and a 64 MiB margin gates it (`507`). Downloads are
-    15-minute ticket links (`POST …/download-link` → `api/dl/<ticket>`) the
+    less uploads in flight and a 64 MiB margin gates it (`507`). A part's body
+    must keep moving (60 s per read, 15 min per part); cleanup never waits on a
+    part in flight. Downloads are 15-minute ticket links (`POST
+    …/download-link` → `api/dl/<ticket>`, bound to the asking participant) the
     browser's download manager fetches; the token never enters a URL. (ADR 0024)
 
 ## Non-goals

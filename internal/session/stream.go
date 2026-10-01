@@ -55,7 +55,7 @@ type StreamTarget struct {
 func (s *Session) StreamGate(c *Client, id string) (StreamTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.status.Live() {
+	if !s.status.Live() || s.closed { // closed: deleted or swept, its directory gone
 		return StreamTarget{}, ErrUploadNotLive
 	}
 	u := s.uploads[id]
@@ -76,7 +76,9 @@ func (s *Session) StreamGate(c *Client, id string) (StreamTarget, error) {
 func (s *Session) OpenStreamBeam(id string) (*Beam, []string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.status.Live() {
+	// A closed session was deleted or swept (its status may still read OPEN): a
+	// first write racing that must not recreate a beam and its directory.
+	if !s.status.Live() || s.closed {
 		return nil, nil, ErrUploadNotLive
 	}
 	u := s.uploads[id]
@@ -127,10 +129,11 @@ func (s *Session) streamOwnedLocked(b *Beam) bool {
 	return u != nil && u.State == UploadApproved
 }
 
-// StreamWrote records that streamed beam b now holds received of its bytes,
-// which keeps its approval fresh. It returns false when the beam no longer
-// takes them — withdrawn, revoked, expired or removed — and the caller drops
-// what it wrote.
+// StreamWrote records that streamed beam b now holds received of its bytes.
+// Only progress keeps its approval fresh — an empty part does not, so an
+// approval nobody moves still expires (ADR 0023). It returns false when the
+// beam no longer takes them — withdrawn, revoked, expired or removed — and the
+// caller drops what it wrote.
 func (s *Session) StreamWrote(b *Beam, received int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,9 +142,12 @@ func (s *Session) StreamWrote(b *Beam, received int64) bool {
 	}
 	now := s.now()
 	st := b.stream
-	st.received = received
 	u := s.uploads[b.upload]
-	u.Received, u.LastUsed = received, now
+	if received > st.received {
+		u.LastUsed = now
+	}
+	st.received = received
+	u.Received = received
 	prev := b.have
 	b.have = int(received / st.unit)
 	if received >= st.size {
