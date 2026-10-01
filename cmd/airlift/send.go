@@ -352,6 +352,12 @@ func (j *sendJob) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Hash the file, or zip the folder, only once this machine is in — a wrong
+	// link or a refused knock costs nothing — and before it registers as a
+	// sender, so a staging failure leaves no sender on the dashboard.
+	if err := j.stage(ctx, limit); err != nil {
+		return err
+	}
 	me, err := j.register(ctx, info.Version)
 	if err != nil {
 		return err
@@ -361,12 +367,6 @@ func (j *sendJob) run(ctx context.Context) error {
 	}
 	j.say("  access   %s · you are %q", access, me.Name)
 	go j.t.holdPresence(presence)
-
-	// Hash the file, or zip the folder, only once this machine is in: a wrong
-	// link or a refused knock costs nothing.
-	if err := j.stage(ctx, limit); err != nil {
-		return err
-	}
 
 	by, err := j.approval(ctx)
 	if err != nil {
@@ -840,6 +840,9 @@ func (j *sendJob) upload(ctx context.Context) (int64, time.Duration, error) {
 			}
 			return wire, time.Since(start), j.refused(ctx, ae.msg)
 		case errors.As(err, &ae) && ae.status == http.StatusConflict && ae.msg == "session is not open":
+			if j.complete(ctx) { // ended after the last part landed: the file is there
+				return wire, time.Since(start), nil
+			}
 			return wire, time.Since(start), outcome("the session is not open any more")
 		case errors.As(err, &ae) && (ae.status == http.StatusConflict || ae.status == http.StatusInsufficientStorage ||
 			ae.status == http.StatusInternalServerError):
@@ -871,6 +874,9 @@ func (j *sendJob) upload(ctx context.Context) (int64, time.Duration, error) {
 			p, perr := j.poll(ctx)
 			var gone errOutcome
 			if errors.As(perr, &gone) { // the session ended while the link was down
+				if j.complete(ctx) {
+					return wire, time.Since(start), nil
+				}
 				return wire, time.Since(start), perr
 			}
 			if perr == nil {

@@ -905,6 +905,14 @@ func TestSendStopsAnOversizeFolderEarly(t *testing.T) {
 	if u := tw.snapshot(t, a).Uploads; len(u) != 0 {
 		t.Fatalf("nothing should have been asked: %+v", u)
 	}
+	sess, _ := tw.store.Get(a.SID)
+	for _, c := range sess.AllClients() {
+		for _, r := range c.Roles {
+			if r == "sender" {
+				t.Fatalf("a staging failure registered a sender: %+v", c)
+			}
+		}
+	}
 }
 
 // TestStageCancelled: an interrupt while zipping removes the partial zip.

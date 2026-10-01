@@ -121,6 +121,7 @@ func (srv *Server) persistBeam(sid, bid, name string, raw []byte, files []bundle
 // runs it on DELETE and sweep-expiry. sid is 16-hex minted by the store; the
 // guard is defence in depth. No token is ever logged.
 func (srv *Server) removeSessionDir(sid string) {
+	srv.tickets.dropSession(sid) // links go with their session, whatever the disk holds
 	if srv.opts.DataDir == "" {
 		return
 	}
@@ -129,7 +130,6 @@ func (srv *Server) removeSessionDir(sid string) {
 		return
 	}
 	srv.dropSessionReceivers(sid)
-	srv.tickets.dropSession(sid)
 	if err := os.RemoveAll(filepath.Join(srv.opts.DataDir, sid)); err != nil {
 		srv.opts.Logf("session %s: data cleanup failed: %v", sid, err)
 	}

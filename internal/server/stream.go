@@ -44,6 +44,13 @@ var (
 	partMax  = 15 * time.Minute
 )
 
+// reportEvery is how often a part in flight reports its progress to the
+// session (as it lands, so a slow part keeps its approval fresh).
+const reportEvery = 1 << 20
+
+// errUploadEnded stops a part whose upload ended while it arrived.
+var errUploadEnded = errors.New("the upload ended")
+
 // deadlineBody is a part's request body under those deadlines. A writer that
 // cannot set one (a test's recorder) leaves the read unbounded.
 type deadlineBody struct {
@@ -323,7 +330,10 @@ func (srv *Server) uploadData(w http.ResponseWriter, r *http.Request, s *session
 	// A part carries at most max_body bytes of the payload, encoded or not, and
 	// never more than the payload has left.
 	part := min(rc.size-rc.received, srv.maxBody())
-	n, rerr, werr := srv.appendPart(rc, io.LimitReader(src, part))
+	// Progress is reported as the part lands, not only when it ends: a slow
+	// link's part can outlast the approval's freshness window (the tower lets a
+	// part run for partMax), and a part whose upload has ended stops early.
+	n, rerr, werr := srv.appendPart(rc, io.LimitReader(src, part), func(at int64) bool { return s.StreamWrote(rc.beam, at) })
 	rc.received += n
 	srv.wrote(rc, n)
 	if rc.dead.Load() { // ended while the body arrived: its bytes went with the staging directory
@@ -385,7 +395,7 @@ func (srv *Server) uploadData(w http.ResponseWriter, r *http.Request, s *session
 // appendPart appends src to rc's file at rc.received and hashes what it
 // wrote. A read error (the body broke off or ran over) and a write error are
 // reported apart: only the second fails the beam.
-func (srv *Server) appendPart(rc *receiver, src io.Reader) (n int64, rerr, werr error) {
+func (srv *Server) appendPart(rc *receiver, src io.Reader, report func(at int64) bool) (n int64, rerr, werr error) {
 	f, err := os.OpenFile(rc.raw, os.O_WRONLY, 0)
 	if err != nil {
 		return 0, nil, err
@@ -395,6 +405,7 @@ func (srv *Server) appendPart(rc *receiver, src io.Reader) (n int64, rerr, werr 
 		return 0, nil, err
 	}
 	buf := make([]byte, 256<<10)
+	var reported int64
 	for {
 		m, err := src.Read(buf)
 		if m > 0 {
@@ -403,6 +414,13 @@ func (srv *Server) appendPart(rc *receiver, src io.Reader) (n int64, rerr, werr 
 			}
 			rc.hash.Write(buf[:m])
 			n += int64(m)
+			if n-reported >= reportEvery {
+				reported = n
+				if !report(rc.received + n) {
+					rerr = errUploadEnded
+					break
+				}
+			}
 		}
 		if err == io.EOF {
 			break

@@ -155,7 +155,8 @@ A request that carries `sha256` is **streamed** (ADR 0024): its approval admits
 no frames (`403`), only `POST …/uploads/{uid}/data` parts from its own sender,
 each starting where the tower's copy ends, and the file is kept as sent. Only
 real progress keeps the approval fresh — 1 MiB since the last refresh, or the
-last byte — so an approval kept by empty parts or a trickle still expires;
+last byte, counted as a part lands rather than when it ends — so an approval
+kept by empty parts or a trickle still expires;
 evicting the sender, like a withdraw, discards its unfinished beam. Large
 files are this path's alone: `max_upload_bytes` bounds it, while a beam in
 frames stays within `max_gz_bytes`. Everything above about approval,
@@ -473,8 +474,8 @@ unknown or expired ticket is `404`; a ticket whose participant has since been
 evicted (or a caller at an evicted address) is `403`. The link call is
 rate-limited like frames, a repeat by the same client for the same download
 reuses its link while most of its life is left, and a session holds at most
-256 live links (`503` + `Retry-After` beyond, for that session alone); a deleted
-session's links go with it.
+256 live links (`503` + `Retry-After` beyond, for that session alone; links of
+evicted participants stop counting); a deleted session's links go with it.
 
 ## On disk
 

@@ -66,9 +66,11 @@ func (ts *tickets) forgetLocked(id string) {
 
 // issue mints a link for t, or hands back the one its client already holds
 // for the same download while most of its life is left. It refuses (false)
-// when t's session already holds maxSessionTickets live links. Only that
+// when t's session already holds maxSessionTickets usable links; links that
+// expired or whose participant is gone (member false) are forgotten first, so
+// evicting a participant who flooded the session frees its share. Only that
 // session's links are scanned, so the cost is bounded per session.
-func (ts *tickets) issue(t ticket, now time.Time) (string, bool) {
+func (ts *tickets) issue(t ticket, now time.Time, member func(client string) bool) (string, bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	if ts.m == nil {
@@ -81,8 +83,8 @@ func (ts *tickets) issue(t ticket, now time.Time) (string, bool) {
 	}
 	ids := ts.bySID[t.sid]
 	if len(ids) >= maxSessionTickets {
-		for id := range ids { // forget this session's expired links before refusing
-			if !now.Before(ts.m[id].expires) {
+		for id := range ids { // forget this session's dead links before refusing
+			if old := ts.m[id]; !now.Before(old.expires) || !member(old.client) {
 				ts.forgetLocked(id)
 			}
 		}
@@ -109,6 +111,13 @@ func (ts *tickets) dropSession(sid string) {
 	for id := range ts.bySID[sid] {
 		ts.forgetLocked(id)
 	}
+}
+
+// drop forgets one link.
+func (ts *tickets) drop(id string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.forgetLocked(id)
 }
 
 // expiry is when ticket id lapses (zero once it has gone).
@@ -169,7 +178,13 @@ func (srv *Server) downloadLink(w http.ResponseWriter, r *http.Request, s *sessi
 	}
 	now := srv.now()
 	t := ticket{sid: s.ID, sender: uint32(sender), as: req.As, client: c.ID, expires: now.Add(ticketTTL)}
-	id, ok := srv.tickets.issue(t, now)
+	member := func(cid string) bool { _, ok := s.ClientByID(cid); return ok }
+	id, ok := srv.tickets.issue(t, now, member)
+	if ok && s.Closed() { // deleted while we issued: its links were dropped, and this one would linger
+		srv.tickets.drop(id)
+		writeError(w, http.StatusNotFound, "no such session")
+		return
+	}
 	if !ok {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusServiceUnavailable, "this session has too many download links outstanding; try again in a minute")

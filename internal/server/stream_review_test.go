@@ -179,9 +179,10 @@ func TestEvictedSenderLeavesNothing(t *testing.T) {
 	}
 }
 
-// TestEmptyPartsDoNotKeepAnApproval: an approval kept only by a trickle (a
-// few bytes now and then) still expires, and its beam and reservation go with it.
-func TestEmptyPartsDoNotKeepAnApproval(t *testing.T) {
+// TestTrickleDoesNotKeepAnApproval: an approval kept only by empty parts and
+// a trickle (a few bytes now and then) still expires, and its beam and
+// reservation go with it.
+func TestTrickleDoesNotKeepAnApproval(t *testing.T) {
 	clk := &testClock{t: time.Now()}
 	h := start(t, func(o *Options) { o.Now = clk.now; o.Caps.MaxUploadBytes = 1 << 30 })
 	c := h.create(t)
@@ -193,18 +194,19 @@ func TestEmptyPartsDoNotKeepAnApproval(t *testing.T) {
 	off := int64(1000)
 	for i := 0; i < 4; i++ { // 16 minutes of empty parts and a trickle, every 4: past the 10-minute expiry
 		clk.add(4 * time.Minute)
-		code, _ := h.part(t, c, s, req.ID, off, payload[off:off+100], false)
+		h.part(t, c, s, req.ID, off, nil, false)                             // an empty part…
+		code, _ := h.part(t, c, s, req.ID, off, payload[off:off+100], false) // …and a trickle
 		off += 100
 		if code == http.StatusForbidden {
 			break // expired: the empty parts did not keep it
 		}
 		if code != http.StatusOK {
-			t.Fatalf("empty part %d: %d", i, code)
+			t.Fatalf("trickle %d: %d", i, code)
 		}
 		h.store.Sweep(clk.now())
 	}
 	if _, p := h.pollUpload(t, c, s, req.ID); p.Status != session.UploadExpired {
-		t.Fatalf("an approval kept by empty parts: %+v", p)
+		t.Fatalf("an approval kept by a trickle: %+v", p)
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for len(h.snapshot(t, c).Beams) != 0 || h.outstanding() != 0 {
@@ -300,11 +302,79 @@ func TestDownloadLinksCappedPerSession(t *testing.T) {
 	if code := link(b, b.ClientID, bbid); code != http.StatusOK {
 		t.Fatalf("another session's download: %d, want 200", code)
 	}
+	// Evicting a flooder frees its share: the next participant gets a link.
+	h.srv.tickets.mu.Lock()
+	var flooder string
+	for id := range h.srv.tickets.bySID[a.SID] {
+		flooder = h.srv.tickets.m[id].client
+		break
+	}
+	h.srv.tickets.mu.Unlock()
+	h.do(t, "DELETE", "/api/sessions/"+a.SID+"/clients/"+flooder, a.Token, a.ClientID, nil)
+	if code := link(a, a.ClientID, abid); code != http.StatusOK {
+		t.Fatalf("after evicting a flooder: %d, want 200", code)
+	}
 	h.do(t, "DELETE", "/api/sessions/"+a.SID+"?hard", a.Token, a.ClientID, nil)
 	h.srv.tickets.mu.Lock()
 	left := len(h.srv.tickets.bySID[a.SID])
 	h.srv.tickets.mu.Unlock()
 	if left != 0 {
 		t.Fatalf("a deleted session kept %d links", left)
+	}
+}
+
+// TestSlowPartKeepsItsApproval: a part slower than the approval's freshness
+// window keeps it alive as long as it moves — progress counts as it lands,
+// not only when the part ends.
+func TestSlowPartKeepsItsApproval(t *testing.T) {
+	clk := &testClock{t: time.Now()}
+	h := start(t, func(o *Options) { o.Now = clk.now; o.Caps.MaxUploadBytes = 1 << 30 })
+	c := h.create(t)
+	s, _ := h.registerSender(t, c)
+	payload := noise(6<<20, 37)
+	_, req := h.streamRequest(t, c, s, "slow.bin", payload, 0x59)
+	h.approve(t, c, req.ID)
+	h.part(t, c, s, req.ID, 0, payload[:1000], false)
+	pr, pw := io.Pipe()
+	r, _ := http.NewRequest("POST", fmt.Sprintf("%s/api/sessions/%s/uploads/%s/data?offset=1000", h.ts.URL, c.SID, req.ID), pr)
+	r.Header.Set("Authorization", "Bearer "+c.Token)
+	r.Header.Set("X-Airlift-Client", s)
+	code := make(chan int, 1)
+	go func() {
+		resp, err := h.ts.Client().Do(r)
+		if err != nil {
+			code <- 0
+			return
+		}
+		resp.Body.Close()
+		code <- resp.StatusCode
+	}()
+	off := 1000
+	for i := 0; i < 4; i++ { // 16 fake minutes in one part, 1.25 MiB every 4
+		next := off + 5<<18
+		pw.Write(payload[off:next])
+		off = next
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var p struct{ Received int64 }
+			_, body := h.do(t, "GET", "/api/sessions/"+c.SID+"/uploads/"+req.ID, c.Token, s, nil)
+			json.Unmarshal(body, &p)
+			if p.Received >= int64(off)-1<<20 { // reported every MiB as it lands
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("progress was not reported mid-part: %d of %d", p.Received, off)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		clk.add(4 * time.Minute)
+		h.store.Sweep(clk.now())
+	}
+	pw.Close()
+	if got := <-code; got != http.StatusOK && got != http.StatusConflict {
+		t.Fatalf("the slow part: %d", got)
+	}
+	if _, p := h.pollUpload(t, c, s, req.ID); p.Status != session.UploadApproved {
+		t.Fatalf("a moving upload lost its approval: %+v", p)
 	}
 }
