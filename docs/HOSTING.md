@@ -31,13 +31,16 @@ tagging a release is the whole deploy.
 | config (`public_url`, `listen=0.0.0.0:8443`, `trusted_proxies=10.42.0.0/16`) | the HelmRelease `values.configFile` in `apps/airlift.yaml` |
 | admin token | a SOPS-encrypted Secret `airlift-admin` (`apps/secrets/airlift-admin.enc.yaml`), decrypted in-cluster by Flux |
 | TLS | Traefik + cert-manager (Let's Encrypt) on the default `TLSStore`; `infrastructure/` in the infra repo |
-| session data | a small `longhorn-static` PVC (Longhorn, Delete-reclaim); the session `data_dir` is emptied on start regardless — memory-only sessions, ADR 0005 |
+| session data | a 50 Gi `longhorn-static` PVC (Longhorn, Delete-reclaim, thin-provisioned) holding `data_dir`: room for several streamed `airlift beam -s` uploads of up to `max_upload_bytes` (5 GiB) each, kept as sent, beside the QR beams (ADR 0024); the tower refuses an upload its free space cannot hold. Emptied on start regardless — memory-only sessions, ADR 0005 |
 
 ## Changing configuration
 
 Edit the HelmRelease values in `sujaykumarsuman/infra` (`apps/airlift.yaml`) and
 push — Flux applies the Helm upgrade. Restart-only keys (`public_url`, `listen`,
-`trusted_proxies`) take effect on the resulting pod roll.
+`trusted_proxies`) take effect on the resulting pod roll. Live keys (such as
+`max_upload_bytes`) can also be changed from the admin console at runtime. Keep
+`max_upload_bytes` under the volume's size: Longhorn grows the PVC in place when
+`persistence.size` is raised.
 
 ## Rotating the admin token
 

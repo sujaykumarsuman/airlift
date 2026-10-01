@@ -44,13 +44,17 @@ var (
 	ErrUploadConflict  = errors.New("an approval for another beam is still open; finish or withdraw it first")
 )
 
-// Upload is one direct sender's request to push a beam into the session.
+// Upload is one direct sender's request to push a beam into the session: in
+// frames (ADR 0023), or streamed as the payload's own bytes (ADR 0024).
 type Upload struct {
 	ID        string
 	ClientID  string
 	Name      string // the beam's name, as its manifest must carry it
-	Bytes     int64  // the payload after gzip, as its manifest must carry it
-	Chunks    int    // as its manifest must carry it
+	Bytes     int64  // frames: the payload after gzip, as its manifest must carry it; streamed: the payload's size
+	Chunks    int    // frames: as the manifest must carry it; 0 when streamed
+	Stream    bool   // the payload's bytes arrive straight, not in frames (ADR 0024)
+	SHA256    string // streamed: the file's declared sha256
+	Received  int64  // streamed: the bytes the tower holds so far
 	Sender    uint32 // the beam's sender u32 (its bid in hex)
 	At        time.Time
 	State     string
@@ -78,8 +82,24 @@ type UploadView struct {
 	Client   string    `json:"client"`
 	Name     string    `json:"name"`
 	Bytes    int64     `json:"bytes"`
-	Chunks   int       `json:"chunks"`
+	Chunks   int       `json:"chunks"` // 0 for a streamed upload
+	Stream   bool      `json:"stream"` // the payload's bytes, not frames (ADR 0024)
 	At       time.Time `json:"at"`
+}
+
+// UploadSpec is what a sender asks to push: a beam in frames (ADR 0023), or
+// with Stream set the payload's own bytes (ADR 0024).
+type UploadSpec struct {
+	Name   string
+	Bytes  int64  // frames: the gzip size; streamed: the payload's size
+	Chunks int    // frames only
+	Stream bool   // streamed
+	SHA256 string // streamed: the file's sha256, lowercase hex
+	Sender uint32
+}
+
+func (u *Upload) spec() UploadSpec {
+	return UploadSpec{Name: u.Name, Bytes: u.Bytes, Chunks: u.Chunks, Stream: u.Stream, SHA256: u.SHA256, Sender: u.Sender}
 }
 
 // SetSender marks c as a direct sender: its frames need an approved upload.
@@ -106,7 +126,7 @@ func (s *Session) ClientIsSender(c *Client) bool {
 // is superseded by a new one (a new id, so an admin's click on the old one
 // cannot admit the new beam); an approved one must be finished or withdrawn
 // first.
-func (s *Session) RequestUpload(c *Client, name string, bytes int64, chunks int, sender uint32) (string, string, error) {
+func (s *Session) RequestUpload(c *Client, spec UploadSpec) (string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
@@ -120,7 +140,7 @@ func (s *Session) RequestUpload(c *Client, name string, bytes int64, chunks int,
 	}
 	now := s.now()
 	if u := s.openUploadLocked(c.ID); u != nil {
-		same := u.Name == name && u.Bytes == bytes && u.Chunks == chunks && u.Sender == sender
+		same := u.spec() == spec
 		switch {
 		case same && u.State == UploadPending && c.SessionAdmin: // made an admin since asking
 			u.State, u.DecidedAt, u.By = UploadApproved, now, c.Name
@@ -134,7 +154,7 @@ func (s *Session) RequestUpload(c *Client, name string, bytes int64, chunks int,
 			s.endUploadLocked(u, UploadCancelled, now)
 		}
 	}
-	if _, taken := s.beams[sender]; taken {
+	if _, taken := s.beams[spec.Sender]; taken {
 		return "", "", ErrUploadBeamTaken
 	}
 	if !c.SessionAdmin {
@@ -153,7 +173,8 @@ func (s *Session) RequestUpload(c *Client, name string, bytes int64, chunks int,
 		}
 	}
 	s.forgetEndedLocked(c.ID) // one record per client is all a poll needs
-	u := &Upload{ID: randKnockID(), ClientID: c.ID, Name: name, Bytes: bytes, Chunks: chunks, Sender: sender, At: now, State: UploadPending}
+	u := &Upload{ID: randKnockID(), ClientID: c.ID, Name: spec.Name, Bytes: spec.Bytes, Chunks: spec.Chunks, Stream: spec.Stream,
+		SHA256: spec.SHA256, Sender: spec.Sender, At: now, State: UploadPending}
 	if c.SessionAdmin {
 		u.State, u.DecidedAt, u.By = UploadApproved, now, c.Name
 	}
@@ -212,10 +233,12 @@ func (s *Session) forgetEndedLocked(clientID string) {
 	s.uploadOrder = kept
 }
 
-// endOpenUploadsLocked cancels a client's open request (it was evicted).
+// endOpenUploadsLocked cancels a client's open request (it was evicted) and,
+// like a withdraw, discards the beam it had started: nobody else can finish it.
 func (s *Session) endOpenUploadsLocked(clientID string, now time.Time) {
 	if u := s.openUploadLocked(clientID); u != nil {
 		u.State, u.EndedAt = UploadCancelled, now
+		s.discardUnfinishedLocked(u)
 	}
 }
 
@@ -223,17 +246,25 @@ func (s *Session) endOpenUploadsLocked(clientID string, now time.Time) {
 // answers 409 once it cannot, so a waiting sender stops waiting).
 func (s *Session) UploadLive() bool { return s.Status().Live() }
 
+// UploadStatus is what a poll reports of a request.
+type UploadStatus struct {
+	State    string
+	By       string // the deciding admin's name, once decided
+	Stream   bool
+	Received int64 // streamed: the bytes the tower holds, where a sender resumes
+}
+
 // UploadState is the state of request id, with the deciding admin's name once
 // decided. Only the requesting client and session admins may ask; anyone else
 // (or an unknown id) gets ok=false.
-func (s *Session) UploadState(c *Client, id string) (state, by string, ok bool) {
+func (s *Session) UploadState(c *Client, id string) (UploadStatus, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u := s.uploads[id]
 	if u == nil || (u.ClientID != c.ID && !c.SessionAdmin) {
-		return "", "", false
+		return UploadStatus{}, false
 	}
-	return u.State, u.By, true
+	return UploadStatus{State: u.State, By: u.By, Stream: u.Stream, Received: u.Received}, true
 }
 
 // CancelUpload withdraws c's own pending or approved request: its sender gave
@@ -277,7 +308,8 @@ func (s *Session) ResolveUpload(id string, by *Client, approve bool) bool {
 
 // UploadGate decides whether c may POST frames. A scanner or viewer may, for
 // any beam (the pin is nil). A direct sender may only while it holds an
-// approved upload, and then only to build that upload's beam as declared.
+// approved upload in frames, and then only to build that upload's beam as
+// declared; a streamed approval admits no frames (ADR 0024).
 func (s *Session) UploadGate(c *Client) (*UploadPin, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -285,7 +317,7 @@ func (s *Session) UploadGate(c *Client) (*UploadPin, bool) {
 		return nil, true
 	}
 	u := s.openUploadLocked(c.ID)
-	if u == nil || u.State != UploadApproved {
+	if u == nil || u.State != UploadApproved || u.Stream {
 		return nil, false
 	}
 	return &UploadPin{id: u.ID, sender: u.Sender, name: u.Name, bytes: u.Bytes, chunks: u.Chunks}, true
@@ -361,7 +393,7 @@ func (s *Session) pendingUploadsLocked() []UploadView {
 		if c := s.clients[u.ClientID]; c != nil {
 			name = c.Name
 		}
-		out = append(out, UploadView{ID: u.ID, ClientID: u.ClientID, Client: name, Name: u.Name, Bytes: u.Bytes, Chunks: u.Chunks, At: u.At})
+		out = append(out, UploadView{ID: u.ID, ClientID: u.ClientID, Client: name, Name: u.Name, Bytes: u.Bytes, Chunks: u.Chunks, Stream: u.Stream, At: u.At})
 	}
 	return out
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"unicode"
@@ -12,7 +13,11 @@ import (
 
 // Direct upload (ADR 0023): a sender client asks leave to push one beam, a
 // session admin decides on the dashboard, and the frames handler admits a
-// sender's frames only while its request is approved.
+// sender's frames only while its request is approved. A request that carries
+// the file's sha256 is streamed instead (ADR 0024): its bytes go to
+// …/uploads/{uid}/data and are kept as they are, bounded by max_upload_bytes —
+// the large-file path is the command line's alone; a beam in frames (a QR
+// scan) stays within max_gz_bytes.
 
 // requestUpload records a sender's request (client tier, rate_join). The body
 // names the beam and its size so the admin knows what is coming; the sender
@@ -31,18 +36,44 @@ func (srv *Server) requestUpload(w http.ResponseWriter, r *http.Request, s *sess
 		Name   string `json:"name"`
 		Bytes  int64  `json:"bytes"`
 		Chunks int    `json:"chunks"`
+		SHA256 string `json:"sha256"`
 		Sender uint32 `json:"sender_session"`
 	}
 	if err := decodeOptionalJSON(r.Body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad JSON: "+err.Error())
 		return
 	}
-	if req.Name == "" || len(req.Name) > 200 || strings.IndexFunc(req.Name, unicode.IsControl) >= 0 || !utf8.ValidString(req.Name) ||
-		req.Chunks < 1 || req.Chunks > 0xFFFF || req.Bytes < 0 {
-		writeError(w, http.StatusBadRequest, "need a printable name (at most 200 bytes), chunks 1..65535 and bytes >= 0")
+	if req.Name == "" || len(req.Name) > 200 || strings.IndexFunc(req.Name, unicode.IsControl) >= 0 || !utf8.ValidString(req.Name) || req.Bytes < 0 {
+		writeError(w, http.StatusBadRequest, "need a printable name (at most 200 bytes) and bytes >= 0")
 		return
 	}
-	id, state, err := s.RequestUpload(c, req.Name, req.Bytes, req.Chunks, req.Sender)
+	spec := session.UploadSpec{Name: req.Name, Bytes: req.Bytes, Sender: req.Sender}
+	if req.SHA256 != "" {
+		if !isSHA256(req.SHA256) {
+			writeError(w, http.StatusBadRequest, "sha256 must be 64 lowercase hex digits")
+			return
+		}
+		if srv.opts.DataDir == "" {
+			writeError(w, http.StatusConflict, "this tower keeps no data_dir, so it takes no streamed uploads")
+			return
+		}
+		if limit := srv.caps().MaxUploadBytes; limit > 0 && req.Bytes > limit {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("this upload is %s; the tower takes at most %s per upload", humanSize(req.Bytes), humanSize(limit)))
+			return
+		}
+		if err := srv.checkRoom(req.Bytes); err != nil {
+			writeError(w, http.StatusInsufficientStorage, err.Error())
+			return
+		}
+		spec.Stream, spec.SHA256 = true, req.SHA256
+	} else {
+		if req.Chunks < 1 || req.Chunks > 0xFFFF {
+			writeError(w, http.StatusBadRequest, "need chunks 1..65535, or a sha256 to stream the payload")
+			return
+		}
+		spec.Chunks = req.Chunks
+	}
+	id, state, err := s.RequestUpload(c, spec)
 	switch {
 	case errors.Is(err, session.ErrUploadNotSender):
 		writeError(w, http.StatusForbidden, err.Error())
@@ -62,14 +93,17 @@ func (srv *Server) uploadPoll(w http.ResponseWriter, r *http.Request, s *session
 		writeError(w, http.StatusConflict, "session is not open")
 		return
 	}
-	state, by, ok := s.UploadState(c, r.PathValue("uid"))
+	st, ok := s.UploadState(c, r.PathValue("uid"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "no such upload request")
 		return
 	}
-	resp := map[string]any{"id": r.PathValue("uid"), "status": state}
-	if by != "" {
-		resp["by"] = by
+	resp := map[string]any{"id": r.PathValue("uid"), "status": st.State}
+	if st.By != "" {
+		resp["by"] = st.By
+	}
+	if st.Stream {
+		resp["received"] = st.Received // where a streaming sender resumes
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -106,4 +140,17 @@ func (srv *Server) uploadResolve(w http.ResponseWriter, r *http.Request, s *sess
 	}
 	srv.opts.Logf("session %s upload %sd", s.ID, req.Decision)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// isSHA256 reports a lowercase hex sha256, as the CLI and the sender write it.
+func isSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

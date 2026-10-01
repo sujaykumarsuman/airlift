@@ -32,10 +32,11 @@ const baseSentinel = "<!--airlift-base-->"
 // Caps is the subset of server limits GET /api/info advertises so the pages can
 // shape their forms and guidance.
 type Caps struct {
-	MaxGzBytes int64
-	IdleTTL    time.Duration
-	MaxAge     time.Duration
-	Sessions   int
+	MaxGzBytes     int64 // per-beam gzip ceiling for a beam carried in frames (a QR scan)
+	MaxUploadBytes int64 // per-beam ceiling for a streamed direct upload (ADR 0024)
+	IdleTTL        time.Duration
+	MaxAge         time.Duration
+	Sessions       int
 }
 
 // Options configure a Server.
@@ -63,6 +64,7 @@ type Options struct {
 	Config         *config.Config // the resolved config, for GET/PATCH /api/admin/config
 	ConfigParams   config.Params  // the load sources, so a PATCH reloads from the same layers
 	Now            func() time.Time
+	DiskFree       func(dir string) (int64, bool) // free space under data_dir (tests); nil reads the filesystem
 	OnCreate       func(s *session.Session, joinURL string)
 	Logf           func(format string, args ...any)
 }
@@ -82,6 +84,11 @@ type Server struct {
 	mux    *http.ServeMux
 	lim    *limiter
 	metaMu sync.Mutex // serialises session.json writes
+
+	recvMu      sync.Mutex           // guards recv and outstanding
+	recv        map[string]*receiver // streamed uploads being written, by sid/bid (ADR 0024)
+	outstanding int64                // disk the uploads in recv may still write
+	tickets     tickets              // download links (ADR 0024)
 
 	live  atomic.Pointer[liveCfg] // the hot-path config subset (a PATCH hot-swaps it)
 	cfgMu sync.Mutex              // guards cfg (a live PATCH swaps it; ADR 0014)
@@ -104,7 +111,7 @@ func New(opts Options) *Server {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config}
+	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config, recv: map[string]*receiver{}}
 	srv.live.Store(&liveCfg{MaxBody: opts.MaxBody, Caps: opts.Caps, WarningTTL: opts.WarningTTL, ReviewTTL: opts.ReviewTTL})
 	srv.lim = newLimiter(opts.Now, map[rateKind]Rate{
 		rlCreate:    opts.RateCreate,
@@ -147,7 +154,10 @@ func (srv *Server) routes() {
 	m.HandleFunc("GET /api/sessions/{sid}/uploads/{uid}", srv.client(srv.uploadPoll))
 	m.HandleFunc("POST /api/sessions/{sid}/uploads/{uid}", srv.sessionAdmin(srv.uploadResolve))
 	m.HandleFunc("DELETE /api/sessions/{sid}/uploads/{uid}", srv.client(srv.uploadCancel))
+	m.HandleFunc("POST /api/sessions/{sid}/uploads/{uid}/data", srv.client(srv.uploadData))
 	m.HandleFunc("GET /api/sessions/{sid}/download", srv.client(srv.download))
+	m.HandleFunc("POST /api/sessions/{sid}/download-link", srv.client(srv.downloadLink))
+	m.HandleFunc("GET /api/dl/{ticket}", srv.ticketDownload)
 	m.HandleFunc("DELETE /api/sessions/{sid}", srv.sessionAdmin(srv.deleteSession))
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
 	m.HandleFunc("DELETE /api/sessions/{sid}/beams/{bid}", srv.sessionAdmin(srv.deleteBeam))
@@ -662,12 +672,22 @@ func (srv *Server) info(w http.ResponseWriter, _ *http.Request) {
 		"base_path":     srv.opts.BasePath,
 		"admin_enabled": srv.opts.AdminEnabled,
 		"caps": map[string]any{
-			"max_gz_bytes": c.MaxGzBytes,
-			"idle_ttl":     secs(c.IdleTTL),
-			"max_age":      secs(c.MaxAge),
-			"sessions":     c.Sessions,
+			"max_gz_bytes":     c.MaxGzBytes,
+			"max_upload_bytes": srv.maxUpload(c), // 0: no streamed uploads here (ADR 0024)
+			"idle_ttl":         secs(c.IdleTTL),
+			"max_age":          secs(c.MaxAge),
+			"sessions":         c.Sessions,
 		},
 	})
+}
+
+// maxUpload is the streamed-upload cap /api/info advertises: none without a
+// data_dir to hold the bytes.
+func (srv *Server) maxUpload(c Caps) int64 {
+	if srv.opts.DataDir == "" {
+		return 0
+	}
+	return c.MaxUploadBytes
 }
 
 // page serves a built entry from web/dist (or a placeholder), rewriting the

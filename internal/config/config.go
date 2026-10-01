@@ -56,7 +56,8 @@ type Config struct {
 	TrustedProxies []string
 	Sessions       int
 	MaxBeams       int
-	MaxGzBytes     int64
+	MaxGzBytes     int64 // per-beam gzip ceiling for a beam carried in frames (a QR scan)
+	MaxUploadBytes int64 // per-beam ceiling for a streamed direct upload (ADR 0024)
 	IdleTTL        time.Duration
 	MaxAge         time.Duration // 0 = off
 	WarningTTL     time.Duration
@@ -252,6 +253,8 @@ func assign(c *Config, name string, val any) {
 		c.MaxBeams = val.(int)
 	case "max_gz_bytes":
 		c.MaxGzBytes = val.(int64)
+	case "max_upload_bytes":
+		c.MaxUploadBytes = val.(int64)
 	case "idle_ttl":
 		c.IdleTTL = val.(time.Duration)
 	case "max_age":

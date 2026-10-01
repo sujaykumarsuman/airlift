@@ -564,6 +564,41 @@ GHCR as the registry.
 
 - **Phase 14 complete.**
 
+## Phase 15 — large direct sends: streamed `-s` uploads up to 5 GiB, kept as sent (done, 2026-10-01, ADR 0024)
+
+- **Why**: the frames path capped a direct send at ~177 MB (u16 chunk count ×
+  2 712-byte frames; `max_gz_bytes` held it to 64 MiB) and held every payload in
+  memory on a 128 MiB pod. The operator wants up to 5 GB from a connected machine,
+  sent as the file itself.
+- **Streamed upload**: a request with `sha256` streams the file's own bytes —
+  `POST …/uploads/{uid}/data?offset=N` parts (≤ `max_body`, optional gzip in
+  transit), appended to `<data_dir>/<sid>/.<bid>.upload/raw/<name>` and hashed as
+  they land, resumable from `received`; a sha256 match renames it to `<bid>/`.
+  No bundle stage: the file is kept exactly as sent (download `raw`). Frames stay
+  for QR scans and older CLIs; a streamed approval admits none.
+- **Limits**: new live key `max_upload_bytes` (default 5 GiB, in `/api/info`
+  caps) for streamed uploads; `max_gz_bytes` (64 MiB) applies only to beams in
+  frames, so large files are the CLI's alone. Free space under `data_dir` (less
+  uploads in flight and a 64 MiB margin) gates a request and its first part (`507`).
+- **CLI**: `-s` never bundles — it hashes a file in place, or zips a folder /
+  several files (git-aware list, paths and modes kept) into one temporary file,
+  and streams it: 4 MiB parts (gzip when it saves a tenth), halved on 413 or a
+  cut connection, resumed from the tower's offset; `--format`/`--mode`/`--chunk`
+  are page-only now.
+- **Downloads**: the dashboard asks `POST …/download-link` for a 15-minute ticket
+  (`api/dl/<ticket>`) and lets the browser's download manager fetch it — no blob,
+  Range resume; the token never enters a URL.
+- **Verified**: Go gates under `-race` (stream, limits — a frames beam over
+  `max_gz_bytes` fails while the same size streams —, kept-as-is, endings, cut-off
+  resume, ticket download; CLI resume through dropped and cut connections, folder
+  → zip equal to the tree); web tsc/eslint/vitest. Local binary runs: 5 GiB file
+  in 47 s with the tower at 15.8 MB peak RSS and the CLI at 34 MB; dashboard flow
+  in headless Chromium (request → approve → bytes progress → READY → 600 MB
+  download by link).
+- **Infra**: the airlift PVC grows 1 Gi → 50 Gi (`sujaykumarsuman/infra`
+  `apps/airlift.yaml`; Longhorn thin-provisions and expands in place).
+- **Next**: the admin console still downloads through a blob.
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender

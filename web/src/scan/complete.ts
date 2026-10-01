@@ -40,16 +40,23 @@ export function baselineIgnored(beams: readonly Beam[]): Set<string> {
   return new Set(beams.filter((b) => isTerminal(b.state)).map((b) => b.bid));
 }
 
+/** A beam a scanner can feed: one carried in frames, not a command line's
+ *  streamed upload (ADR 0024), which no camera ever sees. */
+function scannable(b: Beam): boolean {
+  return !b.stream;
+}
+
 /**
  * The beam this scanner is feeding: the last one still receiving, else the most
  * recently arrived — skipping beams that were finished before the scanner opened
  * or that it has scanned and dismissed, so a reopened scanner starts clean and
- * waits for a new beam rather than showing the last one's numbers.
+ * waits for a new beam rather than showing the last one's numbers, and skipping
+ * streamed uploads from the command line, which arrive without a camera.
  */
 export function pickActive(beams: readonly Beam[], ignored: ReadonlySet<string>): Beam | null {
   let pick: Beam | null = null;
   for (const b of beams) {
-    if (ignored.has(b.bid)) continue;
+    if (ignored.has(b.bid) || !scannable(b)) continue;
     if (b.state === "RECEIVING" || pick === null || pick.state !== "RECEIVING") pick = b;
   }
   return pick;

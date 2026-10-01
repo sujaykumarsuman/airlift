@@ -141,8 +141,9 @@ type Beam struct {
 	ticks      []time.Time // per-beam decode-fps window
 
 	outcome Outcome
-	removed bool   // operator removed it (or it was auto-evicted at the cap)
-	upload  string // the approved direct upload that created it (ADR 0023); "" for a scanned beam
+	removed bool         // operator removed it (or it was auto-evicted at the cap)
+	upload  string       // the approved direct upload that created it (ADR 0023); "" for a scanned beam
+	stream  *streamState // set for a streamed direct upload (ADR 0024): no frames, no decoder
 }
 
 // bid is the beam's identifier for URLs, downloads and the web: eight hex
@@ -738,6 +739,11 @@ func (s *Session) removeBeamLocked(sender uint32) {
 	}
 	b.removed = true
 	s.spendUploadLocked(b) // a removed beam takes its approval with it
+	if b.stream != nil && s.onBeamEvict != nil {
+		// A streamed beam holds its bytes on disk from the first write, so every
+		// removal path reclaims them — a withdrawn, revoked or expired upload too.
+		go s.onBeamEvict(s.ID, b.BID())
+	}
 	delete(s.beams, sender)
 	for i, id := range s.order {
 		if id == sender {
@@ -1008,7 +1014,7 @@ func (s *Session) ingestPayloadLocked(fr proto.Frame, now time.Time, r *IngestRe
 		s.holdLocked(fr, r)
 		return nil
 	}
-	if !pin.owns(b) {
+	if !pin.owns(b) || b.stream != nil { // a streamed beam takes no frames (ADR 0024)
 		r.Bad++
 		return nil
 	}
@@ -1227,6 +1233,12 @@ type BeamSnapshot struct {
 	Error         *string        `json:"error"`
 	StartedAt     *time.Time     `json:"started_at"`
 	FinishedAt    *time.Time     `json:"finished_at"`
+	// A streamed direct upload (ADR 0024) counts its progress in bytes: Size is
+	// the payload's, Received what the tower holds. Total/Have count units of
+	// Size/Total bytes for the minimap; FPS is units per second.
+	Stream   bool  `json:"stream"`
+	Size     int64 `json:"size"`
+	Received int64 `json:"received"`
 }
 
 // Snapshot renders the place document.
@@ -1326,6 +1338,9 @@ func (s *Session) Snapshot() Snapshot {
 			t := b.finishedAt
 			bs.FinishedAt = &t
 		}
+		if b.stream != nil {
+			bs.Stream, bs.Size, bs.Received = true, b.stream.size, b.stream.received
+		}
 		snap.Beams = append(snap.Beams, bs)
 	}
 	return snap
@@ -1339,8 +1354,11 @@ func (b *Beam) bitmapLocked() string {
 	bits := make([]byte, (b.total+7)/8)
 	for i := 0; i < b.total; i++ {
 		present := b.have == b.total
-		if b.decoder != nil {
+		switch {
+		case b.decoder != nil:
 			present = b.decoder.Have(i)
+		case b.stream != nil:
+			present = i < b.have // a stream fills in order
 		}
 		if present {
 			bits[i/8] |= 0x80 >> (i % 8)

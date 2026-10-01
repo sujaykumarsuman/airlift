@@ -60,7 +60,7 @@
             <li>A random session id and token.</li>
             <li>For each participating device: a random client id and a random resume key (the device's proof that it is that participant, never shown to anyone); a name — generated (like <em>brave badger</em>) or the one you typed; which roles the device is using (viewer, relay); and the network address it last connected from, used for rate limiting and eviction. Addresses are visible only to the operator's admin console, never to other participants.</li>
             <li>Requests to send a beam directly from the command line: the requesting participant, the beam's name and size, and the session admin's decision — never an address.</li>
-            <li>The relayed QR frames (from a scanner, or sent directly by the command line) and the files reassembled from them, written under the tower's data directory so they can be verified and downloaded, plus a small session receipt.</li>
+            <li>The relayed QR frames from a scanner and the files reassembled from them, and the files sent directly by the command line (up to 5 GiB each), written under the tower's data directory so they can be verified and downloaded, plus a small session receipt. A download link is a random ticket, valid for 15 minutes and held only in memory.</li>
           </ul>
           <h3>How long</h3>
           <ul>

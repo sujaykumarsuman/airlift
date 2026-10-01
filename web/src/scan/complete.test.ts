@@ -76,3 +76,11 @@ test("pickActive prefers the latest receiving beam, else the most recent", () =>
   expect(pickActive([b], new Set())?.bid).toBe("b");
   expect(pickActive([], new Set())).toBeNull();
 });
+
+test("a streamed upload from the command line is never the scanner's beam", () => {
+  const scanned = beam("a", "RECEIVING");
+  const streamed = { ...beam("b", "RECEIVING"), stream: true };
+  expect(pickActive([scanned, streamed], new Set())?.bid).toBe("a");
+  expect(pickActive([streamed], new Set())).toBeNull();
+  expect(pickActive([{ ...streamed, state: "READY" as const }], new Set())).toBeNull();
+});
