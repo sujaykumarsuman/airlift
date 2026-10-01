@@ -198,7 +198,7 @@ func (t *tower) callPatient(ctx context.Context, method, path string, in, out an
 			if err := sleepCtx(ctx, max(ae.retryAfter, time.Second)); err != nil {
 				return err
 			}
-		case repeatable && ctx.Err() == nil && dropped < 3 && isNetErr(err):
+		case repeatable && ctx.Err() == nil && dropped < 3 && (isNetErr(err) || isGatewayStatus(err)):
 			dropped++
 			if err := sleepCtx(ctx, time.Duration(dropped)*time.Second); err != nil {
 				return err
@@ -325,9 +325,9 @@ func (j *sendJob) run(ctx context.Context) error {
 	// the tower sees the request end before the sender leaves.
 	presence, stopPresence := context.WithCancel(context.Background())
 	defer func() {
+		j.p.remove() // a staged zip goes however the run ends — first, as the withdraw may wait
 		j.withdraw()
 		stopPresence()
-		j.p.remove() // a staged zip goes however the run ends
 	}()
 
 	info, err := j.connect(ctx)
@@ -340,8 +340,12 @@ func (j *sendJob) run(ctx context.Context) error {
 	if limit <= 0 {
 		return outcome("this tower (%s) does not take streamed uploads — it needs airlift %s or later", info.Version, streamSince)
 	}
-	if err := j.stage(ctx, limit); err != nil {
-		return err
+	if j.p == nil && j.src.file != "" { // a file's size is known before any work: refuse it now
+		if fi, err := os.Stat(j.src.file); err == nil {
+			if err := tooBig(limit, fi.Size()); err != nil {
+				return err
+			}
+		}
 	}
 
 	access, err := j.join(ctx)
@@ -357,6 +361,12 @@ func (j *sendJob) run(ctx context.Context) error {
 	}
 	j.say("  access   %s · you are %q", access, me.Name)
 	go j.t.holdPresence(presence)
+
+	// Hash the file, or zip the folder, only once this machine is in: a wrong
+	// link or a refused knock costs nothing.
+	if err := j.stage(ctx, limit); err != nil {
+		return err
+	}
 
 	by, err := j.approval(ctx)
 	if err != nil {
@@ -674,7 +684,9 @@ func (j *sendJob) poll(ctx context.Context) (uploadPoll, error) {
 	err := j.t.callPatient(ctx, http.MethodGet, "/api/sessions/"+j.t.sid+"/uploads/"+j.request, nil, &r)
 	if err != nil {
 		if statusOf(err) == http.StatusConflict {
-			j.request = ""
+			// The request stays set: the deferred withdraw still ends it (the
+			// tower takes a withdraw in any status), so nothing is left behind
+			// if the session is reopened.
 			return r, outcome("the session is not open any more")
 		}
 		return r, fmt.Errorf("upload request: %w", err)
@@ -801,6 +813,9 @@ func (j *sendJob) upload(ctx context.Context) (int64, time.Duration, error) {
 				return wire, time.Since(start), j.failed(ctx)
 			}
 		case errors.As(err, &ae) && ae.status == http.StatusConflict && r.Received != nil:
+			if *r.Received > offset { // a cut part still moved the copy on
+				stalls, stalledSince = 0, time.Time{}
+			}
 			offset = *r.Received // the tower's copy ends elsewhere: go on from there
 		case errors.As(err, &ae) && ae.status == http.StatusRequestEntityTooLarge:
 			smooth = 0
@@ -810,6 +825,9 @@ func (j *sendJob) upload(ctx context.Context) (int64, time.Duration, error) {
 			part = max(minPart, part/2)
 			ceiling = part
 			if r.Received != nil {
+				if *r.Received > offset {
+					stalls, stalledSince = 0, time.Time{}
+				}
 				offset = *r.Received
 			}
 		case errors.As(err, &ae) && ae.status == http.StatusTooManyRequests:
@@ -826,7 +844,11 @@ func (j *sendJob) upload(ctx context.Context) (int64, time.Duration, error) {
 		case errors.As(err, &ae) && (ae.status == http.StatusConflict || ae.status == http.StatusInsufficientStorage ||
 			ae.status == http.StatusInternalServerError):
 			// The request stays open here (the deferred withdraw ends it and
-			// drops what the tower staged), unless the beam has failed outright.
+			// drops what the tower staged), unless the beam has failed outright
+			// — or is already whole and only a proxy's reply was wrong.
+			if j.complete(ctx) {
+				return wire, time.Since(start), nil
+			}
 			if b, berr := t.beam(ctx, fmt.Sprintf("%08x", j.sender)); berr == nil && b != nil && b.State == session.StateFailed && b.Error != nil {
 				return wire, time.Since(start), outcome("the beam failed on the tower: %s", *b.Error)
 			}
@@ -846,7 +868,12 @@ func (j *sendJob) upload(ctx context.Context) (int64, time.Duration, error) {
 			if err := sleepCtx(ctx, time.Duration(min(stalls, 10))*stallPause); err != nil {
 				return wire, time.Since(start), err
 			}
-			if p, perr := j.poll(ctx); perr == nil {
+			p, perr := j.poll(ctx)
+			var gone errOutcome
+			if errors.As(perr, &gone) { // the session ended while the link was down
+				return wire, time.Since(start), perr
+			}
+			if perr == nil {
 				switch p.Status {
 				case session.UploadApproved:
 					if p.Received > offset {

@@ -179,8 +179,8 @@ func TestEvictedSenderLeavesNothing(t *testing.T) {
 	}
 }
 
-// TestEmptyPartsDoNotKeepAnApproval: an approval kept only by empty parts
-// still expires, and its beam and reservation go with it.
+// TestEmptyPartsDoNotKeepAnApproval: an approval kept only by a trickle (a
+// few bytes now and then) still expires, and its beam and reservation go with it.
 func TestEmptyPartsDoNotKeepAnApproval(t *testing.T) {
 	clk := &testClock{t: time.Now()}
 	h := start(t, func(o *Options) { o.Now = clk.now; o.Caps.MaxUploadBytes = 1 << 30 })
@@ -190,9 +190,11 @@ func TestEmptyPartsDoNotKeepAnApproval(t *testing.T) {
 	_, req := h.streamRequest(t, c, s, "idle.bin", payload, 0x56)
 	h.approve(t, c, req.ID)
 	h.part(t, c, s, req.ID, 0, payload[:1000], false)
-	for i := 0; i < 4; i++ { // 16 minutes of empty parts, every 4: past the 10-minute expiry
+	off := int64(1000)
+	for i := 0; i < 4; i++ { // 16 minutes of empty parts and a trickle, every 4: past the 10-minute expiry
 		clk.add(4 * time.Minute)
-		code, _ := h.part(t, c, s, req.ID, 1000, nil, false)
+		code, _ := h.part(t, c, s, req.ID, off, payload[off:off+100], false)
+		off += 100
 		if code == http.StatusForbidden {
 			break // expired: the empty parts did not keep it
 		}
@@ -264,5 +266,45 @@ func TestDownloadLinkReuseAndEviction(t *testing.T) {
 	h.do(t, "DELETE", "/api/sessions/"+c.SID+"/clients/"+viewer, c.Token, c.ClientID, nil)
 	if resp, body := h.do(t, "GET", "/"+first, "", "", nil); resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "no longer in the session") {
 		t.Fatalf("an evicted participant's link: %s %s", resp.Status, body)
+	}
+}
+
+// TestDownloadLinksCappedPerSession: a session that mints links without end
+// (a participant minting clients to do it) is refused alone; another
+// session's downloads are untouched, and a deleted session's links go.
+func TestDownloadLinksCappedPerSession(t *testing.T) {
+	h := start(t, func(o *Options) { o.Caps.MaxUploadBytes = 1 << 30 })
+	ready := func(sender uint32) (created, string) {
+		c := h.create(t)
+		s, _ := h.registerSender(t, c)
+		payload := noise(2000, sender)
+		_, req := h.streamRequest(t, c, s, "f.bin", payload, sender)
+		h.approve(t, c, req.ID)
+		h.sendAll(t, c, s, req.ID, payload, 1<<20, false)
+		return c, h.waitTerminal(t, c).BID
+	}
+	a, abid := ready(0x61)
+	b, bbid := ready(0x62)
+	link := func(c created, client, bid string) int {
+		resp, _ := h.do(t, "POST", "/api/sessions/"+c.SID+"/download-link", c.Token, client, []byte(`{"beam":"`+bid+`","as":"raw"}`))
+		return resp.StatusCode
+	}
+	for i := 0; i < maxSessionTickets; i++ {
+		if code := link(a, h.registerAs(t, a, ""), abid); code != http.StatusOK {
+			t.Fatalf("link %d: %d", i, code)
+		}
+	}
+	if code := link(a, h.registerAs(t, a, ""), abid); code != http.StatusServiceUnavailable {
+		t.Fatalf("past the session's cap: %d, want 503", code)
+	}
+	if code := link(b, b.ClientID, bbid); code != http.StatusOK {
+		t.Fatalf("another session's download: %d, want 200", code)
+	}
+	h.do(t, "DELETE", "/api/sessions/"+a.SID+"?hard", a.Token, a.ClientID, nil)
+	h.srv.tickets.mu.Lock()
+	left := len(h.srv.tickets.bySID[a.SID])
+	h.srv.tickets.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("a deleted session kept %d links", left)
 	}
 }

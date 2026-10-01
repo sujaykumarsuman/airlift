@@ -57,7 +57,8 @@ pass over gigabytes. A part cut short keeps what arrived and the sender resumes
 from `received`; a dropped connection costs at most one part. A part's body
 must keep moving (each read within 60 s, the part within 15 minutes) and no
 cleanup ever waits on a part in flight, so a stalled sender holds nothing but
-its own upload. Only progress keeps an approval fresh. There is **no
+its own upload. Only real progress (1 MiB, or the last byte) keeps an approval
+fresh, so a trickle cannot hold a full-size reservation. There is **no
 bundle stage**: whatever the file holds — a repobundle included — it is the
 result, downloadable as `raw`. On a match the staging directory is renamed to
 `<data_dir>/<sid>/<bid>/` (ADR 0016's layout, `raw/` and `meta.json`, which

@@ -22,8 +22,11 @@ import (
 // the session.
 
 const (
-	ticketTTL  = 15 * time.Minute
-	maxTickets = 4096 // outstanding across the tower; a client asking again reuses its own
+	ticketTTL = 15 * time.Minute
+	// maxSessionTickets bounds one session's outstanding links: a session that
+	// mints more (a participant minting clients to do it) is refused alone,
+	// never anyone else's downloads. A client asking again reuses its own.
+	maxSessionTickets = 256
 )
 
 type ticket struct {
@@ -37,46 +40,75 @@ type ticket struct {
 func (t ticket) key() string { return fmt.Sprintf("%s/%08x/%s/%s", t.sid, t.sender, t.as, t.client) }
 
 type tickets struct {
-	mu     sync.Mutex
-	m      map[string]ticket
-	byKey  map[string]string // ticket.key() → id, so a repeat click reuses the link
-	pruned time.Time
+	mu    sync.Mutex
+	m     map[string]ticket
+	byKey map[string]string          // ticket.key() → id, so a repeat click reuses the link
+	bySID map[string]map[string]bool // session → its ticket ids
+}
+
+// forgetLocked drops ticket id.
+func (ts *tickets) forgetLocked(id string) {
+	t, ok := ts.m[id]
+	if !ok {
+		return
+	}
+	delete(ts.m, id)
+	if ts.byKey[t.key()] == id {
+		delete(ts.byKey, t.key())
+	}
+	if ids := ts.bySID[t.sid]; ids != nil {
+		delete(ids, id)
+		if len(ids) == 0 {
+			delete(ts.bySID, t.sid)
+		}
+	}
 }
 
 // issue mints a link for t, or hands back the one its client already holds
 // for the same download while most of its life is left. It refuses (false)
-// when maxTickets are outstanding.
+// when t's session already holds maxSessionTickets live links. Only that
+// session's links are scanned, so the cost is bounded per session.
 func (ts *tickets) issue(t ticket, now time.Time) (string, bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	if ts.m == nil {
-		ts.m, ts.byKey = map[string]ticket{}, map[string]string{}
-	}
-	if now.Sub(ts.pruned) >= time.Minute || len(ts.m) >= maxTickets { // forget the expired, now and then
-		for id, old := range ts.m {
-			if !now.Before(old.expires) {
-				delete(ts.m, id)
-				if ts.byKey[old.key()] == id {
-					delete(ts.byKey, old.key())
-				}
-			}
-		}
-		ts.pruned = now
+		ts.m, ts.byKey, ts.bySID = map[string]ticket{}, map[string]string{}, map[string]map[string]bool{}
 	}
 	if id, ok := ts.byKey[t.key()]; ok {
 		if old, live := ts.m[id]; live && old.expires.Sub(now) > ticketTTL/2 {
 			return id, true
 		}
 	}
-	if len(ts.m) >= maxTickets {
-		return "", false
+	ids := ts.bySID[t.sid]
+	if len(ids) >= maxSessionTickets {
+		for id := range ids { // forget this session's expired links before refusing
+			if !now.Before(ts.m[id].expires) {
+				ts.forgetLocked(id)
+			}
+		}
+		if len(ts.bySID[t.sid]) >= maxSessionTickets {
+			return "", false
+		}
 	}
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	id := base64.RawURLEncoding.EncodeToString(b[:])
 	ts.m[id] = t
 	ts.byKey[t.key()] = id
+	if ts.bySID[t.sid] == nil {
+		ts.bySID[t.sid] = map[string]bool{}
+	}
+	ts.bySID[t.sid][id] = true
 	return id, true
+}
+
+// dropSession forgets every link into a session that has been deleted or swept.
+func (ts *tickets) dropSession(sid string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	for id := range ts.bySID[sid] {
+		ts.forgetLocked(id)
+	}
 }
 
 // expiry is when ticket id lapses (zero once it has gone).
@@ -91,6 +123,9 @@ func (ts *tickets) lookup(id string, now time.Time) (ticket, bool) {
 	defer ts.mu.Unlock()
 	t, ok := ts.m[id]
 	if !ok || !now.Before(t.expires) {
+		if ok {
+			ts.forgetLocked(id)
+		}
 		return ticket{}, false
 	}
 	return t, true
@@ -137,7 +172,7 @@ func (srv *Server) downloadLink(w http.ResponseWriter, r *http.Request, s *sessi
 	id, ok := srv.tickets.issue(t, now)
 	if !ok {
 		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusServiceUnavailable, "too many download links outstanding; try again in a minute")
+		writeError(w, http.StatusServiceUnavailable, "this session has too many download links outstanding; try again in a minute")
 		return
 	}
 	s.MarkActivity(c)

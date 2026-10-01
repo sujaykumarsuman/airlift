@@ -561,8 +561,11 @@ func TestSendStopsEarly(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "x.txt")
 	os.WriteFile(src, []byte("x\n"), 0o644)
 	start := time.Now()
-	if code := run([]string{"beam", src, "-s", tw.ts.URL + "/" + s.SID + "#t=" + s.Token, "--wait", "30s"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "not open any more") {
+	if code := run([]string{"beam", src, "-s", tw.ts.URL + "/" + s.SID + "#t=" + s.Token, "--wait", "30s"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "not open any more; the upload request was withdrawn") {
 		t.Fatalf("session ended mid-wait: exit %d\n%s", code, stderr.String())
+	}
+	if sess, _ := tw.store.Get(s.SID); len(sess.Snapshot().Uploads) != 0 {
+		t.Fatal("a request should not outlive its session's end: a reopen would list it again")
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Fatal("the wait should end with the session, not run out")

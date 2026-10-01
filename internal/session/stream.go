@@ -24,11 +24,17 @@ var (
 const (
 	streamUnitMin  = 1 << 20 // a streamed beam's progress unit: 1 MiB…
 	streamUnitsMax = 8192    // …doubled until the beam counts at most this many
+	// streamFresh is the progress that keeps an approval fresh: a trickle of a
+	// few bytes now and then must not hold a full-size disk reservation for a
+	// session's whole life. A link that cannot move 1 MiB in UploadApprovedTTL
+	// (under 2 KB/s) lets its approval expire.
+	streamFresh = 1 << 20
 )
 
 // streamState is a streamed beam's progress in bytes.
 type streamState struct {
 	size, unit, received int64
+	fresh                int64 // received when the approval was last refreshed
 }
 
 // streamUnit is the progress unit for a payload of size bytes: the bitmap and
@@ -130,8 +136,9 @@ func (s *Session) streamOwnedLocked(b *Beam) bool {
 }
 
 // StreamWrote records that streamed beam b now holds received of its bytes.
-// Only progress keeps its approval fresh — an empty part does not, so an
-// approval nobody moves still expires (ADR 0023). It returns false when the
+// Only real progress keeps its approval fresh — streamFresh bytes since the
+// last refresh, or the last byte — so an approval kept by empty parts or a
+// trickle still expires (ADR 0023). It returns false when the
 // beam no longer takes them — withdrawn, revoked, expired or removed — and the
 // caller drops what it wrote.
 func (s *Session) StreamWrote(b *Beam, received int64) bool {
@@ -143,8 +150,8 @@ func (s *Session) StreamWrote(b *Beam, received int64) bool {
 	now := s.now()
 	st := b.stream
 	u := s.uploads[b.upload]
-	if received > st.received {
-		u.LastUsed = now
+	if received-st.fresh >= streamFresh || (received >= st.size && received > st.received) {
+		u.LastUsed, st.fresh = now, received
 	}
 	st.received = received
 	u.Received = received

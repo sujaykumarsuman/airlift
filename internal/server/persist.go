@@ -129,6 +129,7 @@ func (srv *Server) removeSessionDir(sid string) {
 		return
 	}
 	srv.dropSessionReceivers(sid)
+	srv.tickets.dropSession(sid)
 	if err := os.RemoveAll(filepath.Join(srv.opts.DataDir, sid)); err != nil {
 		srv.opts.Logf("session %s: data cleanup failed: %v", sid, err)
 	}
