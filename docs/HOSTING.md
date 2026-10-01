@@ -31,7 +31,7 @@ tagging a release is the whole deploy.
 | config (`public_url`, `listen=0.0.0.0:8443`, `trusted_proxies=10.42.0.0/16`) | the HelmRelease `values.configFile` in `apps/airlift.yaml` |
 | admin token | a SOPS-encrypted Secret `airlift-admin` (`apps/secrets/airlift-admin.enc.yaml`), decrypted in-cluster by Flux |
 | TLS | Traefik + cert-manager (Let's Encrypt) on the default `TLSStore`; `infrastructure/` in the infra repo |
-| session data | a 10 Gi `longhorn-static` PVC (Longhorn, Delete-reclaim) holding `data_dir`: room for a streamed `airlift beam -s` upload of up to `max_upload_bytes` (5 GiB) beside the QR beams (ADR 0024); the tower refuses an upload its free space cannot hold. Emptied on start regardless — memory-only sessions, ADR 0005 |
+| session data | a 50 Gi `longhorn-static` PVC (Longhorn, Delete-reclaim, thin-provisioned) holding `data_dir`: room for several streamed `airlift beam -s` uploads of up to `max_upload_bytes` (5 GiB) each, kept as sent, beside the QR beams (ADR 0024); the tower refuses an upload its free space cannot hold. Emptied on start regardless — memory-only sessions, ADR 0005 |
 
 ## Changing configuration
 

@@ -103,13 +103,14 @@ airlift beam ./my-repo -s 'https://projects.sujaykumar.dev/airlift/qkf-mzt-bwp#t
 session admins for leave to upload: they see the beam's name and size under
 **Upload requests** on the dashboard and tap Approve or Deny (a sender that is
 itself a session admin is approved at once). The file then **streams as it is**,
-from disk to the tower's disk — a folder or several files are bundled into a
-temporary file first — so neither end holds it in memory, compressible parts go
-gzip-encoded, and a dropped connection resumes where the tower's copy ends. The
-tower checks its sha256 (and unpacks a bundle) and it is READY. A direct send
-can be up to the tower's `max_upload_bytes` — **5 GiB** by default, against
-`max_gz_bytes` (64 MiB) for a beam scanned off a screen — and the tower refuses
-up front what its disk cannot hold (ADR 0024). The CLI shows a countdown while
+from disk to the tower's disk, and is kept exactly as sent — no repobundle on
+either end; a folder or several files go as one zip the CLI builds in a
+temporary file — so neither end holds it in memory, compressible parts go
+gzip-encoded in transit, and a dropped connection resumes where the tower's copy
+ends. The tower checks its sha256 and it is READY. Large files are this path's
+alone: a direct send can be up to the tower's `max_upload_bytes` — **5 GiB** by
+default — while a beam scanned off a screen stays within `max_gz_bytes` (64
+MiB); the tower refuses up front what its disk cannot hold (ADR 0024). The CLI shows a countdown while
 it waits, a progress bar while it sends, and the tower's verdicts at the end,
 then prints the dashboard link to download from; the dashboard hands the
 download to the browser's own download manager, so a large file goes straight

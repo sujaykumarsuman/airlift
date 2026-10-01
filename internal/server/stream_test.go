@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sujaykumarsuman/airlift/internal/beam"
 	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
@@ -44,9 +45,9 @@ type streamReply struct {
 
 // streamRequest asks to stream payload as name under sender and returns the
 // request id and its state.
-func (h *harness) streamRequest(t *testing.T, c created, client, name string, payload []byte, sender uint32, bundle bool) (int, uploadReply) {
+func (h *harness) streamRequest(t *testing.T, c created, client, name string, payload []byte, sender uint32) (int, uploadReply) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"name": name, "bytes": len(payload), "sha256": sha(payload), "sender_session": sender, "bundle": bundle})
+	body, _ := json.Marshal(map[string]any{"name": name, "bytes": len(payload), "sha256": sha(payload), "sender_session": sender})
 	resp, data := h.do(t, "POST", "/api/sessions/"+c.SID+"/uploads", c.Token, client, body)
 	var r uploadReply
 	json.Unmarshal(data, &r)
@@ -141,7 +142,7 @@ func TestStreamUploadFile(t *testing.T) {
 	sender, _ := h.registerSender(t, c)
 	payload := append(bytes.Repeat([]byte("compressible text\n"), 20000), noise(150000, 7)...)
 
-	code, req := h.streamRequest(t, c, sender, "big.bin", payload, 0xB16, false)
+	code, req := h.streamRequest(t, c, sender, "big.bin", payload, 0xB16)
 	if code != http.StatusOK || req.Status != session.UploadPending {
 		t.Fatalf("request: %d %+v", code, req)
 	}
@@ -192,7 +193,7 @@ func TestStreamUploadFileFinishes(t *testing.T) {
 	c := h.create(t)
 	sender, _ := h.registerSender(t, c)
 	payload := append(bytes.Repeat([]byte("compressible text\n"), 20000), noise(150000, 7)...)
-	_, req := h.streamRequest(t, c, sender, "big.bin", payload, 0xB17, false)
+	_, req := h.streamRequest(t, c, sender, "big.bin", payload, 0xB17)
 	h.approve(t, c, req.ID)
 	for off, i := 0, 0; off < len(payload); i++ {
 		end := min(off+50000, len(payload))
@@ -232,52 +233,64 @@ func TestStreamUploadFileFinishes(t *testing.T) {
 	}
 }
 
-// TestStreamUploadBundle: a streamed repobundle is unpacked from the file into
-// the tree, zipped, and served — the same layout as a scanned beam.
-func TestStreamUploadBundle(t *testing.T) {
+// TestStreamUploadKeptAsIs: a streamed upload is kept exactly as it was sent —
+// a repobundle too: no bundle stage, no tree, no zip, only the file.
+func TestStreamUploadKeptAsIs(t *testing.T) {
 	h := start(t, func(o *Options) { o.Caps.MaxUploadBytes = 1 << 30 })
 	c := h.create(t)
 	sender, _ := h.registerSender(t, c)
 	payload, _ := os.ReadFile(filepath.Join(fixtures, "multi", "bundle-base64.txt"))
-	_, req := h.streamRequest(t, c, sender, "tree.txt", payload, 0xB0B, true)
+	_, req := h.streamRequest(t, c, sender, "tree.txt", payload, 0xB0B)
 	h.approve(t, c, req.ID)
 	h.sendAll(t, c, sender, req.ID, payload, 7000, true)
 	b := h.waitTerminal(t, c)
-	if b.State != session.StateReady || b.Bundle == nil || b.Bundle.Files != 7 || b.Verdicts.Bundle == nil || !b.Verdicts.Bundle.OK {
-		t.Fatalf("bundle beam %+v", b)
-	}
-	if strings.Join(b.Downloads, ",") != "raw,zip" {
-		t.Fatalf("downloads %v", b.Downloads)
+	if b.State != session.StateReady || b.Bundle != nil || b.Verdicts.Bundle != nil || strings.Join(b.Downloads, ",") != "raw" {
+		t.Fatalf("a streamed repobundle should be kept as a file: %+v", b)
 	}
 	dir := filepath.Join(h.dataDir, c.SID, b.BID)
-	want := readTree(t, filepath.Join(fixtures, "multi", "tree"))
-	sameTree(t, readTree(t, filepath.Join(dir, "tree")), want, "streamed tree")
-	if fi, err := os.Stat(filepath.Join(dir, "tree", "bin", "run.sh")); err != nil || fi.Mode()&0o111 == 0 {
-		t.Fatalf("the executable bit: %v", err)
+	entries, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
 	}
-	resp, z := h.download(t, c, b.BID, "zip")
-	if resp.StatusCode != 200 {
-		t.Fatalf("zip: %s", resp.Status)
+	if strings.Join(names, ",") != "meta.json,raw" {
+		t.Fatalf("beam dir holds %v, want only raw/ and meta.json", names)
 	}
-	sameTree(t, unzip(t, z), want, "streamed zip")
-	if left, _ := filepath.Glob(filepath.Join(dir, ".entry-*")); len(left) != 0 {
-		t.Fatalf("staged entries left: %v", left)
-	}
-
-	// One file in a bundle is offered as that file.
-	one, _ := os.ReadFile(filepath.Join(fixtures, "single", "bundle-text.txt"))
-	c2 := h.create(t)
-	s2, _ := h.registerSender(t, c2)
-	_, r2 := h.streamRequest(t, c2, s2, "one.txt", one, 0x1, false) // undeclared: unpacked all the same
-	h.approve(t, c2, r2.ID)
-	h.sendAll(t, c2, s2, r2.ID, one, 1<<20, false)
-	if b := h.waitTerminal(t, c2); b.State != session.StateReady || strings.Join(b.Downloads, ",") != "raw,file" {
-		t.Fatalf("single-file bundle %+v", b)
+	if resp, got := h.download(t, c, b.BID, "raw"); resp.StatusCode != 200 || !bytes.Equal(got, payload) {
+		t.Fatalf("raw: %s", resp.Status)
 	}
 }
 
-// TestStreamUploadFailures: a payload that does not match its sha256, or a
-// bundle with a bad entry, ends FAILED with nothing kept on disk.
+// TestLargeFilesOnlyByCommandLine: in one tower, a beam in frames (a QR scan)
+// over max_gz_bytes fails on arrival, while a streamed upload far larger is
+// taken — the large-file path is the command line's alone.
+func TestLargeFilesOnlyByCommandLine(t *testing.T) {
+	h := start(t, func(o *Options) {
+		o.Store.SetLimits(10, 4<<10)
+		o.Caps = Caps{MaxGzBytes: 4 << 10, MaxUploadBytes: 1 << 30}
+	})
+	c := h.create(t)
+	big := noise(64<<10, 21)
+	d, err := beam.Encode(big, "scanned.bin", 1311, 0x5CA, beam.ModeSequential, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.do(t, "POST", "/api/sessions/"+c.SID+"/frames", c.Token, c.ClientID, framesBody(d.Frames[:1]))
+	if b := h.oneBeam(t, c); b.State != session.StateFailed || b.Error == nil || !strings.Contains(*b.Error, "exceeds") {
+		t.Fatalf("a scanned beam over max_gz_bytes: %+v", b)
+	}
+	c2 := h.create(t)
+	sender, _ := h.registerSender(t, c2)
+	_, req := h.streamRequest(t, c2, sender, "cli.bin", big, 0xC11)
+	h.approve(t, c2, req.ID)
+	h.sendAll(t, c2, sender, req.ID, big, 32<<10, false)
+	if b := h.waitTerminal(t, c2); b.State != session.StateReady {
+		t.Fatalf("the same size by the command line: %+v", b)
+	}
+}
+
+// TestStreamUploadFailures: a payload that does not match its sha256 ends
+// FAILED with nothing kept on disk.
 func TestStreamUploadFailures(t *testing.T) {
 	h := start(t, func(o *Options) { o.Caps.MaxUploadBytes = 1 << 30 })
 	c := h.create(t)
@@ -297,19 +310,6 @@ func TestStreamUploadFailures(t *testing.T) {
 		t.Fatalf("a failed upload left files: %v %v", err, stagingLeft(t, h.dataDir, c.SID))
 	}
 
-	bad := []byte("#repobundle v1 format=text\n@@@FILE@@@ 2 " + sha([]byte("ok")) + " 644 a\nok\n@@@FILE@@@ 2 " + sha([]byte("no")) + " 644 b\nyes\n@@@END@@@\n")
-	c2 := h.create(t)
-	s2, _ := h.registerSender(t, c2)
-	_, r2 := h.streamRequest(t, c2, s2, "bad.txt", bad, 0x2, true)
-	h.approve(t, c2, r2.ID)
-	h.sendAll(t, c2, s2, r2.ID, bad, 1<<20, false)
-	b = h.waitTerminal(t, c2)
-	if b.State != session.StateFailed || b.Verdicts.Bundle == nil || b.Verdicts.Bundle.OK || !strings.Contains(b.Verdicts.Bundle.Actual, "b") {
-		t.Fatalf("bad bundle %+v", b)
-	}
-	if entries, _ := os.ReadDir(filepath.Join(h.dataDir, c2.SID)); len(entries) != 0 {
-		t.Fatalf("a failed bundle left %v", entries)
-	}
 }
 
 // TestStreamUploadLimits: max_upload_bytes bounds a streamed upload (not
@@ -323,19 +323,16 @@ func TestStreamUploadLimits(t *testing.T) {
 	})
 	c := h.create(t)
 	sender, _ := h.registerSender(t, c)
-	if code, _ := h.streamRequest(t, c, sender, "over.bin", make([]byte, 1<<20+1), 1, false); code != http.StatusRequestEntityTooLarge {
+	if code, _ := h.streamRequest(t, c, sender, "over.bin", make([]byte, 1<<20+1), 1); code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("over max_upload_bytes: %d", code)
 	}
 	payload := noise(200<<10, 1) // 200 KiB: over max_gz_bytes, within max_upload_bytes
 	free = diskMargin + 100<<10
-	if code, _ := h.streamRequest(t, c, sender, "full.bin", payload, 2, false); code != http.StatusInsufficientStorage {
+	if code, _ := h.streamRequest(t, c, sender, "full.bin", payload, 2); code != http.StatusInsufficientStorage {
 		t.Fatalf("a full disk at the request: %d", code)
 	}
 	free = diskMargin + 500<<10
-	if code, _ := h.streamRequest(t, c, sender, "bundle.txt", payload, 3, true); code != http.StatusInsufficientStorage {
-		t.Fatalf("a bundle needs room for its tree and zip too: %d", code)
-	}
-	code, req := h.streamRequest(t, c, sender, "fits.bin", payload, 4, false)
+	code, req := h.streamRequest(t, c, sender, "fits.bin", payload, 4)
 	if code != http.StatusOK {
 		t.Fatalf("fits: %d", code)
 	}
@@ -359,12 +356,12 @@ func TestStreamUploadLimits(t *testing.T) {
 	// A reservation held by an upload in flight counts against the next request.
 	c2 := h.create(t)
 	s2, _ := h.registerSender(t, c2)
-	_, r2 := h.streamRequest(t, c2, s2, "a.bin", payload, 5, false)
+	_, r2 := h.streamRequest(t, c2, s2, "a.bin", payload, 5)
 	h.approve(t, c2, r2.ID)
 	h.part(t, c2, s2, r2.ID, 0, payload[:1000], false)
 	free = diskMargin + int64(len(payload)) + 1000 // room for one, not for it and the one in flight
 	s3, _ := h.registerSender(t, c2)
-	if code, _ := h.streamRequest(t, c2, s3, "b.bin", payload, 6, false); code != http.StatusInsufficientStorage {
+	if code, _ := h.streamRequest(t, c2, s3, "b.bin", payload, 6); code != http.StatusInsufficientStorage {
 		t.Fatalf("the upload in flight holds its room: %d", code)
 	}
 }
@@ -378,7 +375,7 @@ func TestStreamUploadEndings(t *testing.T) {
 	begin := func(sender uint32) (created, string, string) {
 		c := h.create(t)
 		s, _ := h.registerSender(t, c)
-		_, req := h.streamRequest(t, c, s, "x.bin", payload, sender, false)
+		_, req := h.streamRequest(t, c, s, "x.bin", payload, sender)
 		h.approve(t, c, req.ID)
 		if code, _ := h.part(t, c, s, req.ID, 0, payload[:100<<10], false); code != http.StatusOK {
 			t.Fatalf("first part: %d", code)
@@ -468,7 +465,7 @@ func TestDownloadLink(t *testing.T) {
 	c := h.create(t)
 	sender, _ := h.registerSender(t, c)
 	payload := noise(70000, 5)
-	_, req := h.streamRequest(t, c, sender, "film.bin", payload, 0xF11, false)
+	_, req := h.streamRequest(t, c, sender, "film.bin", payload, 0xF11)
 	h.approve(t, c, req.ID)
 	h.sendAll(t, c, sender, req.ID, payload, 1<<20, false)
 	b := h.waitTerminal(t, c)

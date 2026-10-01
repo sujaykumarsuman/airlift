@@ -34,8 +34,8 @@ POST   /api/sessions/{sid}/max-age    s-admin → 200 {expires_at}; +1h before t
 POST   /api/sessions/{sid}/knock      public → body {name?} → {id, status}; ask to be admitted (ADR 0021)
 GET    /api/sessions/{sid}/knock      public → {status: pending|admitted|denied|none, token?} (poll; none once not live)
 POST   /api/sessions/{sid}/knock/{kid}  s-admin → body {decision:"admit"|"deny"}; resolve a pending knock
-POST   /api/sessions/{sid}/uploads    client → body {name, bytes, sha256, bundle?, sender_session} → {id, status: pending|approved}
-                                             ask leave to stream one payload directly (ADR 0024; rate_join; 403 unless
+POST   /api/sessions/{sid}/uploads    client → body {name, bytes, sha256, sender_session} → {id, status: pending|approved}
+                                             ask leave to stream one file directly (ADR 0024; rate_join; 403 unless
                                              a sender; 413 over max_upload_bytes; 507 when the disk cannot hold it;
                                              409 for a beam already present, an approval still open for another
                                              beam, or the pending caps). Without sha256 the body is ADR 0023's
@@ -151,7 +151,9 @@ admin; password/token joiners are admins iff `joiners_admin` was set.
 
 A request that carries `sha256` is **streamed** (ADR 0024): its approval admits
 no frames (`403`), only `POST …/uploads/{uid}/data` parts from its own sender,
-each starting where the tower's copy ends. Everything above about approval,
+each starting where the tower's copy ends, and the file is kept as sent. Large
+files are this path's alone: `max_upload_bytes` bounds it, while a beam in
+frames stays within `max_gz_bytes`. Everything above about approval,
 expiry (a part that lands keeps it fresh), withdrawal and parking holds for it.
 
 There is no query-string fallback for the token, so browsers use `fetch`: a
@@ -180,7 +182,7 @@ Session expiry is no longer refreshed by every call — see Lifecycle.
 | Streamed part | `max_body` bytes of the payload, encoded or not | `413 {received}`: what fit is kept |
 | Beam in frames (a QR scan) | `max_gz_bytes` (default 64 MiB) of gzip | the beam fails on arrival |
 | Streamed upload | `max_upload_bytes` (default 5 GiB) | `413` on the request |
-| Disk for a streamed upload | free space under `data_dir`, less uploads in flight and 64 MiB; a bundle needs 3× its size | `507` on the request or the first part; mid-upload, the beam fails |
+| Disk for a streamed upload | free space under `data_dir`, less uploads in flight and 64 MiB | `507` on the request or the first part; mid-upload, the beam fails |
 | Frames per `POST /frames` | 500 | `413` |
 | Frame string | 4096 characters | counted as `bad` |
 | Beams per place | `max_beams` (default 10) | over-cap MANIFEST auto-evicts the oldest terminal beam, else counted as `bad` |
@@ -424,13 +426,14 @@ like frames (`rate_frames`). `N` must be the byte the tower's copy ends at —
 `0` for the first part, which creates the beam (RECEIVING; at the beam cap it
 evicts the oldest finished beam, else `409`) — and anything else is `409
 {"error":"offset mismatch","received":R}`. A part carries at most `max_body`
-bytes of the payload: more is `413 {received}` with what fit kept. A body that
+bytes of the file: more is `413 {received}` with what fit kept. A body that
 breaks off keeps what arrived; the sender resumes from the `received` a poll
 of the request reports. The reply is `{received, state}`. The tower appends to
 `<data_dir>/<sid>/.<bid>.upload/raw/<name>` and hashes as it goes; when every
-byte is in, the beam is VERIFYING, the sha256 is compared, a repobundle is
-unpacked from the file into `tree/` and zipped, and the directory is renamed to
-`<sid>/<bid>/` — READY, or FAILED with nothing kept. `403` once the approval
+byte is in, the beam is VERIFYING, the sha256 is compared, and the directory is
+renamed to `<sid>/<bid>/` — READY with the file kept exactly as sent (no bundle
+stage, whatever it holds; the one download is `raw`), or FAILED with nothing
+kept. The CLI sends a folder as one zip it builds, never as a repobundle. `403` once the approval
 has ended (withdrawn, revoked, expired, spent), `404` for another sender's
 request, `415` for another encoding, `507` when the disk is full.
 

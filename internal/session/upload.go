@@ -53,8 +53,7 @@ type Upload struct {
 	Bytes     int64  // frames: the payload after gzip, as its manifest must carry it; streamed: the payload's size
 	Chunks    int    // frames: as the manifest must carry it; 0 when streamed
 	Stream    bool   // the payload's bytes arrive straight, not in frames (ADR 0024)
-	SHA256    string // streamed: the payload's declared sha256
-	Bundle    bool   // streamed: the sender says the payload is a repobundle
+	SHA256    string // streamed: the file's declared sha256
 	Received  int64  // streamed: the bytes the tower holds so far
 	Sender    uint32 // the beam's sender u32 (its bid in hex)
 	At        time.Time
@@ -95,13 +94,12 @@ type UploadSpec struct {
 	Bytes  int64  // frames: the gzip size; streamed: the payload's size
 	Chunks int    // frames only
 	Stream bool   // streamed
-	SHA256 string // streamed: the payload's sha256, lowercase hex
-	Bundle bool   // streamed: the payload is a repobundle
+	SHA256 string // streamed: the file's sha256, lowercase hex
 	Sender uint32
 }
 
 func (u *Upload) spec() UploadSpec {
-	return UploadSpec{Name: u.Name, Bytes: u.Bytes, Chunks: u.Chunks, Stream: u.Stream, SHA256: u.SHA256, Bundle: u.Bundle, Sender: u.Sender}
+	return UploadSpec{Name: u.Name, Bytes: u.Bytes, Chunks: u.Chunks, Stream: u.Stream, SHA256: u.SHA256, Sender: u.Sender}
 }
 
 // SetSender marks c as a direct sender: its frames need an approved upload.
@@ -176,7 +174,7 @@ func (s *Session) RequestUpload(c *Client, spec UploadSpec) (string, string, err
 	}
 	s.forgetEndedLocked(c.ID) // one record per client is all a poll needs
 	u := &Upload{ID: randKnockID(), ClientID: c.ID, Name: spec.Name, Bytes: spec.Bytes, Chunks: spec.Chunks, Stream: spec.Stream,
-		SHA256: spec.SHA256, Bundle: spec.Bundle, Sender: spec.Sender, At: now, State: UploadPending}
+		SHA256: spec.SHA256, Sender: spec.Sender, At: now, State: UploadPending}
 	if c.SessionAdmin {
 		u.State, u.DecidedAt, u.By = UploadApproved, now, c.Name
 	}

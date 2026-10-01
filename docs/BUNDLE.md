@@ -54,9 +54,6 @@ nor the end marker.
 - **base64** survives whitespace and line-ending mangling and carries
   binaries. `airlift beam` defaults to `--format auto`: text when every file
   is text and none holds a boundary marker, else base64.
-- `Pack` reads each file twice and never holds it: once for its size, sha256
-  and the text checks, once to write it (failing if it changed in between).
-  The bytes are what reading it whole would give.
 
 ## What unpacking guarantees
 
@@ -69,12 +66,3 @@ on-disk tree — so a malicious bundle cannot escape its destination. An entry
 that fails is never written; airlift never materialises content it could not
 verify (stricter than the original script, which wrote corrupt content and
 warned).
-
-A streamed direct upload (ADR 0024) can be far larger than memory, so the tower
-unpacks it with `Unpack` instead: one pass over the file, an entry's content
-staged beside the tree until its digest is known and moved into place only if
-it verifies, deciding exactly what `Parse` decides for every entry (the tests
-hold the two to it, read buffer sizes included). Once an entry fails, the rest
-are checked but not written, and the beam fails whole. `ZipTree` then builds the
-zip from the tree's files, streaming. A header line (the bundle's or an entry's)
-longer than 64 KiB is malformed there.

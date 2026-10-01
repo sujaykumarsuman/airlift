@@ -11,32 +11,27 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 
-	"github.com/sujaykumarsuman/airlift/internal/bundle"
 	"github.com/sujaykumarsuman/airlift/internal/session"
 )
 
-// Streamed direct upload (ADR 0024). An approved sender POSTs the payload's
+// Streamed direct upload (ADR 0024). An approved sender POSTs the file's
 // bytes in order, a part at a time, each at the offset the tower already
 // holds. The tower appends them to <data_dir>/<sid>/.<bid>.upload/raw/<name>
 // and hashes them as they land, so neither the upload nor its verification
-// holds the payload in memory; a repobundle is then unpacked from the file.
-// When every byte is in, the staged directory becomes the beam's directory
-// (ADR 0016) and the downloads are served from it.
+// holds the file in memory. The file is kept exactly as it was sent — no
+// bundle stage, whatever it holds. When every byte is in and its sha256
+// matches, the staged directory becomes the beam's directory (ADR 0016) and
+// the download is served from it.
 
 // diskMargin is kept free beside every upload: the QR beams, the receipts and
 // the filesystem's own bookkeeping need somewhere to go.
 const diskMargin = 64 << 20
-
-// bundleFactor is how much disk a repobundle needs per byte uploaded: the
-// bundle itself, its unpacked tree and the zip of the tree.
-const bundleFactor = 3
 
 // receiver is one streamed upload being written. Its mutex orders the parts;
 // left is guarded by Server.recvMu.
@@ -51,7 +46,6 @@ type receiver struct {
 	name     string // the download name
 	size     int64
 	sha      string // as declared
-	bundle   bool   // declared a repobundle
 	hash     hash.Hash
 	received int64
 	left     int64 // disk reserved and not yet written
@@ -190,12 +184,8 @@ func (srv *Server) receiverFor(w http.ResponseWriter, s *session.Session, t sess
 	dir := filepath.Join(srv.opts.DataDir, s.ID, "."+bid+".upload")
 	name := safeName(t.Name)
 	rc := &receiver{key: key, upload: t.UploadID, sess: s, dir: dir, raw: filepath.Join(dir, "raw", name), name: name,
-		size: t.Size, sha: t.SHA256, bundle: t.Bundle, hash: sha256.New()}
-	need := t.Size
-	if t.Bundle {
-		need *= bundleFactor
-	}
-	if err := srv.reserveLocked(rc, need); err != nil {
+		size: t.Size, sha: t.SHA256, hash: sha256.New()}
+	if err := srv.reserveLocked(rc, t.Size); err != nil {
 		writeError(w, http.StatusInsufficientStorage, err.Error())
 		return nil
 	}
@@ -403,9 +393,9 @@ func (srv *Server) writeProgress(w http.ResponseWriter, s *session.Session, rc *
 
 // finalizeStream verifies a fully received streamed beam and makes it READY
 // or FAILED: the sha256 the bytes were hashed to as they landed against the
-// declared one, then — for a repobundle — the bundle stage, streamed from the
-// file into the tree and a zip; then the staging directory becomes the beam's
-// directory. Nothing is held in memory and nothing that failed is kept.
+// declared one — no pass over the file, and no bundle stage: the file is the
+// result, as it was sent. Then the staging directory becomes the beam's
+// directory. Nothing failed is kept.
 func (srv *Server) finalizeStream(rc *receiver) {
 	s, b := rc.sess, rc.beam
 	defer srv.forget(rc)
@@ -423,68 +413,17 @@ func (srv *Server) finalizeStream(rc *receiver) {
 		fail(fmt.Sprintf("verification failed: the upload's %d bytes do not match its sha256", rc.size))
 		return
 	}
-	out.Downloads["raw"] = session.Download{Name: rc.name, ContentType: "application/octet-stream", Src: fileBlob{rc.raw}}
-
-	isBundle, err := startsWithMagic(rc.raw)
-	if err != nil {
-		fail("the tower could not read the upload back: " + err.Error())
-		return
-	}
-	if isBundle {
-		if !rc.bundle { // undeclared: the tree and the zip still need their room
-			srv.recvMu.Lock()
-			err := srv.reserveLocked(rc, (bundleFactor-1)*rc.size)
-			srv.recvMu.Unlock()
-			if err != nil {
-				fail("bundle: not enough disk to unpack it: " + err.Error())
-				return
-			}
-		}
-		u, err := unpackFile(rc.raw, filepath.Join(rc.dir, "tree"), rc.dir)
-		if err != nil {
-			out.Verdicts.Bundle = &session.Verdict{Expected: "well-formed repobundle", Actual: err.Error()}
-			fail("bundle: " + err.Error())
-			return
-		}
-		bad := u.Bad()
-		out.Verdicts.Bundle = &session.Verdict{
-			OK:       len(bad) == 0,
-			Expected: fmt.Sprintf("%d files, each matching its sha256", len(u.Entries)),
-			Actual:   describeBadPaths(len(u.Entries), bad),
-		}
-		if len(bad) > 0 {
-			fail(fmt.Sprintf("bundle: %d of %d files failed verification", len(bad), len(u.Entries)))
-			return
-		}
-		paths := make([]string, 0, min(len(u.Entries), maxSummaryPaths))
-		for _, e := range u.Entries[:min(len(u.Entries), maxSummaryPaths)] {
-			paths = append(paths, e.Path)
-		}
-		out.Bundle = &session.BundleSummary{Files: len(u.Entries), TotalBytes: u.TotalBytes(), Paths: paths}
-		switch len(u.Entries) {
-		case 0:
-		case 1:
-			out.Downloads["file"] = session.Download{Name: path.Base(u.Entries[0].Path), ContentType: "application/octet-stream",
-				Src: fileBlob{filepath.Join(rc.dir, "tree", filepath.FromSlash(u.Entries[0].Path))}}
-		default:
-			zipName := stem(rc.name) + ".zip"
-			if err := zipTreeFile(filepath.Join(rc.dir, zipName), filepath.Join(rc.dir, "tree"), u.Entries); err != nil {
-				fail("bundle: zip: " + err.Error())
-				return
-			}
-			out.Downloads["zip"] = session.Download{Name: zipName, ContentType: "application/zip", Src: fileBlob{filepath.Join(rc.dir, zipName)}}
-		}
-	}
-
 	finished := s.Now()
 	out.FinishedAt = finished
+	final := filepath.Join(srv.opts.DataDir, s.ID, bid)
+	out.Downloads["raw"] = session.Download{Name: rc.name, ContentType: "application/octet-stream", Src: fileBlob{filepath.Join(final, "raw", rc.name)}}
 	meta := beamMeta{
 		SID: s.ID, BID: bid, SenderSession: b.Sender, Name: rc.name, State: session.StateReady, Stream: true,
-		OrigSize: rc.size, OrigSHA256: actual, Verdicts: out.Verdicts, Bundle: out.Bundle,
+		OrigSize: rc.size, OrigSHA256: actual, Verdicts: out.Verdicts,
 		Downloads: downloadsList(out.Downloads), StartedAt: s.BeamStartedAt(b), FinishedAt: finished,
 	}
-	final := filepath.Join(srv.opts.DataDir, s.ID, bid)
-	if err := writeMeta(rc.dir, meta); err == nil {
+	err := writeMeta(rc.dir, meta)
+	if err == nil {
 		err = os.Rename(rc.dir, final)
 	}
 	if err != nil {
@@ -500,51 +439,10 @@ func (srv *Server) finalizeStream(rc *receiver) {
 		srv.removeBeamDir(s.ID, bid)
 		return
 	}
-	for k, d := range out.Downloads { // the staging paths moved with the directory
-		rel, _ := filepath.Rel(rc.dir, d.Src.(fileBlob).path)
-		d.Src = fileBlob{filepath.Join(final, rel)}
-		out.Downloads[k] = d
-	}
 	out.SavedPath = final
 	s.FinishBeam(b, out)
-	srv.opts.Logf("session %s beam %s READY: %s, %d bytes streamed, sha %s%s", s.ID, bid, rc.name, rc.size, actual[:12], describeBundle(out.Bundle))
+	srv.opts.Logf("session %s beam %s READY: %s, %d bytes streamed, sha %s", s.ID, bid, rc.name, rc.size, actual[:12])
 	srv.writeSessionJSON(s)
-}
-
-// startsWithMagic reports whether the file at path is a repobundle.
-func startsWithMagic(path string) (bool, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-	head := make([]byte, len(bundle.Magic))
-	n, err := io.ReadFull(f, head)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return false, err
-	}
-	return bundle.IsBundle(head[:n]), nil
-}
-
-func unpackFile(path, root, tmp string) (*bundle.Unpacked, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return bundle.Unpack(f, root, tmp)
-}
-
-func zipTreeFile(path, root string, entries []bundle.Entry) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	if err := bundle.ZipTree(f, root, entries); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
 }
 
 func writeMeta(dir string, meta beamMeta) error {
@@ -553,18 +451,6 @@ func writeMeta(dir string, meta beamMeta) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "meta.json"), append(blob, '\n'), 0o644)
-}
-
-// describeBadPaths is describeBad for a streamed bundle.
-func describeBadPaths(files int, bad []string) string {
-	if len(bad) == 0 {
-		return fmt.Sprintf("%d files verified", files)
-	}
-	shown := bad
-	if len(shown) > 5 {
-		shown = shown[:5]
-	}
-	return fmt.Sprintf("%d failed: %s", len(bad), strings.Join(shown, ", "))
 }
 
 // humanSize is a byte count for a message: "5.0 GiB", "512 MiB", "900 B".

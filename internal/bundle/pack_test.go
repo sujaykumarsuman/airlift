@@ -2,11 +2,9 @@ package bundle
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -121,92 +119,5 @@ func TestResolveExplicitRejectsEscapes(t *testing.T) {
 	}
 	if _, err := ResolveExplicit(root, []string{"../outside"}); err == nil {
 		t.Fatal("a path outside root was accepted")
-	}
-}
-
-// TestPackStreamsAcrossReads: Pack reads a file in pieces, so a rune, a line
-// start or a base64 group can straddle two reads; the bundle must not change.
-func TestPackStreamsAcrossReads(t *testing.T) {
-	t.Cleanup(func() { packChunk = 1 << 20 })
-	for _, chunk := range []int{1, 2, 3, 7, 64} {
-		packChunk = chunk
-		for _, name := range []string{"single", "multi"} {
-			for _, format := range []string{"text", "base64"} {
-				want, _ := os.ReadFile(filepath.Join(fixtures, name, "bundle-"+format+".txt"))
-				outAbs, _ := filepath.Abs(filepath.Join(fixtures, name, "bundle-"+format+".txt"))
-				var buf bytes.Buffer
-				if _, err := Pack(&buf, filepath.Join(fixtures, name, "tree"), format, nil, outAbs); err != nil {
-					t.Fatal(err)
-				}
-				if !bytes.Equal(buf.Bytes(), want) {
-					t.Fatalf("%s/%s with %d-byte reads differs", name, format, chunk)
-				}
-			}
-		}
-	}
-}
-
-// TestScanFileMatchesWholeFileChecks: the streamed binary and boundary checks
-// decide what isBinaryData and hasBoundaryLine decide on the whole file, and
-// the streamed base64 is wrapBase64's.
-func TestScanFileMatchesWholeFileChecks(t *testing.T) {
-	t.Cleanup(func() { packChunk = 1 << 20 })
-	cases := []string{
-		"", "plain\n", "é", "日本語のテキスト\n", "\xe6\x97", "ok\xffno", "nul\x00byte",
-		"@@@FILE@@@ at the start", "x\n@@@FILE@@@ later\n", "x\n@@@END@@@", "x\n@@@END@@", "x\n@@@FILE@@",
-		" @@@FILE@@@ indented\n", "@@@FIL\nE@@@\n", "line\n\n@@@END@@@\n", "a\r\n@@@FILE@@@\r\n",
-		strings.Repeat("ünïcödé ", 300) + "\n@@@END@@@tail",
-	}
-	dir := t.TempDir()
-	for i, c := range cases {
-		path := filepath.Join(dir, fmt.Sprintf("f%d", i))
-		os.WriteFile(path, []byte(c), 0o644)
-		for _, chunk := range []int{1, 2, 3, 4, 5, 9, 10, 11, 1 << 20} {
-			packChunk = chunk
-			sc, err := scanFile(path, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sc.binary != isBinaryData([]byte(c)) || (!sc.binary && sc.boundary != hasBoundaryLine([]byte(c))) || sc.size != int64(len(c)) {
-				t.Fatalf("%q at %d: binary %v boundary %v", c, chunk, sc.binary, sc.boundary)
-			}
-			var buf bytes.Buffer
-			if err := writePayload(&buf, path, "base64", sc); err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(buf.Bytes(), wrapBase64([]byte(c), 120)) {
-				t.Fatalf("%q at %d: base64 %q", c, chunk, buf.String())
-			}
-		}
-	}
-}
-
-// TestScanFileRandomised throws pieces that matter — markers, newlines, NULs,
-// runes whole and cut — together at random and compares again.
-func TestScanFileRandomised(t *testing.T) {
-	t.Cleanup(func() { packChunk = 1 << 20 })
-	pieces := []string{"@@@FILE@@@", "@@@END@@@", "@@@", "\n", "\r\n", "a", " ", "é", "\xc3", "\xa9", "日", "\xe6\x97", "\x00", "\xff", "𝄞", "\xf0\x9d"}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "f")
-	seed := uint32(20261001)
-	next := func(n int) int {
-		seed = seed*1664525 + 1013904223
-		return int(seed>>8) % n
-	}
-	for i := 0; i < 3000; i++ {
-		var b strings.Builder
-		for j := next(12); j >= 0; j-- {
-			b.WriteString(pieces[next(len(pieces))])
-		}
-		c := b.String()
-		os.WriteFile(path, []byte(c), 0o644)
-		packChunk = 1 + next(6)
-		sc, err := scanFile(path, true)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if sc.binary != isBinaryData([]byte(c)) || (!sc.binary && sc.boundary != hasBoundaryLine([]byte(c))) {
-			t.Fatalf("%q at %d: binary %v boundary %v", c, packChunk, sc.binary, sc.boundary)
-		}
 	}
 }

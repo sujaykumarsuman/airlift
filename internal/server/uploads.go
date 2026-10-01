@@ -14,8 +14,10 @@ import (
 // Direct upload (ADR 0023): a sender client asks leave to push one beam, a
 // session admin decides on the dashboard, and the frames handler admits a
 // sender's frames only while its request is approved. A request that carries
-// the payload's sha256 is streamed instead (ADR 0024): its bytes go to
-// …/uploads/{uid}/data, bounded by max_upload_bytes rather than max_gz_bytes.
+// the file's sha256 is streamed instead (ADR 0024): its bytes go to
+// …/uploads/{uid}/data and are kept as they are, bounded by max_upload_bytes —
+// the large-file path is the command line's alone; a beam in frames (a QR
+// scan) stays within max_gz_bytes.
 
 // requestUpload records a sender's request (client tier, rate_join). The body
 // names the beam and its size so the admin knows what is coming; the sender
@@ -35,7 +37,6 @@ func (srv *Server) requestUpload(w http.ResponseWriter, r *http.Request, s *sess
 		Bytes  int64  `json:"bytes"`
 		Chunks int    `json:"chunks"`
 		SHA256 string `json:"sha256"`
-		Bundle bool   `json:"bundle"`
 		Sender uint32 `json:"sender_session"`
 	}
 	if err := decodeOptionalJSON(r.Body, &req); err != nil {
@@ -60,15 +61,11 @@ func (srv *Server) requestUpload(w http.ResponseWriter, r *http.Request, s *sess
 			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("this upload is %s; the tower takes at most %s per upload", humanSize(req.Bytes), humanSize(limit)))
 			return
 		}
-		need := req.Bytes
-		if req.Bundle {
-			need *= bundleFactor
-		}
-		if err := srv.checkRoom(need); err != nil {
+		if err := srv.checkRoom(req.Bytes); err != nil {
 			writeError(w, http.StatusInsufficientStorage, err.Error())
 			return
 		}
-		spec.Stream, spec.SHA256, spec.Bundle = true, req.SHA256, req.Bundle
+		spec.Stream, spec.SHA256 = true, req.SHA256
 	} else {
 		if req.Chunks < 1 || req.Chunks > 0xFFFF {
 			writeError(w, http.StatusBadRequest, "need chunks 1..65535, or a sha256 to stream the payload")

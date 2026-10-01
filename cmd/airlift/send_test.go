@@ -1,12 +1,15 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -149,12 +152,12 @@ func TestBeamToSessionApproved(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"airlift beam  tree → session " + s.SID,
-		"bundle   base64 format", // the tree holds binaries
+		"airlift beam  tree.zip → session " + s.SID,
+		"archive  zip of 7 file(s), sent as it is",
 		"access   share link",
 		"approval approved by " + s.Name,
 		"sent     ",
-		"verify   input sha256 ok · bundle ok (",
+		"verify   input sha256 ok\n",
 		"ready    beam ",
 		tw.ts.URL + "/" + s.SID,
 	} {
@@ -166,9 +169,10 @@ func TestBeamToSessionApproved(t *testing.T) {
 		t.Fatal("the token was printed")
 	}
 	snap := tw.snapshot(t, s)
-	if len(snap.Beams) != 1 || snap.Beams[0].State != session.StateReady || snap.Beams[0].Bundle == nil || snap.Beams[0].Bundle.Files == 0 {
+	if len(snap.Beams) != 1 || snap.Beams[0].State != session.StateReady || snap.Beams[0].Bundle != nil || snap.Beams[0].Name != "tree.zip" {
 		t.Fatalf("the tower's beam: %+v", snap.Beams)
 	}
+	zipMatchesTree(t, filepath.Join(*snap.Beams[0].SavedPath, "raw", "tree.zip"), multiTree)
 	if len(snap.Uploads) != 0 {
 		t.Fatalf("no request should stay pending: %+v", snap.Uploads)
 	}
@@ -437,7 +441,7 @@ func quietJob(t *testing.T, link, name string, data []byte, sender uint32) *send
 		t.Fatal(err)
 	}
 	st := newStatus(io.Discard)
-	p, err := beamSource{name: name, file: path}.stage("auto", io.Discard, st)
+	p, err := beamSource{name: name, file: path}.stage(st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -712,8 +716,8 @@ func TestSendStreamsAndResumes(t *testing.T) {
 }
 
 // TestSendEmptyFileAndFolder: an empty file is one empty part; a folder is
-// bundled into a temporary file, streamed, unpacked on the tower and the
-// temporary file removed.
+// zipped into a temporary file, streamed and kept as that zip (no bundle on
+// either end), and the temporary file removed.
 func TestSendEmptyFileAndFolder(t *testing.T) {
 	tw := startTower(t, 0)
 	a := tw.create(t, `{"joiners_admin":true}`)
@@ -736,9 +740,10 @@ func TestSendEmptyFileAndFolder(t *testing.T) {
 	}
 	snap := tw.snapshot(t, a)
 	if len(snap.Beams) != 2 || snap.Beams[0].State != session.StateReady || snap.Beams[0].Size != 0 ||
-		snap.Beams[1].State != session.StateReady || snap.Beams[1].Bundle == nil || snap.Beams[1].Bundle.Files != 7 {
+		snap.Beams[1].State != session.StateReady || snap.Beams[1].Bundle != nil || snap.Beams[1].Name != "tree.zip" {
 		t.Fatalf("beams %+v", snap.Beams)
 	}
+	zipMatchesTree(t, filepath.Join(*snap.Beams[1].SavedPath, "raw", "tree.zip"), multiTree)
 }
 
 // cutBody yields the first n bytes of a body, then fails as a cut connection.
@@ -792,5 +797,45 @@ func TestSendThroughACuttingProxy(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(*b[0].SavedPath, "raw", "slow.bin"))
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("the tower's copy differs (%v)", err)
+	}
+}
+
+// zipMatchesTree fails unless the zip at path holds exactly the files under
+// root, byte for byte, with their executable bits.
+func zipMatchesTree(t *testing.T, path, root string) {
+	t.Helper()
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatalf("the tower's copy is not a zip: %v", err)
+	}
+	defer zr.Close()
+	got := map[string]string{}
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+		got[f.Name] = fmt.Sprintf("%v %s", f.Mode()&0o111 != 0, data)
+	}
+	want := map[string]string{}
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, _ := d.Info()
+		data, _ := os.ReadFile(p)
+		rel, _ := filepath.Rel(root, p)
+		want[filepath.ToSlash(rel)] = fmt.Sprintf("%v %s", info.Mode()&0o111 != 0, data)
+		return nil
+	})
+	if len(got) != len(want) {
+		t.Fatalf("zip holds %d files, the tree %d", len(got), len(want))
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("zip entry %q differs from the tree", k)
+		}
 	}
 }

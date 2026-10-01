@@ -28,9 +28,9 @@ const beamUsage = `usage: airlift beam [PATH...] [flags]
 what to send
   --name NAME                       beam name (default: the folder or file name)
   --files-from LIST                 read paths from LIST, one per line ("name: X" sets the name)
-  --format auto|text|base64         bundle format (default auto: text unless a file is binary)
 
 a QR page (the default)
+  --format auto|text|base64         bundle format (default auto: text unless a file is binary)
   --mode auto|sequential|fountain   frame layout (default auto)
   --chunk BYTES                     payload bytes per frame (default: what QR version 30
                                     holds at --ecc)
@@ -45,9 +45,10 @@ a QR page (the default)
 straight to a session (not air-gapped)
   -s, --to-session LINK             the session's link from its dashboard; without its
                                     token you are asked for the password, or a session
-                                    admin is asked to let you in. The file streams as it
-                                    is (a folder as a bundle, staged in the temp dir), up
-                                    to the tower's max_upload_bytes (5 GiB by default)
+                                    admin is asked to let you in. The file is sent and
+                                    kept as it is — no bundle; a folder or several files
+                                    go as one zip, staged in the temp dir — up to the
+                                    tower's max_upload_bytes (5 GiB by default)
   --wait DURATION                   how long to wait for a session admin to let you in and
                                     to approve the upload (default 3m)
 `
@@ -143,7 +144,7 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 			return fail(errors.New("--out writes a QR page and --to-session sends straight to a session: use one or the other"))
 		}
 		var ignored []string
-		for _, f := range []string{"mode", "chunk", "no-open", "fps", "ecc", "version-target", "manifest-every", "seed"} {
+		for _, f := range []string{"format", "mode", "chunk", "no-open", "fps", "ecc", "version-target", "manifest-every", "seed"} {
 			if set[f] {
 				ignored = append(ignored, "--"+f)
 			}
@@ -160,22 +161,23 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 	beamName := src.name
 
 	if direct {
-		// Straight to a session the payload streams from disk as it is (ADR
-		// 0024): no frames, so neither the file nor the tower holds it in memory.
-		p, err := src.stage(*format, stderr, st)
+		// Straight to a session the file streams from disk and is kept as it is
+		// (ADR 0024): no frames and no bundle, so neither end holds it in memory
+		// and the tower stores exactly what was sent. A folder goes as one zip.
+		p, err := src.stage(st)
 		if err != nil {
 			return fail(err)
 		}
 		defer p.remove()
-		fmt.Fprintf(stdout, "airlift beam  %s → session %s\n", beamName, link.SID)
-		fmt.Fprintf(stdout, "  input    %10d bytes   sha256 %s…\n", p.size, p.sha256[:16])
-		if p.format != "" {
-			fmt.Fprintf(stdout, "  bundle   %s format\n", p.format)
+		fmt.Fprintf(stdout, "airlift beam  %s → session %s\n", p.name, link.SID)
+		if p.temp {
+			fmt.Fprintf(stdout, "  archive  zip of %d file(s), sent as it is\n", p.files)
 		}
+		fmt.Fprintf(stdout, "  input    %10d bytes   sha256 %s…\n", p.size, p.sha256[:16])
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 		defer stop()
 		ask.ctx = ctx // Ctrl-C ends a question too, echo restored
-		job := &sendJob{link: link, p: p, sender: beam.NewSession(nil), name: beamName, wait: *wait, out: stdout, st: st, ask: ask}
+		job := &sendJob{link: link, p: p, sender: beam.NewSession(nil), name: p.name, wait: *wait, out: stdout, st: st, ask: ask}
 		err = job.run(ctx)
 		st.clear()
 		withdrawn := ""

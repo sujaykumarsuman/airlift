@@ -1024,7 +1024,9 @@ function resultCard(b: Beam): Raw {
               ${b.bundle.paths.map((p) => html`<li><code>${p}</code></li>`)}
               ${b.bundle.files > b.bundle.paths.length ? html`<li class="muted">… ${b.bundle.files - b.bundle.paths.length} more</li>` : ""}
             </ul>`
-        : html`<p>Not a repobundle: the raw file is the result.</p>`
+        : b.stream
+          ? html`<p>Sent from the command line and kept as it is: the file is the result.</p>`
+          : html`<p>Not a repobundle: the raw file is the result.</p>`
     }
     <p class="downloads">
       ${b.downloads.map(

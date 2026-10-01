@@ -69,28 +69,29 @@ func Pack(w io.Writer, root, format string, explicit []string, excludeAbs string
 				continue
 			}
 		}
-		// Two reads of the file, neither holding it: the first learns what the
-		// entry header needs (size, sha256, and for text whether it can be
-		// carried at all), the second writes the payload and checks the file
-		// did not change in between.
-		scan, err := scanFile(path, format == "text")
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return rep, err
 		}
+		var payload []byte
 		if format == "text" {
-			if scan.binary {
+			if isBinaryData(data) {
 				rep.Skipped = append(rep.Skipped, rel)
 				continue
 			}
-			if scan.boundary {
+			if hasBoundaryLine(data) {
 				return rep, fmt.Errorf("%s %w; re-run with --format base64", rel, ErrBoundary)
 			}
+			payload = data
+		} else {
+			payload = wrapBase64(data, 120)
 		}
+		sum := sha256.Sum256(data)
 		mode := strconv.FormatUint(uint64(fi.Mode().Perm()), 8)
-		if _, err := fmt.Fprintf(w, "%s %d %s %s %s\n", boundary, scan.size, scan.sha256, mode, rel); err != nil {
+		if _, err := fmt.Fprintf(w, "%s %d %s %s %s\n", boundary, len(data), hex.EncodeToString(sum[:]), mode, rel); err != nil {
 			return rep, err
 		}
-		if err := writePayload(w, path, format, scan); err != nil {
+		if _, err := w.Write(payload); err != nil {
 			return rep, err
 		}
 		if _, err := w.Write([]byte{'\n'}); err != nil {
@@ -201,178 +202,6 @@ func ResolveExplicit(root string, paths []string) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-
-// packChunk is how much of a file Pack reads at a time; tests shrink it so
-// lines, runes and base64 groups straddle reads.
-var packChunk = 1 << 20
-
-// fileScan is what the first read of a file learns.
-type fileScan struct {
-	size     int64
-	sha256   string
-	binary   bool // a NUL byte or invalid UTF-8 (isBinaryData)
-	boundary bool // a line starting with a boundary marker (hasBoundaryLine)
-}
-
-// scanFile reads the file at path once, hashing it and, for the text format,
-// deciding isBinaryData and hasBoundaryLine as they would on the whole file.
-func scanFile(path string, text bool) (fileScan, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return fileScan{}, err
-	}
-	defer f.Close()
-	var sc fileScan
-	h := sha256.New()
-	var u utf8Stream
-	var lines lineStream
-	buf := make([]byte, packChunk)
-	for {
-		n, err := f.Read(buf)
-		if n > 0 {
-			p := buf[:n]
-			h.Write(p)
-			sc.size += int64(n)
-			if text && !sc.binary {
-				sc.binary = bytes.IndexByte(p, 0) >= 0 || !u.write(p)
-				sc.boundary = sc.boundary || lines.write(p)
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fileScan{}, err
-		}
-	}
-	if text && !sc.binary {
-		sc.binary = !u.close()
-		sc.boundary = sc.boundary || lines.close()
-	}
-	sc.sha256 = hex.EncodeToString(h.Sum(nil))
-	return sc, nil
-}
-
-// utf8Stream is utf8.Valid over a stream: a rune cut by a read boundary is
-// carried into the next read.
-type utf8Stream struct{ carry []byte }
-
-func (u *utf8Stream) write(p []byte) bool {
-	b := append(u.carry, p...)
-	i, back := len(b)-1, 0
-	for i > 0 && back < utf8.UTFMax-1 && !utf8.RuneStart(b[i]) {
-		i--
-		back++
-	}
-	cut := len(b)
-	if i >= 0 && utf8.RuneStart(b[i]) && !utf8.FullRune(b[i:]) {
-		cut = i // an incomplete rune at the end: wait for the rest
-	}
-	ok := utf8.Valid(b[:cut]) // before the carry is rewritten: b may share its array
-	u.carry = append(u.carry[:0], b[cut:]...)
-	return ok
-}
-
-func (u *utf8Stream) close() bool { return utf8.Valid(u.carry) }
-
-// lineStream is hasBoundaryLine over a stream: it keeps the first bytes of the
-// line in progress, enough to recognise a marker at its start.
-type lineStream struct {
-	head    []byte
-	checked bool // the line in progress has been checked
-}
-
-func (l *lineStream) write(p []byte) bool {
-	found := false
-	for len(p) > 0 {
-		nl := bytes.IndexByte(p, '\n')
-		seg := p
-		if nl >= 0 {
-			seg = p[:nl]
-		}
-		if !l.checked {
-			l.head = append(l.head, seg[:min(len(seg), len(boundary)-len(l.head))]...)
-			if len(l.head) == len(boundary) || nl >= 0 {
-				found = found || isMarker(l.head)
-				l.checked = true
-			}
-		}
-		if nl < 0 {
-			break
-		}
-		l.head, l.checked, p = l.head[:0], false, p[nl+1:]
-	}
-	return found
-}
-
-func (l *lineStream) close() bool { return !l.checked && isMarker(l.head) }
-
-func isMarker(head []byte) bool {
-	return bytes.HasPrefix(head, []byte(boundary)) || bytes.HasPrefix(head, []byte(end))
-}
-
-// writePayload writes the file at path as the format carries it — text as it
-// is, base64 wrapped at 120 columns as wrapBase64 wraps it — and fails if it
-// is not the file scanFile read.
-func writePayload(w io.Writer, path, format string, sc fileScan) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h := sha256.New()
-	var n int64
-	src := io.TeeReader(f, h)
-	if format == "text" {
-		if n, err = io.Copy(w, src); err != nil {
-			return err
-		}
-	} else {
-		bw := &wrapWriter{w: w, width: 120}
-		enc := base64.NewEncoder(base64.StdEncoding, bw)
-		if n, err = io.CopyBuffer(enc, src, make([]byte, packChunk)); err != nil {
-			return err
-		}
-		if err := enc.Close(); err != nil {
-			return err
-		}
-		if bw.err != nil {
-			return bw.err
-		}
-	}
-	if n != sc.size || hex.EncodeToString(h.Sum(nil)) != sc.sha256 {
-		return fmt.Errorf("%s changed while it was being bundled", path)
-	}
-	return nil
-}
-
-// wrapWriter breaks what passes through it into lines of width characters,
-// with no newline after the last.
-type wrapWriter struct {
-	w     io.Writer
-	width int
-	col   int
-	err   error
-}
-
-func (ww *wrapWriter) Write(p []byte) (int, error) {
-	total := len(p)
-	for len(p) > 0 && ww.err == nil {
-		if ww.col == ww.width {
-			_, ww.err = ww.w.Write([]byte{'\n'})
-			ww.col = 0
-			continue
-		}
-		k := min(len(p), ww.width-ww.col)
-		_, ww.err = ww.w.Write(p[:k])
-		ww.col += k
-		p = p[k:]
-	}
-	if ww.err != nil {
-		return 0, ww.err
-	}
-	return total, nil
 }
 
 // isBinaryData matches repobundle.py is_binary: a NUL byte or invalid UTF-8.

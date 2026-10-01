@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -100,14 +102,16 @@ func (src beamSource) bytes(format string, stderr io.Writer, st *status) ([]byte
 	return buf.Bytes(), used, nil
 }
 
-// payload is what a direct send streams (ADR 0024): a file on disk with its
-// size and sha256. A single file is read where it is; a bundle is written to
-// a temporary file first, which remove deletes.
+// payload is what a direct send streams (ADR 0024): one file on disk, sent and
+// kept exactly as it is, with its size and sha256 — never a repobundle. A
+// single file is read where it is; a folder or several files are first zipped
+// into a temporary file (their paths and modes kept), which remove deletes.
 type payload struct {
 	path   string
+	name   string // what the tower keeps it as: the file's name, or <name>.zip
 	size   int64
 	sha256 string
-	format string // the bundle format; "" for a single file sent as it is
+	files  int // the files in a zip; 0 for a single file sent as it is
 	temp   bool
 }
 
@@ -118,9 +122,9 @@ func (p *payload) remove() {
 }
 
 // stage readies the payload for a direct send without holding it in memory:
-// a single file is hashed where it is, a bundle is written to a temporary
-// file and hashed as it is written.
-func (src beamSource) stage(format string, stderr io.Writer, st *status) (*payload, error) {
+// a single file is hashed where it is; a folder or several files are zipped
+// to a temporary file, hashed as it is written.
+func (src beamSource) stage(st *status) (*payload, error) {
 	if src.file != "" {
 		f, err := os.Open(src.file)
 		if err != nil {
@@ -137,28 +141,28 @@ func (src beamSource) stage(format string, stderr io.Writer, st *status) (*paylo
 		if err != nil {
 			return nil, err
 		}
-		return &payload{path: src.file, size: n, sha256: hex.EncodeToString(h.Sum(nil))}, nil
+		return &payload{path: src.file, name: src.name, size: n, sha256: hex.EncodeToString(h.Sum(nil))}, nil
 	}
-	f, err := os.CreateTemp("", "airlift-*.bundle")
+	files := src.explicit
+	if files == nil {
+		var err error
+		if files, _, err = bundle.ListFiles(src.root); err != nil { // the files git would keep, as a page bundles
+			return nil, err
+		}
+	}
+	f, err := os.CreateTemp("", "airlift-*.zip")
 	if err != nil {
 		return nil, err
 	}
-	p := &payload{path: f.Name(), temp: true}
-	h := sha256.New()
-	var w io.Writer = io.MultiWriter(f, h)
-	reset := func() error {
-		h.Reset()
-		if err := f.Truncate(0); err != nil {
-			return err
-		}
-		_, err := f.Seek(0, io.SeekStart)
-		return err
+	name := src.name
+	if !strings.EqualFold(filepath.Ext(name), ".zip") {
+		name += ".zip"
 	}
-	used, err := packBundle(w, reset, src.root, format, src.explicit, stderr, st)
-	if err == nil {
-		err = f.Close()
-	} else {
-		f.Close()
+	p := &payload{path: f.Name(), name: name, temp: true}
+	h := sha256.New()
+	n, err := zipFiles(io.MultiWriter(f, h), src.root, files, st)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
 	st.clear()
 	if err != nil {
@@ -170,8 +174,49 @@ func (src beamSource) stage(format string, stderr io.Writer, st *status) (*paylo
 		p.remove()
 		return nil, err
 	}
-	p.size, p.sha256, p.format = info.Size(), hex.EncodeToString(h.Sum(nil)), used
+	p.size, p.sha256, p.files = info.Size(), hex.EncodeToString(h.Sum(nil)), n
 	return p, nil
+}
+
+// zipFiles writes a zip of the regular files rel (slash paths under root) to
+// w, each streamed from disk with its path, mode and time, and returns how
+// many went in. Symlinks and anything not a regular file are skipped, as a
+// bundle skips them; archive/zip moves to zip64 for a file over 4 GiB.
+func zipFiles(w io.Writer, root string, rels []string, st *status) (int, error) {
+	cw := &countingWriter{w: w}
+	zw := zip.NewWriter(cw)
+	zw.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) {
+		return flate.NewWriter(out, flate.BestSpeed) // the link is slower than this
+	})
+	n := 0
+	for _, rel := range rels {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		fi, err := os.Lstat(path)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		hdr, err := zip.FileInfoHeader(fi)
+		if err != nil {
+			return n, err
+		}
+		hdr.Name, hdr.Method = rel, zip.Deflate
+		zf, err := zw.CreateHeader(hdr)
+		if err != nil {
+			return n, err
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return n, err
+		}
+		cw.report = func(b int64) { st.live(fmt.Sprintf("  zipping  %d files · %s", n+1, humanBytes(b))) }
+		_, err = io.Copy(zf, in)
+		in.Close()
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, zw.Close()
 }
 
 // packBundle writes the bundle in the requested format to w and reports the

@@ -145,24 +145,24 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
           <h2>Send directly</h2>
           <p>When the machine with the files <em>is</em> on a network, the page, the screen and the camera are overhead. Give <code>airlift beam</code> the session's link instead:</p>
           <div class="cmd"><code>airlift beam ./my-repo -s 'https://projects.sujaykumar.dev/airlift/qkf-mzt-bwp#t=…'</code><button class="btn small iconbtn" type="button" data-copy title="Copy"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg></button></div>
-          <p>It joins the session as a <strong>sender</strong>, asks leave to upload, and then sends the file itself — no frames, no page — streaming it from disk to the tower's disk, so a file of gigabytes goes as easily as a note: up to the tower's limit, <b>5 GiB</b> by default (a beam scanned off a screen stays within 64 MiB). A folder or several files are bundled into a temporary file first. Quote the link — the <code>#</code> and <code>&amp;</code> in it mean something to a shell.</p>
+          <p>It joins the session as a <strong>sender</strong>, asks leave to upload, and then sends the file itself — no frames, no page — streaming it from disk to the tower's disk, so a file of gigabytes goes as easily as a note: up to the tower's limit, <b>5 GiB</b> by default (a beam scanned off a screen stays within 64 MiB). The file is kept exactly as it was sent — no repobundle; a folder or several files go as one zip, built in a temporary file. Quote the link — the <code>#</code> and <code>&amp;</code> in it mean something to a shell.</p>
           <ul>
             <li><b>Getting in.</b> A share link carries the session's token, so it joins at once. A password session's link (the id alone) makes it ask for the password, typed without echo. A public session's bare id makes it <em>knock</em>, and it waits for a session admin to let it in.</li>
             <li><b>Approval.</b> Session admins see the beam's name and size under <b>Upload requests</b> on the dashboard, with <em>Approve</em> and <em>Deny</em>; the sender shows among the participants with a <code>sender</code> tag while it waits. An approval admits exactly the beam that was described, once. A sender that is itself a session admin is approved at once.</li>
             <li><b>Waiting.</b> The CLI counts down <code>--wait</code> (default 3 minutes). If the run ends early for any reason — nobody decides in time, Ctrl-C, a lost connection — it withdraws the request and any half-sent beam is discarded, so nothing is left for an admin to approve.</li>
-            <li><b>Sending.</b> A progress bar shows the bytes sent, the rate and the time left; parts that compress go gzip-encoded, and a dropped connection picks up where the tower's copy ends. The tower checks the sha256 as the bytes land and unpacks a bundle, and the CLI prints the verdicts and the dashboard link to download from. It exits <code>0</code> only when the beam is READY. A tower refuses up front an upload over its limit, or one its disk cannot hold.</li>
+            <li><b>Sending.</b> A progress bar shows the bytes sent, the rate and the time left; parts that compress go gzip-encoded, and a dropped connection picks up where the tower's copy ends. The tower checks the sha256 as the bytes land and keeps the file as it is, and the CLI prints the verdicts and the dashboard link to download from. It exits <code>0</code> only when the beam is READY. A tower refuses up front an upload over its limit, or one its disk cannot hold.</li>
             <li><b>Downloading.</b> The dashboard hands each download to the browser's own download manager through a short-lived link, so a large file shows its progress there and goes straight to disk.</li>
           </ul>
           <p>A run against a tower on the same machine, approved from its dashboard:</p>
-          <pre><code>airlift beam  adr → session frc-fuz-dob
-  input         92805 bytes   sha256 29dfc450f56aadaf…
-  bundle   text format
+          <pre><code>airlift beam  adr.zip → session frc-fuz-dob
+  archive  zip of 24 file(s), sent as it is
+  input         49944 bytes   sha256 46471c140ecca343…
   tower    127.0.0.1:8797 (v1.1.0) · session frc-fuz-dob
   access   share link · you are "clever swift"
   approval approved by nimble sparrow
-  sent     90.6 KB in 5 ms (16.1 MB/s), 41.4 KB on the wire
-  verify   input sha256 ok · bundle ok (24 files, 87.9 KB)
-  ready    beam 94b68ddc "adr" — download it from http://127.0.0.1:8797/frc-fuz-dob</code></pre>
+  sent     48.8 KB in 4 ms (11.4 MB/s)
+  verify   input sha256 ok
+  ready    beam 94b68ddc "adr.zip" — download it from http://127.0.0.1:8797/frc-fuz-dob</code></pre>
           <p>The approval gives a session's admins the say over what the command line adds; it is not a lock — anyone holding the session's link can already relay frames, as a phone's scanner does. And this is for connected machines only: on an air-gapped machine the page is still the way out — nothing there can reach a tower, and it never tries.</p>
         </section>
 

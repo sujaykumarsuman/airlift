@@ -36,8 +36,10 @@ format), `docs/API.md` (HTTP API), `docs/adr/` (locked decisions), `STATUS.md`
 - **Direct sender** — `airlift beam PATH -s LINK` on a machine that is **not**
   air-gapped (ADR 0023): the CLI joins the session as a `sender` participant and,
   once a session admin approves that one beam on the dashboard, streams the
-  file's own bytes from disk to the tower's disk (ADR 0024) — up to
-  `max_upload_bytes`, 5 GiB by default. The approval is consent for the
+  file's own bytes from disk to the tower's disk, kept as sent — no repobundle;
+  a folder goes as one zip (ADR 0024) — up to `max_upload_bytes`, 5 GiB by
+  default. Large files are this path's alone: a QR beam stays within
+  `max_gz_bytes`. The approval is consent for the
   command-line path, not an access control — any token holder can relay frames
   as a scanner does. It never replaces the beam page for an air-gapped machine.
 
@@ -66,9 +68,8 @@ admin-approved participant, never silently.
   (offline reassembly, used by tests). `beam` and `internal/replay` share it.
 - `internal/bundle` — repobundle `Pack`/`Parse`, tree/zip writers, the one
   path sanitiser. `Pack` is a byte-for-byte port of the retired
-  `tools/repobundle.py` (`docs/BUNDLE.md`) and reads each file twice rather than
-  holding it; `Unpack`/`ZipTree` are the streaming bundle stage for a streamed
-  upload, deciding exactly what `Parse` decides (ADR 0024).
+  `tools/repobundle.py` (`docs/BUNDLE.md`). The direct (`-s`) path never
+  bundles (ADR 0024).
 - `internal/replay` — the simulated scanner (loop, loss, reordering, batched
   POSTs) that drives a tower without a camera; internal, for the dev loop and
   the end-to-end tests.
@@ -211,18 +212,19 @@ admin-approved participant, never silently.
     CLI asks for what is missing only on a terminal and draws progress on
     stderr. (ADR 0023; the frames are superseded for the CLI by ADR 0024)
 24. Streamed direct upload: a request with `sha256` (`{name, bytes, sha256,
-    bundle?, sender_session}`) is streamed — `POST …/uploads/{uid}/data?offset=N`
-    parts of at most `max_body`, each where the tower's copy ends (`409
-    {received}` otherwise), optionally gzip-encoded; the tower appends to
-    `<data_dir>/<sid>/.<bid>.upload/` hashing as it goes, unpacks a repobundle
-    with `bundle.Unpack` (never in memory), and renames it to `<bid>/` on READY.
-    `max_upload_bytes` (live, default 5 GiB) bounds it; `max_gz_bytes` stays the
-    limit for beams in frames (QR scans, older CLIs). Free disk under `data_dir`
-    less uploads in flight and a 64 MiB margin gates it (`507`; a bundle needs
-    3×). The CLI stages a folder as a temporary bundle and streams files from
-    disk, resuming from `received`. Downloads are 15-minute ticket links
-    (`POST …/download-link` → `api/dl/<ticket>`) the browser's download manager
-    fetches; the token never enters a URL. (ADR 0024)
+    sender_session}`) is streamed — `POST …/uploads/{uid}/data?offset=N` parts
+    of at most `max_body`, each where the tower's copy ends (`409 {received}`
+    otherwise), optionally gzip-encoded in transit; the tower appends to
+    `<data_dir>/<sid>/.<bid>.upload/raw/<name>` hashing as it goes and, on a
+    sha256 match, renames it to `<bid>/` — the file kept exactly as sent, no
+    bundle stage whatever it holds (download `raw`). The CLI never bundles: a
+    single file goes as it is, a folder or several files as one zip (paths and
+    modes kept) staged in the temp dir. `max_upload_bytes` (live, default 5 GiB)
+    bounds it; `max_gz_bytes` stays the limit for beams in frames (QR scans,
+    older CLIs) — large files are the CLI's alone. Free disk under `data_dir`
+    less uploads in flight and a 64 MiB margin gates it (`507`). Downloads are
+    15-minute ticket links (`POST …/download-link` → `api/dl/<ticket>`) the
+    browser's download manager fetches; the token never enters a URL. (ADR 0024)
 
 ## Non-goals
 

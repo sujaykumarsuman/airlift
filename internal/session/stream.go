@@ -7,10 +7,10 @@ import (
 )
 
 // Streamed direct upload (ADR 0024). An approved `airlift beam -s` sends the
-// payload's own bytes in order, not frames: the tower appends them to a file
+// file's own bytes in order, not frames: the tower appends them to a file
 // under data_dir and hashes them as they land, so a beam far larger than memory
 // (or than a frame header can count) arrives without being held anywhere but
-// on disk. The session keeps the consent and the progress; the server owns the
+// on disk, and is kept exactly as it was sent. The session keeps the consent and the progress; the server owns the
 // file. A streamed beam is created by its first write and runs the usual
 // RECEIVING → VERIFYING → READY | FAILED.
 
@@ -48,7 +48,6 @@ type StreamTarget struct {
 	Name     string
 	Size     int64
 	SHA256   string
-	Bundle   bool
 }
 
 // StreamGate resolves c's streamed upload id for a write: it must be c's own
@@ -66,7 +65,7 @@ func (s *Session) StreamGate(c *Client, id string) (StreamTarget, error) {
 	case u.State != UploadApproved:
 		return StreamTarget{}, ErrStreamNotApproved
 	}
-	return StreamTarget{UploadID: u.ID, Sender: u.Sender, Name: u.Name, Size: u.Bytes, SHA256: u.SHA256, Bundle: u.Bundle}, nil
+	return StreamTarget{UploadID: u.ID, Sender: u.Sender, Name: u.Name, Size: u.Bytes, SHA256: u.SHA256}, nil
 }
 
 // OpenStreamBeam returns the beam approved streamed upload id writes, creating

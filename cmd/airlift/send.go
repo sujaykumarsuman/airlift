@@ -33,8 +33,7 @@ const streamSince = "v1.1.0"
 
 var (
 	pollEvery     = 1500 * time.Millisecond // admission, approval and verification polls
-	verifyTimeout = 5 * time.Minute         // how long the tower may take to verify, plus a second per verifyRate bytes
-	verifyRate    = int64(4 << 20)          // bytes a second a tower is assumed to unpack a bundle, at worst
+	verifyTimeout = 5 * time.Minute         // how long the tower may take to verify (a sha256 compare and a rename)
 	partSize      = int64(4 << 20)          // payload bytes per POST: well inside the tower's 8 MiB max_body
 	minPart       = int64(64 << 10)         // halving on a timeout or a 413 stops here
 	stallPause    = time.Second             // the pause after a dropped part, times the drops in a row
@@ -563,7 +562,7 @@ func (j *sendJob) approval(ctx context.Context) (string, error) {
 			Status string `json:"status"`
 		}
 		err := t.callPatient(ctx, http.MethodPost, path, map[string]any{
-			"name": j.name, "bytes": p.size, "sha256": p.sha256, "bundle": p.format != "", "sender_session": j.sender,
+			"name": j.name, "bytes": p.size, "sha256": p.sha256, "sender_session": j.sender,
 		}, &r)
 		switch statusOf(err) {
 		case 0:
@@ -838,7 +837,7 @@ func (j *sendJob) failed(ctx context.Context) error {
 // verify waits for the tower's verdict and reports it.
 func (j *sendJob) verify(ctx context.Context) error {
 	bid := fmt.Sprintf("%08x", j.sender)
-	limit := verifyTimeout + time.Duration(j.p.size/verifyRate)*time.Second // a large bundle takes a while to unpack
+	limit := verifyTimeout
 	deadline := time.Now().Add(limit)
 	spin := 0
 	for {
@@ -869,11 +868,7 @@ func (j *sendJob) verify(ctx context.Context) error {
 			return outcome("the tower did not finish verifying within %s", limit)
 		}
 		spin++
-		what := "  checking sha256 on the tower "
-		if j.p.format != "" {
-			what = "  checking sha256 and unpacking on the tower "
-		}
-		j.st.set("verify", what+strings.Repeat(".", 1+spin%3))
+		j.st.set("verify", "  checking sha256 on the tower "+strings.Repeat(".", 1+spin%3))
 		if err := sleepCtx(ctx, min(pollEvery, 500*time.Millisecond)); err != nil {
 			return err
 		}
