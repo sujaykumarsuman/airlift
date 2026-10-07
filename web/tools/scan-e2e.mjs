@@ -7,6 +7,7 @@
 //
 //   make scan-e2e                 (builds bin/airlift first)
 //   BEAM=path/to/folder make scan-e2e
+//   DUP=2 TIMEOUT_MS=30000 make scan-e2e   (a 15 fps beam; give up sooner)
 //   CHROME=/path/to/chrome node web/tools/scan-e2e.mjs
 //
 // Only a virtual camera — a phone still decides the real frame rate — but it
@@ -34,8 +35,10 @@ const TOWER_PORT = 8807;
 const PLAYER_PORT = 8806;
 const CDP_REC = 9343;
 const CDP_SCAN = 9344;
-const DUP = 3; // each player frame repeated in the MJPEG: Chrome plays it at 30 fps, the beam default is 10
-const TIMEOUT_MS = 90_000;
+// Each player frame is repeated DUP times in the MJPEG: Chrome plays it at 30
+// fps, so 3 is the beam default of 10 fps and 2 a 15 fps beam.
+const DUP = Number(process.env.DUP ?? 3);
+const TIMEOUT_MS = Number(process.env.TIMEOUT_MS ?? 90_000);
 const tower = `http://127.0.0.1:${TOWER_PORT}`;
 const tmp = mkdtempSync(join(tmpdir(), "airlift-e2e-"));
 const dataDir = join(tmp, "data");
@@ -83,7 +86,6 @@ async function chrome(port, extraFlags, windowSize) {
     [
       `--remote-debugging-port=${port}`,
       "--headless=new",
-      "--disable-gpu",
       "--hide-scrollbars",
       "--no-first-run",
       "--no-default-browser-check",
@@ -162,7 +164,7 @@ try {
   // 3. record the player's frames: paused, chrome hidden, the tile at half size
   //    so a version-30 symbol lands inside the scanner's viewfinder at an
   //    integer 3 px per module (the player's pitch) in a 1080p "camera" frame
-  const rec = await chrome(CDP_REC, [], "1920,1080");
+  const rec = await chrome(CDP_REC, ["--disable-gpu"], "1920,1080");
   await rec.go(`http://127.0.0.1:${PLAYER_PORT}/beam.html`);
   await rec.eval(`document.dispatchEvent(new KeyboardEvent('keydown', {key: ' '})); document.dispatchEvent(new KeyboardEvent('keydown', {key: 'h'})); for (let i = 0; i < 10; i++) document.getElementById('smaller').click(); 1`);
   await sleep(300);
@@ -182,6 +184,11 @@ try {
   // 4. a session, and headless Chrome on its scan page with the recording as the camera
   const created = await (await fetch(`${tower}/api/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
   const { sid, token } = created;
+  // The scanner's Chrome keeps its GPU. On macOS the fake camera writes each
+  // frame into a GPU shared image; with --disable-gpu those allocations fail
+  // now and then, and Chrome's file capture device stops for good after the
+  // first failed one (it drops the frame and never schedules the next), which
+  // left about one run in ten with a frozen camera.
   const scan = await chrome(
     CDP_SCAN,
     ["--use-fake-device-for-media-stream", `--use-file-for-fake-video-capture=${mjpeg}`, "--use-fake-ui-for-media-stream"],
@@ -191,6 +198,8 @@ try {
   await scan.go(`${tower}/s/${sid}#t=${token}`, 500);
   let last = "";
   let ready = null;
+  let camFrames = -1;
+  let camMoved = Date.now();
   for (;;) {
     const hud = await scan.eval(
       `[document.getElementById('progress')?.textContent, document.getElementById('stats')?.textContent, document.getElementById('message')?.textContent].join(' | ')`,
@@ -207,6 +216,10 @@ try {
       }
     }
     if (ready) break;
+    // A camera that delivers nothing is the fake device's, not the scanner's, fault: say so.
+    const frames = await scan.eval(`document.querySelector("video")?.srcObject?.getVideoTracks()[0]?.stats?.totalFrames ?? -1`);
+    if (frames !== camFrames) [camFrames, camMoved] = [frames, Date.now()];
+    else if (frames >= 0 && Date.now() - camMoved > 5000) throw new Error(`the fake camera stopped after ${frames} frames (a Chrome capture fault, not the scanner); last HUD: ${last}`);
     if (Date.now() - tScan > TIMEOUT_MS) throw new Error(`no READY after ${TIMEOUT_MS / 1000} s; last HUD: ${last}`);
     await sleep(500);
   }

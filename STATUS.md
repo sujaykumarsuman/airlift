@@ -629,10 +629,46 @@ GHCR as the registry.
 - Beam default fps stays 10 (ADR 0018): the hint says when a phone has room.
 - Verified: `make scan-e2e` READY in 7.5 s, same as before (fake camera 30
   fps); the hint there says 15 fps, and the same beam at 15 fps is READY in
-  5.0 s. Headless Chrome sometimes stalls the decode loop (rVFC never fires),
-  before this change too — being chased separately. Still to do on the S25
-  Ultra: the rate the main lens gives at 1080p and how fast a beam it then
-  sustains.
+  5.0 s. About one headless run in ten froze, before this change too: Chrome's
+  fake camera, not the decode loop (16.1). Still to do on the S25 Ultra: the
+  rate the main lens gives at 1080p and how fast a beam it then sustains.
+
+## Phase 16.1 — the frozen e2e camera; a decode-loop watchdog (done, 2026-10-07)
+
+- **Cause** (not requestVideoFrameCallback): in a stuck run the fake camera
+  itself stops. The track's `stats.totalFrames` freezes at ~8 (the element's
+  `totalVideoFrames` at 6) and the capture service's CaptureThread sits idle.
+  On macOS Chrome captures into GPU shared images; under `--disable-gpu` their
+  allocation fails all the time (~100 errors a run, harmless in the renderer),
+  and when one fails in the capture service (`Failed to get
+  SharedImageInterface`) `FileVideoCaptureDevice::OnCaptureTask` drops the
+  frame and returns before scheduling the next, so the file camera never
+  delivers again. Nothing on the page revives it: a rAF loop, a fresh rVFC, a
+  DOM change, `createImageBitmap`, hiding and showing the tab. The pure-rAF
+  path (rVFC deleted) froze the same way; `--disable-video-capture-use-gpu-
+  memory-buffer` is worse (stops after one frame, 14 runs of 14).
+- **Harness fix** (`web/tools/scan-e2e.mjs`): the scanner's Chrome keeps its
+  GPU (24 runs: no shared-image errors, none stuck); the recorder keeps
+  `--disable-gpu`. A camera whose `totalFrames` stops for 5 s fails fast and
+  says so; `DUP` and `TIMEOUT_MS` come from the environment. `make scan-e2e`:
+  DUP=2 8/8 (READY 4.0 s), DUP=3 8/8 (5.5 s).
+- **Real phones**: the file device belongs to the fake camera alone; Camera2
+  (Android) and AVFoundation (iOS) drop a frame and carry on, so this stall
+  cannot happen there. rVFC needs nothing else on the page: in good runs it
+  fires at the camera's 30 fps with no rAF and no animation anywhere, stops
+  while the tab is hidden and is back within a frame when it is shown.
+- **Watchdog anyway** (`web/src/scan/pacer.ts`, unit-tested): the decode loop
+  is paced by `startFramePacer`. rVFC drives it as before; when no callback has
+  come for 250 ms (a browser whose callbacks stall, or one without them),
+  animation frames take over, offering a frame only when
+  `getVideoPlaybackQuality().totalVideoFrames` moves (or every 250 ms should it
+  never move), and hand back the moment a callback arrives, so a frame is never
+  offered twice. MAX_IN_FLIGHT unchanged. `cameraFps` is presentedFrames under
+  rVFC, received frames under the fallback, null for a window that straddles
+  the switch, and is now measured between the window's first and last counts
+  (the first window no longer under-reads). End to end with rVFC stubbed to
+  never fire: READY in 4.0 s at 30 tries/s, the same as with it.
+- **Open**: report the `OnCaptureTask` early return to Chromium.
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
