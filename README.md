@@ -155,11 +155,14 @@ largest chunk for a version; these are the numbers at ECC M:
 | 40 | 177×177 | 2242 | 21.9 | 32.8 | 0.8 min |
 
 The default is 1311 bytes (version 30, 137×137 modules) at 10 fps. The scanner
-decodes only what is inside its viewfinder, so fill the square; its stats line
-shows decoded/s against tries/s. If it decodes every frame, raise `--fps` with
-the `+` key until it starts missing, then back off — 12 and 15 sit cleanly on a
-60 Hz screen, 8 does not; if it misses at 10 fps, drop to 5 or to
-`--version-target 25`, or move the phone closer. Larger modules matter more
+decodes only what is inside its viewfinder, so fill the square. It opens the
+camera at 60 fps where it can (the fps menu picks another rate) and its stats
+line shows the beam's rate as seen and how many times each frame is read
+(`beam ~10 fps · 5.6× each`); a hint names the change that would scan faster.
+Raise `--fps` (or the `+` key) to the rate it suggests — 12, 15, 20 and 30 sit
+cleanly on a 60 Hz screen, 8 does not; a sequential beam wants each frame read
+about 2.5×, a fountain beam about 1.5×. If nothing decodes, try
+`--version-target 25` or move the phone closer. Larger modules matter more
 than more of them. `--ecc L` gains about a quarter more capacity at the cost of
 glare tolerance; `--ecc Q` or `H` the reverse (the default chunk follows the
 ECC: a version-30 symbol either way).

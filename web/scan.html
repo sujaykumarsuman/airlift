@@ -24,6 +24,7 @@
         <div id="chunks" class="chunks" hidden></div>
       </div>
       <div class="bottom">
+        <div id="hint" class="speed-hint" hidden></div>
         <div id="stats" class="stats"></div>
         <div id="message" class="message"></div>
         <form id="join-form" class="join-form" hidden>
@@ -32,7 +33,8 @@
           <button id="join" class="btn primary" type="submit"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="3.4"/><path d="M10.4 12.6L20 3M17 6l2 2"/></svg> Join</button>
         </form>
         <div class="controls">
-          <select id="camera" hidden></select>
+          <select id="camera" hidden aria-label="Camera"></select>
+          <select id="fps" class="fps" hidden aria-label="Camera frame rate" title="Camera frame rate"></select>
           <button id="torch" class="btn" hidden>Torch</button>
           <button id="start" class="btn primary" hidden>Start camera</button>
         </div>

@@ -102,8 +102,13 @@ function grab(video: HTMLVideoElement, canvas: HTMLCanvasElement, roi: ROI | nul
 
 export interface LoopStats {
   framesPerSec: number; // camera frames offered
+  /** Frames the camera delivered (requestVideoFrameCallback's presentedFrames);
+   *  null under the rAF fallback, which counts display refreshes instead. */
+  cameraFps: number | null;
   attemptsPerSec: number; // frames handed to the decoder
-  decodesPerSec: number; // QR strings decoded
+  decodesPerSec: number; // QR strings decoded, repeats included
+  /** Distinct strings decoded: the beam's frame rate as this scanner sees it. */
+  distinctPerSec: number;
   lastDecodeMs: number;
 }
 
@@ -134,14 +139,22 @@ export function startDecodeLoop(
   let frames = 0;
   let attempts = 0;
   let decodes = 0;
+  let distinct = new Set<string>();
+  let presented: number | null = null; // presentedFrames at the window's start
+  let presentedNow: number | null = null;
   let lastMs = 0;
   let inFlight = 0;
   let lastCropHit = performance.now();
   let windowStart = performance.now();
   const schedule = () => {
     if (!running) return;
-    if (typeof video.requestVideoFrameCallback === "function") video.requestVideoFrameCallback(() => tick());
-    else requestAnimationFrame(() => tick());
+    if (typeof video.requestVideoFrameCallback === "function") {
+      video.requestVideoFrameCallback((_now, meta) => {
+        presentedNow = meta.presentedFrames;
+        presented ??= meta.presentedFrames;
+        tick();
+      });
+    } else requestAnimationFrame(() => tick());
   };
   const tick = () => {
     if (!running) return;
@@ -162,6 +175,7 @@ export function startDecodeLoop(
             if (!running) return;
             for (const text of texts) {
               decodes++;
+              distinct.add(text);
               if (cropped) lastCropHit = performance.now();
               onText(text);
             }
@@ -178,10 +192,20 @@ export function startDecodeLoop(
     const now = performance.now();
     if (now - windowStart >= 1000) {
       const secs = (now - windowStart) / 1000;
-      onStats?.({ framesPerSec: frames / secs, attemptsPerSec: attempts / secs, decodesPerSec: decodes / secs, lastDecodeMs: lastMs });
+      const cameraFps = presented !== null && presentedNow !== null ? (presentedNow - presented) / secs : null;
+      onStats?.({
+        framesPerSec: frames / secs,
+        cameraFps,
+        attemptsPerSec: attempts / secs,
+        decodesPerSec: decodes / secs,
+        distinctPerSec: distinct.size / secs,
+        lastDecodeMs: lastMs,
+      });
       frames = 0;
       attempts = 0;
       decodes = 0;
+      distinct = new Set();
+      presented = presentedNow;
       windowStart = now;
     }
   };

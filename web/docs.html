@@ -95,7 +95,7 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
           <h3>Options</h3>
           <table class="opts">
             <tr><th><code>--name NAME</code></th><td>The beam's name (the tower shows it). Required for several files.</td></tr>
-            <tr><th><code>--fps N</code></th><td>Initial frames per second, 1–60 (default 10). Raise it once the scanner reports more decoded/s than that; 12 and 15 sit cleanly on a 60 Hz screen.</td></tr>
+            <tr><th><code>--fps N</code></th><td>Initial frames per second, 1–60 (default 10). Raise it when the scanner's hint says there is room — it names a rate; 12, 15, 20 and 30 sit cleanly on a 60 Hz screen.</td></tr>
             <tr><th><code>--chunk BYTES</code></th><td>Payload bytes per frame (default: what QR version 30 holds at <code>--ecc</code>, 1311 at M; at most 2712). Bigger chunks mean fewer frames but denser codes. A page-only flag: <code>-s</code> sends the file itself, not frames.</td></tr>
             <tr><th><code>--version-target V</code></th><td>Pick the largest chunk that fits QR version V (1–40) instead of <code>--chunk</code>.</td></tr>
             <tr><th><code>--ecc L|M|Q|H</code></th><td>QR error correction (default M). Higher survives glare better, at fewer bytes per frame.</td></tr>
@@ -115,7 +115,7 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
           <figure><img src="docs/player.webp" alt="The beam player: a QR code on a white tile over a black page, with a control bar" loading="lazy" /><figcaption>The player. Controls: ◀ ▶ step · pause/play · fps − + · size − + · fullscreen · hide chrome. Keys: <code>space</code> · <code>←</code>/<code>→</code> · <code>+</code>/<code>−</code> · <code>[</code>/<code>]</code> · <code>f</code> · <code>h</code>.</figcaption></figure>
           <ul>
             <li><b>Size</b> — <code>[</code> / <code>]</code> scale the code 40–100 %. Smaller can decode <em>better</em> when the phone is close and the screen is large.</li>
-            <li><b>Speed</b> — <code>+</code> / <code>−</code> change the fps live. Watch the scanner's <code>decoded/s</code>; run the beam a touch below it.</li>
+            <li><b>Speed</b> — <code>+</code> / <code>−</code> change the fps live. Watch the scanner's <code>beam ~N fps · K× each</code>. A sequential beam needs every frame, so keep each read about 2.5×; a fountain beam only needs fresh frames, so it can run until they are read about 1.5×. The scanner's hint suggests the rate.</li>
             <li><b>Chrome</b> — <code>h</code> hides everything but the code; <code>f</code> goes full-screen.</li>
           </ul>
         </section>
@@ -131,7 +131,7 @@ chmod +x airlift-darwin-arm64 &amp;&amp; sudo mv airlift-darwin-arm64 /usr/local
               <b>Open the session on the phone</b> — scan the QR on the dashboard or open the link. The phone joins the same session and sees the same dashboard.
             </li>
             <li>
-              <b>Tap <em>Scan a beam</em></b> and point the camera at the screen. The HUD counts chunks as they land — one tally mark per chunk, a minimap of pages, and the decode rate. The scanner stops itself and offers to close once the beam is whole.
+              <b>Tap <em>Scan a beam</em></b> and point the camera at the screen. The HUD counts chunks as they land — one tally mark per chunk, a minimap of pages, and the rates: the camera's fps, the beam's as seen, and how many times each beam frame is read. The camera opens at 60 fps where it can; the fps menu beside the camera menu picks another rate, and a hint names the one change that would scan faster — a faster beam, a higher camera rate, or a faster camera (on a phone with several rear lenses, usually the main 1× one). The scanner stops itself and offers to close once the beam is whole.
               <figure><img src="docs/scanner.webp" alt="The scanner: a square viewfinder and the chunk tally" loading="lazy" class="phone" /></figure>
             </li>
             <li>

@@ -3,6 +3,7 @@ import { ApiError, eventsURL, joinSession, postExtension, postFrames, postPing, 
 import { decodeBitmap } from "../shared/bitmap";
 import { renderChunkMarks } from "../shared/chunks";
 import { $, html, raw } from "../shared/dom";
+import { icon } from "../shared/icons";
 import { cleanupCountdown, terminateCountdown, terminatedBy, terminatedWhy } from "../shared/lifecycle";
 import { bindActivity, Pinger, type PingOutcome } from "../shared/ping";
 import { subscribe, type SSEStatus } from "../shared/sse";
@@ -11,11 +12,13 @@ import {
   activeDeviceId,
   describeCamera,
   explainCameraError,
+  hasOtherSameFacing,
   hasTorch,
   listCameras,
   openCamera,
   setTorch,
   stopStream,
+  streamFrameRate,
   streamSize,
 } from "./camera";
 import { activeKey, baselineIgnored, pickActive, relayCompleted, scanJustCompleted } from "./complete";
@@ -23,6 +26,7 @@ import { createDecoder, startDecodeLoop, type Decoder, type LoopStats } from "./
 import { finderROI } from "./roi";
 import { resolveJoin } from "./join";
 import { Relay, type RelayStats } from "./relay";
+import { fpsOptions, frameType, HintGate, parseFpsChoice, Smoother, speedHint, type FpsChoice, type SpeedHint } from "./speed";
 
 const video = $<HTMLVideoElement>("#video");
 const frameCanvas = $<HTMLCanvasElement>("#frame");
@@ -33,6 +37,8 @@ const stateEl = $<HTMLElement>("#state");
 const statsEl = $<HTMLElement>("#stats");
 const messageEl = $<HTMLElement>("#message");
 const cameraSelect = $<HTMLSelectElement>("#camera");
+const fpsSelect = $<HTMLSelectElement>("#fps");
+const hintEl = $<HTMLElement>("#hint");
 const startButton = $<HTMLButtonElement>("#start");
 const torchButton = $<HTMLButtonElement>("#torch");
 const joinForm = $<HTMLFormElement>("#join-form");
@@ -45,6 +51,20 @@ function safeStorage(): Storage | null {
     return localStorage;
   } catch {
     return null;
+  }
+}
+function readPref(key: string): string | null {
+  try {
+    return safeStorage()?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+function writePref(key: string, value: string): void {
+  try {
+    safeStorage()?.setItem(key, value);
+  } catch {
+    /* storage unavailable: the choice lasts this visit only */
   }
 }
 const basePath = new URL(document.baseURI).pathname.replace(/\/$/, "");
@@ -104,6 +124,19 @@ let message = "";
 let cameraLabel = "";
 let wakeLock: WakeLockSentinel | null = null;
 let torchOn = false;
+// Scan speed: the frame rate asked of the camera (kept per browser), what the
+// open track reports, and the debounced hint built from the loop's numbers.
+const FPS_KEY = "airlift.scan.fps";
+let fpsChoice: FpsChoice = parseFpsChoice(readPref(FPS_KEY));
+let camFps: { set?: number; max?: number } = {};
+let otherCamera = false; // another camera faces the same way as this one
+let lastFountainAt = -Infinity; // when a FOUNTAIN frame was last decoded
+let hint: SpeedHint | null = null;
+let startGen = 0; // bumps on every startCamera, so a superseded one backs out
+const SCANNING = "Point the camera at the beam.";
+let hintShown = "";
+const smoother = new Smoother();
+const hintGate = new HintGate();
 let clientID = "";
 let ownName = "";
 
@@ -432,7 +465,17 @@ function render(): void {
   }
   const parts: string[] = [];
   if (decoder) parts.push(decoder.name + (cameraLabel ? ` · ${cameraLabel}` : ""));
-  if (loopStats) parts.push(`${loopStats.decodesPerSec.toFixed(1)} decoded/s · ${loopStats.attemptsPerSec.toFixed(0)} tries/s · ${loopStats.lastDecodeMs.toFixed(0)} ms`);
+  if (loopStats) {
+    const rates: string[] = [];
+    // The set rate is in the camera label; the delivered one shows when it falls short.
+    const cam = loopStats.cameraFps;
+    if (cam !== null && (!camFps.set || cam < camFps.set * 0.9)) rates.push(`camera ${cam.toFixed(0)} fps`);
+    if (loopStats.distinctPerSec > 0) {
+      rates.push(`beam ~${loopStats.distinctPerSec.toFixed(0)} fps · ${(loopStats.decodesPerSec / loopStats.distinctPerSec).toFixed(1)}× each`);
+    }
+    if (rates.length) parts.push(rates.join(" · "));
+    parts.push(`${loopStats.decodesPerSec.toFixed(1)} decoded/s · ${loopStats.attemptsPerSec.toFixed(0)} tries/s · ${loopStats.lastDecodeMs.toFixed(0)} ms`);
+  }
   if (relayStats) {
     parts.push(`sent ${relayStats.sent} · new ${relayStats.accepted} · dup ${relayStats.dup + (relayStats.seen - relayStats.unique)} · bad ${relayStats.bad}`);
     if (relayStats.buffered > 0 || relayStats.failures > 0) {
@@ -447,7 +490,13 @@ function render(): void {
   // No beam to feed but the tower keeps answering "dup": the loop on screen is a
   // beam this session already has.
   const stale = !beam && !!stream && !!relayStats && relayStats.dup > 0;
-  messageEl.textContent = beam?.error ?? (stale ? "That beam is already received — show a new one." : message);
+  const text = beam?.error ?? (stale ? "That beam is already received — show a new one." : message);
+  // The speed hint takes the message's place while that only says to point the
+  // camera, so the bottom band does not grow over the viewfinder.
+  const showHint = !!stream && !beam?.error && !stale && message === SCANNING && hint !== null;
+  messageEl.textContent = text;
+  messageEl.hidden = showHint;
+  renderHint(showHint ? hint : null);
   document.body.dataset.state = state;
 }
 
@@ -493,30 +542,116 @@ async function fillCameraList(): Promise<void> {
     (c, i) => html`<option value="${c.deviceId}" ${c.deviceId === active ? raw("selected") : ""}>${describeCamera(c, i)}</option>`,
   )}`.html;
   cameraSelect.hidden = cams.length < 2;
+  otherCamera = hasOtherSameFacing(cams, active, stream?.getVideoTracks()[0]?.getSettings().facingMode);
   const current = cams.find((c) => c.deviceId === active);
   cameraLabel = current ? describeCamera(current, cams.indexOf(current)) : "";
   if (stream) cameraLabel += ` ${streamSize(stream)}`;
+  if (stream && camFps.set) cameraLabel += ` · ${Math.round(camFps.set)} fps`;
+  if (stream && camFps.max && camFps.set && camFps.max > camFps.set + 1) cameraLabel += ` (max ${Math.round(camFps.max)})`;
+}
+
+// fillFpsMenu offers the rates this camera reports (hidden when it reports
+// none); each option says what it asks for, and the selected one what the
+// camera actually runs at.
+function fillFpsMenu(): void {
+  const rates = fpsOptions(camFps.max);
+  if (typeof fpsChoice === "number" && !rates.includes(fpsChoice)) rates.push(fpsChoice);
+  rates.sort((a, b) => b - a);
+  const set = camFps.set ? Math.round(camFps.set) : undefined;
+  const got = (r: number) => (set && Math.abs(set - r) > 1 ? ` · got ${set}` : "");
+  fpsSelect.innerHTML = html`<option value="auto" ${fpsChoice === "auto" ? raw("selected") : ""}>Auto fps${fpsChoice === "auto" && set ? ` · ${set}` : ""}</option>${rates.map(
+    (r) => html`<option value="${r}" ${fpsChoice === r ? raw("selected") : ""}>${r} fps${fpsChoice === r ? got(r) : ""}</option>`,
+  )}`.html;
+  fpsSelect.hidden = rates.length === 0;
+}
+
+// updateHint folds one second of decode-loop numbers into the speed hint. A
+// second without the beam in view starts the averages afresh rather than
+// decaying them (which would count the suggested rates down to nonsense).
+function updateHint(s: LoopStats): void {
+  if (s.distinctPerSec < 0.5) {
+    smoother.reset();
+    hint = hintGate.next(null);
+    return;
+  }
+  const settings = stream?.getVideoTracks()[0]?.getSettings();
+  const m = smoother.next({
+    cameraFps: s.cameraFps,
+    beamFps: s.distinctPerSec,
+    decodesPerSec: s.decodesPerSec,
+    attemptsPerSec: s.attemptsPerSec,
+    lastDecodeMs: s.lastDecodeMs,
+  });
+  hint = hintGate.next(
+    speedHint({
+      ...m,
+      setFps: camFps.set,
+      maxFps: camFps.max,
+      size: stream ? streamSize(stream) : undefined,
+      shortEdge: settings?.width && settings.height ? Math.min(settings.width, settings.height) : undefined,
+      fountain: performance.now() - lastFountainAt < 5000,
+      fpsMenu: !fpsSelect.hidden,
+      picked: fpsChoice !== "auto",
+      otherCameras: otherCamera,
+    }),
+  );
+}
+
+function renderHint(h: SpeedHint | null): void {
+  const text = h?.text ?? "";
+  if (text === hintShown) return;
+  hintShown = text;
+  hintEl.innerHTML = text ? html`${icon("gauge")}<span>${text}</span>`.html : "";
+  hintEl.hidden = !text;
+}
+
+function resetHint(): void {
+  smoother.reset();
+  hintGate.reset();
+  hint = null;
+  renderHint(null);
 }
 
 async function startCamera(deviceId?: string): Promise<void> {
+  // A pick in either menu while a start is still opening the camera starts
+  // another; the newest wins and an older one releases what it opened.
+  const gen = ++startGen;
+  let opened: MediaStream | null = null;
+  const superseded = (): boolean => {
+    if (gen === startGen) return false;
+    if (opened && opened !== stream) stopStream(opened);
+    return true;
+  };
   scanComplete = false;
   stopCamera(false);
   startButton.disabled = true;
+  cameraSelect.disabled = true;
+  fpsSelect.disabled = true;
   message = "Starting camera…";
   render();
   try {
-    stream = await openCamera(deviceId);
+    opened = await openCamera(deviceId, fpsChoice);
+    if (superseded()) return;
+    stream = opened;
     video.srcObject = stream;
     await video.play();
+    if (superseded()) return;
+    camFps = streamFrameRate(stream);
     await fillCameraList();
+    fillFpsMenu();
     decoder ??= await createDecoder();
+    if (superseded()) return;
     stopLoop = startDecodeLoop(
       video,
       decoder,
       frameCanvas,
-      (text) => relay.push(text),
+      (text) => {
+        relay.push(text);
+        if (frameType(text) === 2) lastFountainAt = performance.now();
+      },
       (s) => {
         loopStats = s;
+        updateHint(s);
         render();
       },
       // The decoder reads the viewfinder's crop of the frame (the video is
@@ -527,17 +662,23 @@ async function startCamera(deviceId?: string): Promise<void> {
       stopEvents?.();
       stopEvents = subscribeProgress("relay");
     }
-    message = "Point the camera at the beam.";
+    message = SCANNING;
     startButton.hidden = true;
     torchOn = false;
     torchButton.hidden = !hasTorch(stream);
     torchButton.textContent = "Torch";
     void requestWakeLock();
   } catch (err) {
+    if (superseded()) return;
     message = explainCameraError(err);
     startButton.hidden = false;
     startButton.disabled = false;
     startButton.textContent = "Start camera";
+  } finally {
+    if (gen === startGen) {
+      cameraSelect.disabled = false;
+      fpsSelect.disabled = false;
+    }
   }
   render();
 }
@@ -550,6 +691,8 @@ function stopCamera(final = true): void {
   torchButton.hidden = true;
   video.srcObject = null;
   loopStats = null;
+  camFps = {};
+  resetHint();
   if (final) void relay.flush();
 }
 
@@ -566,6 +709,13 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") wakeLock = null;
 });
 cameraSelect.addEventListener("change", () => void startCamera(cameraSelect.value));
+fpsSelect.addEventListener("change", () => {
+  fpsChoice = parseFpsChoice(fpsSelect.value);
+  writePref(FPS_KEY, String(fpsChoice));
+  // Reopen the same camera at the new rate: applyConstraints cannot raise a
+  // running camera's rate everywhere, a fresh getUserMedia can.
+  void startCamera((stream ? activeDeviceId(stream) : undefined) ?? (cameraSelect.value || undefined));
+});
 startButton.addEventListener("click", () => void startCamera());
 $<HTMLButtonElement>("#close-hud").addEventListener("click", onCloseTab);
 torchButton.addEventListener("click", () => {
@@ -662,5 +812,10 @@ void init();
     chunksEl.hidden = false;
     finderEl.hidden = false;
     renderChunkMarks(chunksEl, "demo", bits);
+  },
+  // Preview the speed hint the numbers would produce (or a given text), without a camera.
+  hint: (inputs: Parameters<typeof speedHint>[0] | string) => {
+    hintShown = "";
+    renderHint(typeof inputs === "string" ? { id: "beam-headroom", text: inputs } : speedHint(inputs));
   },
 };

@@ -25,6 +25,7 @@ const PATHS = {
   reopen: '<path d="M4 12a8 8 0 1 1 2.3 5.6"/><path d="M4 20v-4h4"/>',
   torch: '<path d="M9 3h6l-1 7h3l-8 11 2-8H8z"/>',
   power: '<path d="M12 3v9"/><path d="M6.6 6.6a7.5 7.5 0 1 0 10.8 0"/>',
+  gauge: '<path d="M4.6 17.5a8.5 8.5 0 1 1 14.8 0"/><path d="M12 14.5l3.6-4.6"/><circle cx="12" cy="14.8" r="1.3"/>',
 } as const;
 
 export type IconName = keyof typeof PATHS;
