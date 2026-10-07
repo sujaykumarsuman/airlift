@@ -614,7 +614,7 @@ GHCR as the registry.
   (distinct strings/s) and reads per beam frame (`K× each`), plus the
   delivered rate (`presentedFrames`) when it falls short of the set one.
 - **Speed hint** (`web/src/scan/speed.ts`, unit-tested): one debounced line in
-  the top band, above the finder (moved there in v1.2.1 after a phone run put
+  the top band, above the finder (moved there in v1.2.2 after a phone run put
   it against the square's bottom edge), naming the change that would scan
   faster. Sequential
   beams aim at ~2.5 reads a frame (raise above, lower under 1.5); fountain
