@@ -390,6 +390,9 @@ ul.paths code { color: var(--fg); }
   transform: translate(-50%, -50%); border-radius: 16px; pointer-events: none; z-index: 1;
   box-shadow: 0 0 0 200vmax rgba(0, 0, 0, 0.58);
 }
+/* short screens: a smaller square leaves room for the bands above and below it
+   (the decoder's crop follows the square, still ~5 px per module at 1080p) */
+@media (max-height: 720px) { .scan .finder { width: min(78vw, 38vh); } }
 .scan .finder i { position: absolute; width: 26px; height: 26px; border: 2.5px solid var(--accent); }
 .scan .finder i.tl { left: -1px; top: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 16px; }
 .scan .finder i.tr { right: -1px; top: -1px; border-left: 0; border-bottom: 0; border-top-right-radius: 16px; }
@@ -411,7 +414,8 @@ ul.paths code { color: var(--fg); }
 .scan .controls select { min-width: 0; }
 .scan .controls select.fps { flex: 0 1 auto; }
 .scan .controls .btn { flex: none; }
-.scan .speed-hint { display: flex; gap: 0.45rem; align-items: flex-start; font-size: 0.9rem; line-height: 1.35; color: var(--accent); min-height: 1.4rem; }
+/* the speed hint sits in the top band, under the chunk tally, above the finder */
+.scan .speed-hint { display: flex; gap: 0.45rem; align-items: flex-start; font-size: 0.9rem; line-height: 1.35; color: var(--accent); margin-top: 0.75rem; }
 .scan .speed-hint svg { margin-top: 0.12rem; }
 .scan .speed-hint:not([hidden]) { animation: fade var(--dur) var(--ease) both; }
 .scan .controls .btn { background: rgba(255, 255, 255, 0.09); border-color: rgba(255, 255, 255, 0.18); color: #fff; backdrop-filter: blur(6px); border-radius: 9px; padding: 0.65rem 0.85rem; }
