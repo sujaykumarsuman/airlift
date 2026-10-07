@@ -491,8 +491,8 @@ function render(): void {
   // beam this session already has.
   const stale = !beam && !!stream && !!relayStats && relayStats.dup > 0;
   const text = beam?.error ?? (stale ? "That beam is already received — show a new one." : message);
-  // The speed hint takes the message's place while that only says to point the
-  // camera, so the bottom band does not grow over the viewfinder.
+  // The speed hint (in the top band) stands in for the message while that only
+  // says to point the camera, so the bottom band stays short.
   const showHint = !!stream && !beam?.error && !stale && message === SCANNING && hint !== null;
   messageEl.textContent = text;
   messageEl.hidden = showHint;
