@@ -1,5 +1,6 @@
 import wasmUrl from "zxing-wasm/reader/zxing_reader.wasm?url";
 import type { ReaderOptions } from "zxing-wasm/reader";
+import { startFramePacer, videoClock, type FrameCount, type PacerClock } from "./pacer";
 import type { ROI } from "./roi";
 
 export interface Decoder {
@@ -102,8 +103,11 @@ function grab(video: HTMLVideoElement, canvas: HTMLCanvasElement, roi: ROI | nul
 
 export interface LoopStats {
   framesPerSec: number; // camera frames offered
-  /** Frames the camera delivered (requestVideoFrameCallback's presentedFrames);
-   *  null under the rAF fallback, which counts display refreshes instead. */
+  /** Frames/s the camera delivered, between the window's first and last frame
+   *  counts: requestVideoFrameCallback's presentedFrames, or the element's
+   *  received frames while the pacer's fallback drives the loop; null when the
+   *  browser does not say, or for a window that straddles a switch between the
+   *  two. */
   cameraFps: number | null;
   attemptsPerSec: number; // frames handed to the decoder
   decodesPerSec: number; // QR strings decoded, repeats included
@@ -121,11 +125,12 @@ const MAX_IN_FLIGHT = 2;
 const FULL_FRAME_AFTER_MS = 1000;
 
 /**
- * Feeds camera frames to the decoder, paced by requestVideoFrameCallback (rAF
- * as a fallback): every new frame is offered, up to MAX_IN_FLIGHT are decoded
- * at a time, the rest are dropped. `roi` gives the finder crop for a frame
- * (null to read all of it). Returns a stop function; a decode still in flight
- * when it is called is discarded.
+ * Feeds camera frames to the decoder, paced by startFramePacer
+ * (requestVideoFrameCallback, with a watchdog for when it stalls): every new
+ * frame is offered, up to MAX_IN_FLIGHT are decoded at a time, the rest are
+ * dropped. `roi` gives the finder crop for a frame (null to read all of it).
+ * Returns a stop function; a decode still in flight when it is called is
+ * discarded.
  */
 export function startDecodeLoop(
   video: HTMLVideoElement,
@@ -134,34 +139,27 @@ export function startDecodeLoop(
   onText: (text: string) => void,
   onStats?: (stats: LoopStats) => void,
   roi?: () => ROI | null,
+  clock: PacerClock = videoClock(video),
 ): () => void {
   let running = true;
   let frames = 0;
   let attempts = 0;
   let decodes = 0;
   let distinct = new Set<string>();
-  let presented: number | null = null; // presentedFrames at the window's start
-  let presentedNow: number | null = null;
+  // The camera's frame count (and when it was read) at the window's start and now.
+  let camStart: { count: FrameCount; at: number } | null = null;
+  let camNow: { count: FrameCount; at: number } | null = null;
   let lastMs = 0;
   let inFlight = 0;
-  let lastCropHit = performance.now();
-  let windowStart = performance.now();
-  const schedule = () => {
+  let lastCropHit = clock.now();
+  let windowStart = clock.now();
+  const tick = (count: FrameCount | null) => {
     if (!running) return;
-    if (typeof video.requestVideoFrameCallback === "function") {
-      video.requestVideoFrameCallback((_now, meta) => {
-        presentedNow = meta.presentedFrames;
-        presented ??= meta.presentedFrames;
-        tick();
-      });
-    } else requestAnimationFrame(() => tick());
-  };
-  const tick = () => {
-    if (!running) return;
-    schedule(); // the next camera frame is wanted whatever happens to this one
+    camNow = count && { count, at: clock.now() };
+    camStart ??= camNow;
     frames++;
     if (video.readyState >= 2 && inFlight < MAX_IN_FLIGHT) {
-      const now = performance.now();
+      const now = clock.now();
       let region = roi?.() ?? null;
       const cropDry = now - lastCropHit > FULL_FRAME_AFTER_MS;
       if (region && cropDry && attempts % 2 === 1) region = null;
@@ -176,7 +174,7 @@ export function startDecodeLoop(
             for (const text of texts) {
               decodes++;
               distinct.add(text);
-              if (cropped) lastCropHit = performance.now();
+              if (cropped) lastCropHit = clock.now();
               onText(text);
             }
           },
@@ -186,13 +184,14 @@ export function startDecodeLoop(
         )
         .finally(() => {
           inFlight--;
-          lastMs = performance.now() - now;
+          lastMs = clock.now() - now;
         });
     }
-    const now = performance.now();
+    const now = clock.now();
     if (now - windowStart >= 1000) {
       const secs = (now - windowStart) / 1000;
-      const cameraFps = presented !== null && presentedNow !== null ? (presentedNow - presented) / secs : null;
+      const span = camStart && camNow && camStart.count.counter === camNow.count.counter ? (camNow.at - camStart.at) / 1000 : 0;
+      const cameraFps = camStart && camNow && span > 0 ? (camNow.count.frames - camStart.count.frames) / span : null;
       onStats?.({
         framesPerSec: frames / secs,
         cameraFps,
@@ -205,12 +204,13 @@ export function startDecodeLoop(
       attempts = 0;
       decodes = 0;
       distinct = new Set();
-      presented = presentedNow;
+      camStart = camNow;
       windowStart = now;
     }
   };
-  schedule();
+  const stopPacer = startFramePacer(clock, tick);
   return () => {
     running = false;
+    stopPacer();
   };
 }
