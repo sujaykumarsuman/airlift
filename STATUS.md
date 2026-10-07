@@ -599,6 +599,41 @@ GHCR as the registry.
   `apps/airlift.yaml`; Longhorn thin-provisions and expands in place).
 - **Next**: the admin console still downloads through a blob.
 
+## Phase 16 — scanner camera rate + speed hints (done, 2026-10-07)
+
+- **60 fps by default**: `openCamera` now asks for `frameRate: {ideal: 60}`
+  beside 1080p (it asked for no rate before, so phones ran at ≤ 30). An ideal
+  only: a camera without 1080p60 keeps 1080p at its best rate.
+- **fps menu** beside the camera menu (`#fps`): Auto, or a rate from the
+  camera's reported max down (120/60/30/24/15). A pick is strict (that rate
+  even at a lower resolution) with a loose fallback, reopens the same camera,
+  and is kept per browser (`airlift.scan.fps`). Hidden where the browser
+  reports no frame-rate capability.
+- **What is active**: the camera label shows the track's set rate (and its max
+  when higher) beside the resolution; the HUD adds the beam's rate as seen
+  (distinct strings/s) and reads per beam frame (`K× each`), plus the
+  delivered rate (`presentedFrames`) when it falls short of the set one.
+- **Speed hint** (`web/src/scan/speed.ts`, unit-tested): one debounced line, in
+  the message's place, naming the change that would scan faster. Sequential
+  beams aim at ~2.5 reads a frame (raise above, lower under 1.5); fountain
+  beams — told apart by the frame-type byte — aim at ~1.5 and are never told
+  to slow down, since every fresh packet counts. Also: try the menu's top
+  camera rate (warning it may cost resolution), back to Auto when a picked
+  rate lost 1080p and decodes fail, switch to another camera facing the same
+  way from a 30 fps lens, more light for a starved camera, and "decoding is
+  the limit" (zxing on iOS). A second without the beam resets the averages.
+  `airliftScan.hint(inputs|text)` previews it without a camera.
+- Camera/fps picks made while a start is still opening the camera supersede
+  it (a generation token; the older stream is released, both menus disabled
+  until the start settles). Camera, fps and torch share one row.
+- Beam default fps stays 10 (ADR 0018): the hint says when a phone has room.
+- Verified: `make scan-e2e` READY in 7.5 s, same as before (fake camera 30
+  fps); the hint there says 15 fps, and the same beam at 15 fps is READY in
+  5.0 s. Headless Chrome sometimes stalls the decode loop (rVFC never fires),
+  before this change too — being chased separately. Still to do on the S25
+  Ultra: the rate the main lens gives at 1080p and how fast a beam it then
+  sustains.
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender
