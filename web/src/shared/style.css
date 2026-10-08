@@ -307,7 +307,12 @@ table.verdicts tr.ok td.mark { color: var(--ok); }
 table.verdicts tr.bad td.mark { color: var(--bad); }
 table.verdicts code { word-break: break-all; color: var(--muted); }
 ul.paths { margin: 0.25rem 0 0.75rem; padding-left: 1.25rem; columns: 2; color: var(--muted); font-size: 0.85rem; }
-ul.paths code { color: var(--fg); }
+ul.paths li { break-inside: avoid; }
+ul.paths li + li { margin-top: 0.15rem; }
+/* a path wraps at its "/" (the <wbr>s) and, failing that, anywhere — never past
+   its column; wrapped lines hang under the first */
+ul.paths code { display: inline-block; max-width: 100%; vertical-align: top; padding-left: 1.25em; text-indent: -1.25em; color: var(--fg); overflow-wrap: anywhere; }
+ul.paths code .dir { color: var(--muted); }
 .downloads { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
 @media (max-width: 640px) { ul.paths { columns: 1; } }
 

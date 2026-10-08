@@ -672,6 +672,15 @@ GHCR as the registry.
   never fire: READY in 4.0 s at 30 tries/s, the same as with it.
 - **Open**: report the `OnCaptureTask` early return to Chromium.
 
+## Phase 16.2 — the verified card's paths wrap (done, 2026-10-08, v1.2.3)
+
+- A repobundle's file list (`ul.paths`, two columns from 641 px) ran long paths
+  past their column into the next and off the card, on phones too. A path now
+  breaks after each `/` and `_` (`<wbr>`), and anywhere as a last resort; its
+  folders are dimmed and wrapped lines hang under the first. Checked against a
+  real beam of long paths through a local tower at 375 / 768 / 1000 / 1400 px:
+  no entry past its column, no horizontal overflow.
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender
