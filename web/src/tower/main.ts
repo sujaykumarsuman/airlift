@@ -1010,6 +1010,16 @@ function verdictRow(label: string, v: Verdict | null): Raw {
   </tr>`;
 }
 
+/** A bundle path, its folders dimmed, with a line-break opportunity after every
+ *  "/" and "_" so a long path wraps at its folders and words before it has to
+ *  break inside one. */
+function pathHTML(p: string): Raw {
+  const segs = p.split("/");
+  const base = segs.pop() ?? "";
+  const words = base.split(/(?<=_)/).map((w, i) => (i ? html`<wbr>${w}` : html`${w}`));
+  return html`${segs.length ? html`<span class="dir">${segs.map((s) => html`${s}/<wbr>`)}</span>` : ""}${words}`;
+}
+
 function resultCard(b: Beam): Raw {
   const v = b.verdicts;
   return html`<div class="result ok">
@@ -1021,7 +1031,7 @@ function resultCard(b: Beam): Raw {
       b.bundle
         ? html`<p>Repobundle of <b>${b.bundle.files}</b> ${b.bundle.files === 1 ? "file" : "files"}, ${formatBytes(b.bundle.total_bytes)}.</p>
             <ul class="paths">
-              ${b.bundle.paths.map((p) => html`<li><code>${p}</code></li>`)}
+              ${b.bundle.paths.map((p) => html`<li><code>${pathHTML(p)}</code></li>`)}
               ${b.bundle.files > b.bundle.paths.length ? html`<li class="muted">… ${b.bundle.files - b.bundle.paths.length} more</li>` : ""}
             </ul>`
         : b.stream
