@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"sync"
@@ -77,6 +78,7 @@ type Store struct {
 	onEvict     func(string)
 	onBeamEvict func(sid, bid string)
 	onTerminate func(*Session) // writes session.json on a lifecycle transition
+	onChange    func(*Session) // writes state.json after a change (ADR 0025)
 }
 
 // NewStore creates a store seeding the idle and terminated windows with ttl and
@@ -106,6 +108,16 @@ func (st *Store) SetTerminateHook(fn func(*Session)) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.onTerminate = fn
+}
+
+// SetChangeHook installs the function told of every change to a session — its
+// state is written down (ADR 0025). It runs under the session's lock, so it
+// must not block or call back into the session. Set it before creating or
+// restoring sessions.
+func (st *Store) SetChangeHook(fn func(*Session)) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.onChange = fn
 }
 
 // SetNow overrides the clock (tests). Set it before creating sessions.
@@ -198,6 +210,8 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, err
 	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	tokenHash := sha256.Sum256([]byte(token))
 	id, err := st.freshIDLocked()
 	if err != nil {
 		return nil, err
@@ -209,7 +223,8 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	now := st.now()
 	s := &Session{
 		ID:            id,
-		Token:         base64.RawURLEncoding.EncodeToString(tokenBytes),
+		token:         token,
+		tokenHash:     tokenHash[:],
 		CreatedAt:     now,
 		now:           st.now,
 		status:        StatusOpen,
@@ -226,6 +241,7 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 		subs:          map[*Subscriber]struct{}{},
 		onComplete:    st.onComplete,
 		onBeamEvict:   st.onBeamEvict,
+		onChange:      st.onChange,
 		clients:       map[string]*Client{},
 		usedNames:     map[string]bool{},
 		evicted:       map[string]bool{},
@@ -235,8 +251,12 @@ func (st *Store) CreateWith(p CreateParams) (*Session, error) {
 	if p.Password != "" {
 		s.salt = newSalt()
 		s.passHash = hashPassword(s.salt, p.Password)
+		s.tokenSeal = sealToken(s.salt, p.Password, token)
 	}
 	st.sessions[s.ID] = s
+	if s.onChange != nil {
+		s.onChange(s) // written down from the start: a restart must not lose it
+	}
 	return s, nil
 }
 

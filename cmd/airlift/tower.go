@@ -95,7 +95,6 @@ func runServe(ctx context.Context, cfg *config.Config, params config.Params, hea
 	store := session.NewStore(cfg.IdleTTL, cfg.Sessions)
 	store.SetLimits(cfg.MaxBeams, cfg.MaxGzBytes)
 	store.SetLifecycle(cfg.IdleTTL, cfg.MaxAge, cfg.TerminatedTTL)
-	go store.Run(ctx, sweepEvery)
 	srv := server.New(server.Options{
 		Store:          store,
 		PublicBase:     base,
@@ -127,6 +126,17 @@ func runServe(ctx context.Context, cfg *config.Config, params config.Params, hea
 		OnCreate:      func(s *session.Session, join string) { printJoin(stdout, s.ID, join) },
 		Logf:          logger.Printf,
 	})
+	// The sessions an earlier run wrote down come back before anything is served
+	// (ADR 0025), and the sweep then advances any clock that ran out meanwhile.
+	restored, err := srv.Restore()
+	if err != nil {
+		ln.Close()
+		return fail(fmt.Errorf("restoring sessions from %s: %w", cfg.DataDir, err))
+	}
+	if restored > 0 {
+		logger.Printf("restored %d session(s) from %s", restored, cfg.DataDir)
+	}
+	go store.Run(ctx, sweepEvery)
 
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	admin := "disabled"
@@ -155,8 +165,9 @@ const settleTimeout = 5 * time.Second
 // serve runs the HTTP server on ln until ctx ends, then drains: the tower
 // refuses new work (readiness answers 503) while the requests in flight get up
 // to drainTimeout to finish, then it stops listening; anything still open at
-// the deadline is cut. It returns only once that is done — returning earlier
-// would let the process exit under the requests it is meant to finish.
+// the deadline is cut. Last, every session is written down for the next start
+// (ADR 0025). It returns only once that is done — returning earlier would let
+// the process exit under the requests it is meant to finish.
 func serve(ctx context.Context, hs *http.Server, srv *server.Server, ln net.Listener, drainTimeout time.Duration, logger *log.Logger) error {
 	hs.RegisterOnShutdown(srv.Drain)
 	stopped := make(chan struct{})
@@ -178,6 +189,7 @@ func serve(ctx context.Context, hs *http.Server, srv *server.Server, ln net.List
 			defer cancel()
 			srv.WaitIdle(settle)
 		}
+		srv.SaveAll()
 		logger.Printf("drained in %s", time.Since(start).Round(time.Millisecond))
 	}()
 	if err := hs.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
@@ -187,9 +199,11 @@ func serve(ctx context.Context, hs *http.Server, srv *server.Server, ln net.List
 	return nil
 }
 
-// prepareDataDir creates data_dir and empties it on start (decision 9), but
-// only after refusing dangerous targets and any pre-existing directory airlift
-// did not create — a misconfigured data_dir must never wipe the host.
+// prepareDataDir creates data_dir, or adopts the one an earlier run left: its
+// sessions are restored from it, and what none of them accounts for is deleted
+// (ADR 0025; it used to be emptied). It first refuses dangerous targets and any
+// pre-existing directory airlift did not create — a misconfigured data_dir must
+// never have the host's files deleted.
 func prepareDataDir(dir, home string) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -204,11 +218,8 @@ func prepareDataDir(dir, home string) error {
 	case err == nil:
 		if len(entries) > 0 {
 			if _, serr := os.Stat(sentinel); serr != nil {
-				return fmt.Errorf("data_dir %s is not empty and not an airlift data directory; refusing to erase it", abs)
+				return fmt.Errorf("data_dir %s is not empty and not an airlift data directory; refusing to use it", abs)
 			}
-		}
-		if err := os.RemoveAll(abs); err != nil {
-			return err
 		}
 	case !errors.Is(err, fs.ErrNotExist):
 		return err

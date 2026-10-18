@@ -50,7 +50,8 @@ straight to a session (not air-gapped)
                                     go as one zip, staged in the temp dir — up to the
                                     tower's max_upload_bytes (5 GiB by default)
   --wait DURATION                   how long to wait for a session admin to let you in and
-                                    to approve the upload (default 3m)
+                                    to approve the upload, and for a tower that restarts
+                                    (default 10m)
 `
 
 func cmdBeam(args []string, stdout, stderr io.Writer) int {
@@ -71,7 +72,7 @@ func cmdBeam(args []string, stdout, stderr io.Writer) int {
 	seed := fs.Int64("seed", 0, "")
 	toSession := fs.String("to-session", "", "")
 	fs.StringVar(toSession, "s", "", "")
-	wait := fs.Duration("wait", 3*time.Minute, "")
+	wait := fs.Duration("wait", 10*time.Minute, "")
 	positional, err := parsePermuted(fs, args)
 	if err != nil {
 		return 2

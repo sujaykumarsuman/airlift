@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -155,12 +156,19 @@ func (b *Beam) BID() string { return fmt.Sprintf("%08x", b.Sender) }
 // creation. One mutex guards the beam map and every beam's fields.
 type Session struct {
 	ID        string
-	Token     string
 	CreatedAt time.Time
 
 	mu     sync.Mutex
 	now    func() time.Time
 	closed bool
+
+	// The token is kept as its SHA-256; the plaintext is known while this
+	// process minted it or since a call presented it (ADR 0025), so a tower
+	// restored from disk re-learns it. tokenSeal is the token sealed with the
+	// join password, so a password join can hand it out before anyone has.
+	token     string
+	tokenHash []byte
+	tokenSeal []byte
 
 	// Lifecycle (6.6, ADR 0013). While OPEN the expiry is the earliest of three
 	// clocks (idle/inactive/max_age); a TERMINATED session freezes the transfer,
@@ -191,6 +199,7 @@ type Session struct {
 	subs        map[*Subscriber]struct{}
 	onComplete  func(*Session, *Beam)
 	onBeamEvict func(sid, bid string) // reclaims a removed beam's on-disk dir
+	onChange    func(*Session)        // the session changed: its state is written down (ADR 0025)
 
 	// Access layer (6.5, ADR 0017; ADR 0022): one client per device, each
 	// recording its address, a stable listing order, the names in use for
@@ -263,11 +272,11 @@ type Extension struct {
 // or denies it; on admit the knocker's poll receives the token. Addr is the
 // caller's address (never in the snapshot); Name is what they typed.
 type Knock struct {
-	ID    string
-	Addr  string
-	Name  string
-	At    time.Time
-	State string // "pending" | "admitted" | "denied"
+	ID    string    `json:"id"`
+	Addr  string    `json:"addr"`
+	Name  string    `json:"name"`
+	At    time.Time `json:"at"`
+	State string    `json:"state"` // "pending" | "admitted" | "denied"
 }
 
 // KnockView is the snapshot form of a pending knock: no address, so it carries no
@@ -287,9 +296,27 @@ type LifecycleEvent struct {
 	BID    string    `json:"bid,omitempty"`
 }
 
-// TokenMatches compares in constant time.
+// TokenMatches compares the token's hash in constant time. A match also gives
+// a tower restored from disk the token back.
 func (s *Session) TokenMatches(token string) bool {
-	return subtle.ConstantTimeCompare([]byte(token), []byte(s.Token)) == 1
+	sum := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if subtle.ConstantTimeCompare(sum[:], s.tokenHash) != 1 {
+		return false
+	}
+	if s.token == "" {
+		s.token = token
+	}
+	return true
+}
+
+// Token is the session token, or "" when a restored tower has not seen it yet:
+// nobody has presented it since the restart and no password opened its seal.
+func (s *Session) Token() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.token
 }
 
 // deadlineLocked is when the OPEN session next expires. Presence keeps a
@@ -649,7 +676,10 @@ func (s *Session) KnockState(addr string) (state, token string) {
 		return "none", ""
 	}
 	if k := s.knocks[id]; k.State == "admitted" {
-		return "admitted", s.Token
+		if s.token == "" { // restored, and nobody has presented the token yet: still waiting
+			return "pending", ""
+		}
+		return "admitted", s.token
 	}
 	return s.knocks[id].State, ""
 }
@@ -830,7 +860,11 @@ func (s *Session) Unsubscribe(sub *Subscriber) {
 func (s *Session) notifyLocked() { s.notifyOthersLocked(nil) }
 
 // notifyOthersLocked signals every subscriber except `except` (nil signals all).
+// Every change to the session passes here, so it also tells the change hook.
 func (s *Session) notifyOthersLocked(except *Subscriber) {
+	if s.onChange != nil {
+		s.onChange(s)
+	}
 	for sub := range s.subs {
 		if sub == except {
 			continue

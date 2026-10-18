@@ -102,7 +102,8 @@ admin-approved participant, never silently.
 4. Sender output is one self-contained HTML file. (ADR 0003)
 5. Loop schedule `[M, D0..D(N-1)]`, M re-inserted every 20 data frames.
 6. The phone is a stateless relay: decode → dedup → batch → POST. (ADR 0004)
-7. The server is the source of truth; in-memory sessions with TTL (ADR 0005). A
+7. The server is the source of truth; sessions with TTL (ADR 0005), written down
+   and restored across restarts (decision 25, ADR 0025). A
    session is a *place* holding a list of beams keyed by the sender u32
    (`bid` = its hex); each beam runs RECEIVING → VERIFYING → READY | FAILED
    independently. (ADR 0015)
@@ -205,7 +206,7 @@ admin-approved participant, never silently.
     approval created); an approved request cannot change; the approval ends
     with its beam (READY/FAILED/removed) or a revoke, and a withdrawn, revoked
     or expired one discards the unfinished beam; 10 min expiry, 10 pending per
-    session and 3 per address. `--wait` (default 3m) bounds the CLI's waits;
+    session and 3 per address. `--wait` (default 10m since ADR 0025) bounds the CLI's waits;
     any early end withdraws the request (`DELETE …/uploads/{uid}`). A sender
     with no stream and no open request is parked. The approval is consent for
     the CLI path, not an access control (a token holder can relay frames). The
@@ -227,11 +228,22 @@ admin-approved participant, never silently.
     part in flight. Downloads are 15-minute ticket links (`POST
     …/download-link` → `api/dl/<ticket>`, bound to the asking participant) the
     browser's download manager fetches; the token never enters a URL. (ADR 0024)
+25. Restart-safe sessions: each session is written down as `<data_dir>/<sid>/
+    state.json` (0600, temp + fsync + rename) after every change, coalesced to
+    250 ms per session, and all at the end of a drain; a stopping tower drains
+    first (`/readyz` 503, new work `503` + `Retry-After`, `drain_timeout`). The
+    next start restores them before serving and deletes what none accounts for
+    (no more emptying `data_dir`). No secret in the clear: the token and resume
+    keys as SHA-256, re-learned from the first call that presents them; a
+    password session's token sealed (AES-GCM) under its password. READY beams
+    come back from `meta.json`, a streamed upload resumes from
+    `.<bid>.upload/progress.json` (received + marshalled SHA-256 state, written
+    after each synced part), a beam in frames still arriving is dropped (its
+    scanner restarts it). Download tickets and rate buckets stay in memory.
+    `Recreate` stays: one tower per `data_dir`. (ADR 0025)
 
 ## Non-goals
 
-- Persistence across tower restarts. Sessions are memory-only; `data_dir` is
-  emptied on start.
 - Ecosystem features (AirDrop, Quick Share, Continuity) anywhere in the main
   path.
 

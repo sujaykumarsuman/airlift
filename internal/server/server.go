@@ -98,6 +98,12 @@ type Server struct {
 	drainCh   chan struct{} // closed by Drain: open event streams end
 	drainOnce sync.Once
 	active    atomic.Int64 // requests in flight
+
+	stateMu      sync.Mutex             // guards statePending and stateStopped (state.go)
+	statePending map[string]*time.Timer // sessions with a state write coming
+	stateStopped bool                   // SaveAll began: no more writes are scheduled
+	stateWriteMu sync.Mutex             // serialises state.json writes; guards stateSaved
+	stateSaved   bool                   // SaveAll wrote every session: nothing is written after
 }
 
 func (srv *Server) maxBody() int64            { return srv.live.Load().MaxBody }
@@ -116,7 +122,8 @@ func New(opts Options) *Server {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config, recv: map[string]*receiver{}, drainCh: make(chan struct{})}
+	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config, recv: map[string]*receiver{}, drainCh: make(chan struct{}),
+		statePending: map[string]*time.Timer{}}
 	srv.live.Store(&liveCfg{MaxBody: opts.MaxBody, Caps: opts.Caps, WarningTTL: opts.WarningTTL, ReviewTTL: opts.ReviewTTL})
 	srv.lim = newLimiter(opts.Now, map[rateKind]Rate{
 		rlCreate:    opts.RateCreate,
@@ -133,6 +140,9 @@ func New(opts Options) *Server {
 	opts.Store.SetEvictHook(srv.removeSessionDir)
 	opts.Store.SetBeamEvictHook(srv.removeBeamDir)
 	opts.Store.SetTerminateHook(srv.writeSessionJSON)
+	if opts.DataDir != "" {
+		opts.Store.SetChangeHook(srv.stateChanged) // restart-safe sessions (ADR 0025)
+	}
 	srv.routes()
 	return srv
 }
@@ -222,7 +232,7 @@ func (srv *Server) JoinURL(s *session.Session) string {
 	if s.HasPassword() {
 		return link
 	}
-	return link + "#t=" + s.Token
+	return link + "#t=" + s.Token()
 }
 
 // create mints a session with the given options and runs the OnCreate hook. It

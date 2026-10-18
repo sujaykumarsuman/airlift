@@ -214,6 +214,9 @@ func (srv *Server) receiverFor(w http.ResponseWriter, s *session.Session, t sess
 	if srv.refuseDraining(w) { // a stopping tower starts no upload; one under way goes on
 		return nil
 	}
+	if b, held, ok := s.StreamResumable(t.UploadID); ok { // the tower restarted under this upload (ADR 0025)
+		return srv.resumeReceiverLocked(w, s, t, b, held)
+	}
 	if offset != 0 {
 		writeOffset(w, 0) // nothing of this upload is held: start again from the top
 		return nil
@@ -343,6 +346,9 @@ func (srv *Server) uploadData(w http.ResponseWriter, r *http.Request, s *session
 		writeError(w, http.StatusForbidden, "upload not approved")
 		return
 	}
+	if werr == nil {
+		srv.saveProgress(rc) // what a restart resumes from (ADR 0025)
+	}
 	if werr != nil {
 		srv.opts.Logf("session %s beam %s: write failed: %v", s.ID, rc.beam.BID(), werr)
 		msg, status := "the tower could not store the upload", http.StatusInternalServerError
@@ -433,6 +439,9 @@ func (srv *Server) appendPart(rc *receiver, src io.Reader, report func(at int64)
 			break
 		}
 	}
+	if werr == nil && n > 0 {
+		werr = f.Sync() // on disk before the progress that counts it
+	}
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
 	}
@@ -475,6 +484,7 @@ func (srv *Server) finalizeStream(rc *receiver) {
 		OrigSize: rc.size, OrigSHA256: actual, Verdicts: out.Verdicts,
 		Downloads: downloadsList(out.Downloads), StartedAt: s.BeamStartedAt(b), FinishedAt: finished,
 	}
+	os.Remove(filepath.Join(rc.dir, progressFile)) // the staging's bookkeeping is not published with the beam
 	err := writeMeta(rc.dir, meta)
 	if err == nil {
 		err = os.Rename(rc.dir, final)

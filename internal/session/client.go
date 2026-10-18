@@ -2,6 +2,7 @@ package session
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -44,32 +45,50 @@ type Client struct {
 	Name         string
 	Addr         string
 	SessionAdmin bool
-	Sender       bool // a direct uploader (ADR 0023): frames need an approved upload
-	key          string
+	Sender       bool   // a direct uploader (ADR 0023): frames need an approved upload
+	key          string // the resume key, known while minted here or since the device presented it
+	keyHash      []byte // its SHA-256: what is written down (ADR 0025)
 	createdAt    time.Time
 	lastActive   time.Time
 	parkedAt     time.Time // non-zero while parked (idle with no stream; hidden)
 }
 
-// ResumeKey is the secret the device holds; it goes in the register/join/create
-// replies and nowhere else.
-func (c *Client) ResumeKey() string { return c.key }
+// ResumeKey is the secret c's device holds; it goes in the register/join/create
+// replies and nowhere else. Only a reply to the device that minted or presented
+// it asks, so it is known then even on a tower restored from disk.
+func (s *Session) ResumeKey(c *Client) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return c.key
+}
 
 // matches reports whether a caller at addr presenting key is this client: the
-// key decides when one is given; without one, the address does (pre-key pages).
+// key decides when one is given, by its hash, and is re-learned by a tower
+// restored from disk; without one, the address does (pre-key pages). The
+// caller holds the session's lock.
 func (c *Client) matches(addr, key string) bool {
 	if key != "" {
-		return subtle.ConstantTimeCompare([]byte(key), []byte(c.key)) == 1
+		sum := sha256.Sum256([]byte(key))
+		if subtle.ConstantTimeCompare(sum[:], c.keyHash) != 1 {
+			return false
+		}
+		if c.key == "" {
+			c.key = key
+		}
+		return true
 	}
 	return c.Addr == addr
 }
 
-func newResumeKey() string {
+// newResumeKey mints a resume key and its hash.
+func newResumeKey() (string, []byte) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	key := base64.RawURLEncoding.EncodeToString(b)
+	sum := sha256.Sum256([]byte(key))
+	return key, sum[:]
 }
 
 // ClientSnapshot is one client in the place document.
@@ -107,12 +126,14 @@ func (s *Session) RegisterClient(addr, proposed string, admin bool, resume, key 
 		s.notifyLocked()
 		return c, true
 	}
+	key, keyHash := newResumeKey()
 	c := &Client{
 		ID:           s.mintClientIDLocked(),
 		Name:         s.uniqueNameLocked(proposed),
 		Addr:         addr,
 		SessionAdmin: admin,
-		key:          newResumeKey(),
+		key:          key,
+		keyHash:      keyHash,
 		createdAt:    s.now(),
 		lastActive:   s.now(),
 	}

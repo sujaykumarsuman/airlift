@@ -89,8 +89,9 @@ reconnect to whichever tower answers next. Requests already in flight — an
 upload part, a frames POST, a download — and the later parts of an upload
 already under way are served for up to `drain_timeout` (restart-only, default
 25 s); the tower keeps listening until they are done, then stops, and cuts
-whatever is still open at the deadline. The process exits only once that is
-done.
+whatever is still open at the deadline. Last, it writes every session down
+for the next start (ADR 0025, "Across a restart" below). The process exits only
+once that is done.
 
 ## Client address and X-Forwarded-For
 
@@ -104,8 +105,8 @@ is client-spoofable and is never trusted on its own.
 
 A session is multi-user (ADR 0017). Every `/api/sessions/{sid}…` call carries
 the session token in the `Authorization: Bearer <token>` header; tokens are
-128-bit random, base64url (22 characters), minted with the session, and never
-logged. A session id is a human `xxx-xxx-xxx` (three lowercase triples, ADR 0020),
+128-bit random, base64url (22 characters), minted with the session, never
+logged, and kept on disk only as their SHA-256 (ADR 0025). A session id is a human `xxx-xxx-xxx` (three lowercase triples, ADR 0020),
 and each session lives at its own path `<base>/<sid>`. The token, when in the link,
 rides in the **fragment** (`…/<sid>#t=<token>`) so it never reaches server logs; a
 **password** session's link is the id alone (`…/<sid>`) and the token is obtained
@@ -499,6 +500,10 @@ On READY a beam's verified output is written under `<data_dir>/<sid>/<bid>/`
 (ADR 0016):
 
 ```
+<sid>/state.json     the session written down for a restart (ADR 0025; mode 0600):
+                     token hash, password salt + hash + the token sealed with it,
+                     clients (resume-key hashes, addresses), evicted addresses,
+                     knocks, the lifecycle and its clocks, uploads, the beam index
 <sid>/session.json   the session receipt: sid, label, status, terminated,
                      created/started/finished, senders, clients, per-beam refs,
                      the lifecycle event log (ADR 0013; no token/password/address)
@@ -510,20 +515,45 @@ On READY a beam's verified output is written under `<data_dir>/<sid>/<bid>/`
                      verdicts, bundle summary, downloads, started_at, finished_at
                      (stream: true for a streamed upload, which has no gzip blob)
 <sid>/.<bid>.upload/ a streamed upload while it arrives and verifies (ADR 0024),
-                     renamed to <bid>/ when READY, deleted otherwise
+                     renamed to <bid>/ when READY, deleted otherwise; beside
+                     raw/<name>, progress.json (received + the SHA-256 state)
+                     is rewritten after each part, so a restart resumes it
 ```
 
 `session.json` is (re)written on each beam READY and on every lifecycle
 transition, atomically (temp + rename). The per-beam files stay as ADR 0016.
+`state.json` is rewritten after every change to the session, at most once per
+250 ms per session, and for every session at the end of a drain.
 
 The three download kinds are served from these files and the in-memory copies
 freed; `saved_path` is the beam directory. Writes are staged in a sibling temp
 directory and published with a single rename, so a half-written beam is never
 visible. A persist failure keeps the beam READY and serves from memory with
-`saved_path` null; a FAILED beam writes nothing. `data_dir` is emptied on start
-behind a guard, every entry passes the one path sanitiser, and a session's
-directory is removed when the session is deleted or swept. (Persistence does not
-survive a tower restart — a non-goal.)
+`saved_path` null; a FAILED beam writes nothing. Every entry passes the one path
+sanitiser, and a session's directory is removed when the session is deleted or
+swept.
+
+### Across a restart (ADR 0025)
+
+A tower starting on a `data_dir` an earlier run left (behind the same guard: it
+refuses a non-empty directory airlift did not create) restores its sessions
+before it serves: each `<sid>/` whose `state.json` reads back comes back with its
+token, password, participants, clocks, requests and beams; one without a readable
+state, or a terminated session past its cleanup time, is deleted, and so is
+anything inside a restored session its state does not account for. A READY beam
+comes back from its `meta.json` (one the state missed is adopted); a READY beam
+whose files are missing comes back FAILED; a beam in frames still arriving is
+dropped and starts again from its scanner's next MANIFEST; a streamed upload
+comes back RECEIVING at the `received` its `progress.json` records — the next
+part re-creates the receiver (`409 {received}` and the poll tell the sender where
+to resume) — or, with every byte in, is verified at start. Nobody is connected
+after a restart, so the idle grace runs from it; an approved upload's freshness
+restarts too. The token and resume keys are on disk only as hashes: the first
+call that presents one gives it back to the tower. A password join opens the
+token from its seal; in the unlikely case it cannot, the join is `503` +
+`Retry-After` until a participant has called. An admitted knock polls `pending`
+until the tower knows the token again. Event streams reconnect; download links
+and rate-limit buckets do not survive.
 
 ## Static
 

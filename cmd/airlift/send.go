@@ -114,7 +114,8 @@ func statusOf(err error) int {
 // tower talks to one session's API as one client.
 type tower struct {
 	base, sid, token string
-	id, key          string // this sender's client id and resume key
+	id, key          string        // this sender's client id and resume key
+	patience         time.Duration // how long a call that may be repeated waits out a tower that stopped answering
 }
 
 func (t *tower) call(ctx context.Context, method, path string, in, out any) error {
@@ -181,13 +182,17 @@ func (t *tower) headers(req *http.Request) {
 }
 
 // callPatient is call that waits out rate limits (429 + Retry-After) and, for
-// a call that is safe to repeat, retries a connection that failed before any
-// reply. Registering and password joins mint a client each time, so those are
-// never repeated blind.
+// a call that is safe to repeat, a tower that stopped answering: a dropped
+// connection, a proxy's 502/503/504, or the tower's own 503 + Retry-After while
+// it restarts (ADR 0025). Until the tower has answered once it gives up after a
+// few tries (a wrong link should fail fast); after that it waits up to
+// t.patience (--wait). Registering and password joins mint a client each time,
+// so those are never repeated blind.
 func (t *tower) callPatient(ctx context.Context, method, path string, in, out any) error {
 	repeatable := method == http.MethodGet || method == http.MethodDelete ||
 		strings.HasSuffix(path, "/uploads") || strings.HasSuffix(path, "/knock")
 	dropped := 0
+	var down time.Time // when the tower stopped answering
 	for {
 		err := t.call(ctx, method, path, in, out)
 		var ae *apiError
@@ -198,9 +203,23 @@ func (t *tower) callPatient(ctx context.Context, method, path string, in, out an
 			if err := sleepCtx(ctx, max(ae.retryAfter, time.Second)); err != nil {
 				return err
 			}
-		case repeatable && ctx.Err() == nil && dropped < 3 && (isNetErr(err) || isGatewayStatus(err)):
+		case repeatable && ctx.Err() == nil && (isNetErr(err) || isGatewayStatus(err)):
+			if down.IsZero() {
+				down = time.Now()
+			}
+			left := t.patience - time.Since(down)
+			if dropped >= 3 && left <= 0 {
+				return err
+			}
 			dropped++
-			if err := sleepCtx(ctx, time.Duration(dropped)*time.Second); err != nil {
+			pause := min(time.Duration(1)<<min(dropped-1, 4)*time.Second, 10*time.Second)
+			if errors.As(err, &ae) && ae.retryAfter > 0 { // a restarting tower says when to come back
+				pause = ae.retryAfter
+			}
+			if left > 0 {
+				pause = min(pause, left)
+			}
+			if err := sleepCtx(ctx, max(pause, time.Second)); err != nil {
 				return err
 			}
 		default:
@@ -334,6 +353,7 @@ func (j *sendJob) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	j.t.patience = j.wait // the tower answered: from here on a restart is waited out
 	host := strings.TrimPrefix(strings.TrimPrefix(j.t.base, "https://"), "http://")
 	j.say("  tower    %s (%s) · session %s", host, info.Version, j.link.SID)
 	limit := info.Caps.MaxUploadBytes

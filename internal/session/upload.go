@@ -47,21 +47,21 @@ var (
 // Upload is one direct sender's request to push a beam into the session: in
 // frames (ADR 0023), or streamed as the payload's own bytes (ADR 0024).
 type Upload struct {
-	ID        string
-	ClientID  string
-	Name      string // the beam's name, as its manifest must carry it
-	Bytes     int64  // frames: the payload after gzip, as its manifest must carry it; streamed: the payload's size
-	Chunks    int    // frames: as the manifest must carry it; 0 when streamed
-	Stream    bool   // the payload's bytes arrive straight, not in frames (ADR 0024)
-	SHA256    string // streamed: the file's declared sha256
-	Received  int64  // streamed: the bytes the tower holds so far
-	Sender    uint32 // the beam's sender u32 (its bid in hex)
-	At        time.Time
-	State     string
-	DecidedAt time.Time
-	By        string    // the deciding admin's name
-	LastUsed  time.Time // the last frames POST that moved the beam
-	EndedAt   time.Time // when it left pending/approved
+	ID        string    `json:"id"`
+	ClientID  string    `json:"client_id"`
+	Name      string    `json:"name"`             // the beam's name, as its manifest must carry it
+	Bytes     int64     `json:"bytes"`            // frames: the payload after gzip, as its manifest must carry it; streamed: the payload's size
+	Chunks    int       `json:"chunks,omitempty"` // frames: as the manifest must carry it; 0 when streamed
+	Stream    bool      `json:"stream,omitempty"` // the payload's bytes arrive straight, not in frames (ADR 0024)
+	SHA256    string    `json:"sha256,omitempty"` // streamed: the file's declared sha256
+	Received  int64     `json:"received"`         // streamed: the bytes the tower holds so far
+	Sender    uint32    `json:"sender"`           // the beam's sender u32 (its bid in hex)
+	At        time.Time `json:"at"`
+	State     string    `json:"state"`
+	DecidedAt time.Time `json:"decided_at"`
+	By        string    `json:"by,omitempty"` // the deciding admin's name
+	LastUsed  time.Time `json:"last_used"`    // the last frames POST that moved the beam
+	EndedAt   time.Time `json:"ended_at"`     // when it left pending/approved
 }
 
 // UploadPin is what an approval lets a sender's frames do: build exactly the

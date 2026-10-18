@@ -1,6 +1,7 @@
 # ADR 0005 — The server is the source of truth for sessions
 
-Status: accepted (Phase 0)
+Status: accepted (Phase 0). Superseded in part by ADR 0025: sessions are written
+down under `data_dir` and restored on start (no longer memory-only).
 
 ## Context
 

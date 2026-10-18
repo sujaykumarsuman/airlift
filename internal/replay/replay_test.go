@@ -144,7 +144,7 @@ func fakeTower(t *testing.T, st *session.Store) *httptest.Server {
 	t.Helper()
 	get := func(w http.ResponseWriter, r *http.Request) (*session.Session, bool) {
 		s, ok := st.Get(r.PathValue("sid"))
-		if !ok || r.Header.Get("Authorization") != "Bearer "+s.Token {
+		if !ok || r.Header.Get("Authorization") != "Bearer "+s.Token() {
 			http.Error(w, "nope", http.StatusUnauthorized)
 			return nil, false
 		}
@@ -199,7 +199,7 @@ func TestRunReachesReadyThroughLoss(t *testing.T) {
 	s, _ := st.Create()
 	ts := fakeTower(t, st)
 	var logs []string
-	rep, err := Run(context.Background(), ts.Client(), ts.URL, s.ID, s.Token, d, Options{
+	rep, err := Run(context.Background(), ts.Client(), ts.URL, s.ID, s.Token(), d, Options{
 		Drop: 0.2, Shuffle: true, Passes: 5, Seed: 1,
 		Logf: func(f string, a ...any) { logs = append(logs, strings.TrimSpace(f)) },
 	})
@@ -219,7 +219,7 @@ func TestRunStopsWhenPassesRunOut(t *testing.T) {
 	st := session.NewStore(time.Hour, 4)
 	s, _ := st.Create()
 	ts := fakeTower(t, st)
-	rep, err := Run(context.Background(), ts.Client(), ts.URL, s.ID, s.Token, d, Options{Drop: 0.99, Passes: 2, Seed: 1})
+	rep, err := Run(context.Background(), ts.Client(), ts.URL, s.ID, s.Token(), d, Options{Drop: 0.99, Passes: 2, Seed: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,13 +234,13 @@ func TestRunStopsWhenPassesRunOut(t *testing.T) {
 	s2, _ := st.Create()
 	ts2 := ts // the same tower serves every session in the store
 	start := time.Now()
-	Run(context.Background(), ts2.Client(), ts2.URL, s2.ID, s2.Token, &beam.Dump{Frames: d.Frames[:9], SenderSession: d.SenderSession}, Options{Rate: 100, Passes: 1})
+	Run(context.Background(), ts2.Client(), ts2.URL, s2.ID, s2.Token(), &beam.Dump{Frames: d.Frames[:9], SenderSession: d.SenderSession}, Options{Rate: 100, Passes: 1})
 	if time.Since(start) < 60*time.Millisecond {
 		t.Fatal("rate not honoured")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := Run(ctx, ts2.Client(), ts2.URL, s2.ID, s2.Token, d, Options{Rate: 1, Passes: 1}); err == nil {
+	if _, err := Run(ctx, ts2.Client(), ts2.URL, s2.ID, s2.Token(), d, Options{Rate: 1, Passes: 1}); err == nil {
 		t.Fatal("cancelled context ignored")
 	}
 }
