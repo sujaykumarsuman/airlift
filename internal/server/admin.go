@@ -240,6 +240,9 @@ func (srv *Server) adminEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	if srv.refuseDraining(w) {
+		return
+	}
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -271,6 +274,8 @@ func (srv *Server) adminEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-srv.drainCh:
 			return
 		case <-content.C:
 			if !send() {

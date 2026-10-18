@@ -93,6 +93,11 @@ type Server struct {
 	live  atomic.Pointer[liveCfg] // the hot-path config subset (a PATCH hot-swaps it)
 	cfgMu sync.Mutex              // guards cfg (a live PATCH swaps it; ADR 0014)
 	cfg   *config.Config          // the current effective config for the admin dump
+
+	draining  atomic.Bool   // the tower is stopping: refuse new work (drain.go)
+	drainCh   chan struct{} // closed by Drain: open event streams end
+	drainOnce sync.Once
+	active    atomic.Int64 // requests in flight
 }
 
 func (srv *Server) maxBody() int64            { return srv.live.Load().MaxBody }
@@ -111,7 +116,7 @@ func New(opts Options) *Server {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config, recv: map[string]*receiver{}}
+	srv := &Server{opts: opts, mux: http.NewServeMux(), cfg: opts.Config, recv: map[string]*receiver{}, drainCh: make(chan struct{})}
 	srv.live.Store(&liveCfg{MaxBody: opts.MaxBody, Caps: opts.Caps, WarningTTL: opts.WarningTTL, ReviewTTL: opts.ReviewTTL})
 	srv.lim = newLimiter(opts.Now, map[rateKind]Rate{
 		rlCreate:    opts.RateCreate,
@@ -133,7 +138,7 @@ func New(opts Options) *Server {
 }
 
 // Handler is the root handler.
-func (srv *Server) Handler() http.Handler { return srv.mux }
+func (srv *Server) Handler() http.Handler { return srv.track(srv.mux) }
 
 func (srv *Server) routes() {
 	m := srv.mux
@@ -162,6 +167,7 @@ func (srv *Server) routes() {
 	m.HandleFunc("DELETE /api/sessions/{sid}/clients/{cid}", srv.sessionAdmin(srv.evictClient))
 	m.HandleFunc("DELETE /api/sessions/{sid}/beams/{bid}", srv.sessionAdmin(srv.deleteBeam))
 	m.HandleFunc("GET /api/info", srv.info)
+	m.HandleFunc("GET /readyz", srv.readyz)
 	m.HandleFunc("GET /api/admin/config", srv.admin(srv.adminConfig))
 	m.HandleFunc("PATCH /api/admin/config", srv.admin(srv.adminPatchConfig))
 	m.HandleFunc("GET /api/admin/sessions", srv.admin(srv.adminList))
@@ -521,6 +527,9 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 		writeError(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	if srv.refuseDraining(w) { // a stopping tower holds no new stream open
+		return
+	}
 	role := session.RoleViewer
 	switch r.URL.Query().Get("role") {
 	case "relay":
@@ -592,6 +601,8 @@ func (srv *Server) events(w http.ResponseWriter, r *http.Request, s *session.Ses
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-srv.drainCh: // the tower is stopping: the page reconnects to the next one
 			return
 		case <-sub.C:
 			if !send() {

@@ -20,7 +20,7 @@ const (
 	KList                 // trusted_proxies (comma-separated IPs or CIDRs)
 	KInt                  // sessions, max_beams
 	KBytes                // max_gz_bytes, max_upload_bytes, max_body ("64MiB")
-	KDuration             // *_ttl, max_age ("10m"; "0"/"off" = zero)
+	KDuration             // *_ttl, max_age, drain_timeout ("10m"; "0"/"off" = zero)
 	KRate                 // rate_* ("5/min")
 )
 
@@ -41,6 +41,7 @@ var registry = []key{
 	{"admin_token", KSecret, "", false},
 	{"data_dir", KString, "", false},
 	{"trusted_proxies", KList, "127.0.0.1,::1", false},
+	{"drain_timeout", KDuration, "25s", false},
 	{"sessions", KInt, "32", true},
 	{"max_beams", KInt, "10", true},
 	{"max_gz_bytes", KBytes, "64MiB", true},

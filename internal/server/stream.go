@@ -211,6 +211,9 @@ func (srv *Server) receiverFor(w http.ResponseWriter, s *session.Session, t sess
 		writeError(w, http.StatusConflict, session.ErrUploadBeamTaken.Error())
 		return nil
 	}
+	if srv.refuseDraining(w) { // a stopping tower starts no upload; one under way goes on
+		return nil
+	}
 	if offset != 0 {
 		writeOffset(w, 0) // nothing of this upload is held: start again from the top
 		return nil

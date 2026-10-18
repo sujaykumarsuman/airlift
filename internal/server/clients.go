@@ -23,6 +23,9 @@ type createReq struct {
 }
 
 func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
+	if srv.refuseDraining(w) {
+		return
+	}
 	addr := srv.clientAddr(r)
 	if d, ok := srv.lim.allow(rlCreate, addr); !ok {
 		retryAfter(w, d)

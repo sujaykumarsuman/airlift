@@ -141,19 +141,50 @@ func runServe(ctx context.Context, cfg *config.Config, params config.Params, hea
 			return fail(err)
 		}
 	}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := hs.Shutdown(shutdownCtx); err != nil {
-			hs.Close()
-		}
-	}()
-	if err := hs.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+	if err := serve(ctx, hs, srv, ln, cfg.DrainTimeout, logger); err != nil {
 		return fail(err)
 	}
 	logger.Printf("stopped")
 	return 0
+}
+
+// settleTimeout bounds the wait, after a drain ran out of time and cut what was
+// still open, for those handlers to record what they took.
+const settleTimeout = 5 * time.Second
+
+// serve runs the HTTP server on ln until ctx ends, then drains: the tower
+// refuses new work (readiness answers 503) while the requests in flight get up
+// to drainTimeout to finish, then it stops listening; anything still open at
+// the deadline is cut. It returns only once that is done — returning earlier
+// would let the process exit under the requests it is meant to finish.
+func serve(ctx context.Context, hs *http.Server, srv *server.Server, ln net.Listener, drainTimeout time.Duration, logger *log.Logger) error {
+	hs.RegisterOnShutdown(srv.Drain)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		<-ctx.Done()
+		start := time.Now()
+		srv.Drain()
+		drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer cancel()
+		// Keep listening while the requests in flight finish: a request that
+		// still reaches this tower is answered (or refused with a Retry-After)
+		// rather than finding the port closed.
+		srv.WaitIdle(drainCtx)
+		if err := hs.Shutdown(drainCtx); err != nil {
+			logger.Printf("drain: %d request(s) still open after %s; cutting them", srv.Active(), drainTimeout)
+			hs.Close()
+			settle, cancel := context.WithTimeout(context.Background(), settleTimeout)
+			defer cancel()
+			srv.WaitIdle(settle)
+		}
+		logger.Printf("drained in %s", time.Since(start).Round(time.Millisecond))
+	}()
+	if err := hs.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	<-stopped
+	return nil
 }
 
 // prepareDataDir creates data_dir and empties it on start (decision 9), but
