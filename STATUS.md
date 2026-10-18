@@ -696,7 +696,40 @@ GHCR as the registry.
   change does not roll the pod (no checksum, `subPath` mount, env read at start),
   the admin token is the shared `projects-admin` Secret (there is no
   `airlift-admin`), the admin console is on `ops`, and tags are bumped by hand.
-- Still memory-only: a restart drains cleanly but every session goes with it.
+- Still memory-only here: a restart drains cleanly but every session goes with
+  it — 17.2 keeps them.
+
+## Phase 17.2 — restart-safe sessions (done, 2026-10-18, ADR 0025)
+
+- `data_dir` is no longer emptied on start. Each session is written down as
+  `<sid>/state.json` (0600, temp + fsync + rename) after every change, coalesced
+  to 250 ms per session, and every session at the end of the drain (17.1); the
+  next start restores them before serving and deletes what none accounts for
+  (temp files, orphans, sessions past their cleanup). No secret in the clear: the
+  token and resume keys are SHA-256 hashes, re-learned from the first call that
+  presents them; a password session also keeps the token sealed (AES-256-GCM)
+  under its password, so a password join works before anyone has called.
+- READY beams come back from `meta.json` (one the state missed is adopted; one
+  whose files are gone comes back FAILED); a beam in frames still arriving is
+  dropped and its scanner restarts it. A streamed upload resumes: each part is
+  synced and `.<bid>.upload/progress.json` records `received` plus the marshalled
+  SHA-256 state; the first part after a restart re-creates the receiver (file
+  truncated to `received`, hash resumed); an upload with every byte in is
+  verified at start. Download tickets and rate buckets stay in memory.
+- `airlift beam -s` rides out a restart: its repeatable calls wait out a `503` +
+  `Retry-After` and a tower that does not answer, within `--wait`, now 10m
+  (was 3m). A wrong link still fails fast (patience starts once the tower has
+  answered).
+- End to end (`cmd/airlift/restart_test.go`): `runServe` as the binary runs it,
+  `airlift beam -s` through a proxy that holds the fourth part, the tower stopped
+  and started again on the same address and `data_dir`; the same run finishes
+  the same upload in the same session (resumed at 192 KiB of 640 KiB), the
+  dashboard's stream ends and reopens with the session and its participants.
+- The legal page now says what is written to disk and that a restart no longer
+  deletes a session.
+- **Next (infra)**: `terminationGracePeriodSeconds: 90` and
+  `probes.readinessPath: /readyz` in `apps/airlift.yaml`; the infra README's
+  "Deploying airlift" still says a restart drops every session.
 
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 

@@ -64,12 +64,12 @@ func (srv *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"sid":        s.ID,
-		"token":      s.Token,
+		"token":      s.Token(),
 		"join_url":   join,
 		"expires_at": s.ExpiresAt(),
 		"client_id":  c.ID,
 		"name":       c.Name,
-		"resume_key": c.ResumeKey(),
+		"resume_key": s.ResumeKey(c),
 	})
 }
 
@@ -171,7 +171,7 @@ func (srv *Server) registerClient(w http.ResponseWriter, r *http.Request, s *ses
 	// (that path exists for pages without a key and must not escalate a shared
 	// address into a permanent identity).
 	if proven {
-		reply["resume_key"] = c.ResumeKey()
+		reply["resume_key"] = s.ResumeKey(c)
 	}
 	writeJSON(w, http.StatusOK, reply)
 }
@@ -229,8 +229,14 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 		retryAfter(w, d)
 		return
 	}
-	if !s.CheckPassword(req.Password) {
+	token, ok := s.PasswordToken(req.Password)
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "wrong password")
+		return
+	}
+	if token == "" { // restored without a seal to open: a participant's next call brings the token back
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusServiceUnavailable, "the tower restarted and cannot open this session yet; try again shortly")
 		return
 	}
 	c, ok := s.RegisterClient(addr, req.Name, s.JoinersAdmin(), "", "")
@@ -240,10 +246,10 @@ func (srv *Server) join(w http.ResponseWriter, r *http.Request, s *session.Sessi
 	}
 	srv.reopenOnOpen(s, c)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":      s.Token,
+		"token":      token,
 		"client_id":  c.ID,
 		"name":       c.Name,
-		"resume_key": c.ResumeKey(),
+		"resume_key": s.ResumeKey(c),
 	})
 }
 

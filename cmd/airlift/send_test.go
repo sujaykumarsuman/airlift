@@ -46,6 +46,7 @@ func startTower(t *testing.T, maxUpload int64, tweak ...func(*server.Options)) *
 	}
 	srv := server.New(opts)
 	tw := &testTower{ts: httptest.NewServer(srv.Handler()), store: store}
+	t.Cleanup(srv.SaveAll) // no state write after the test's data_dir goes
 	t.Cleanup(tw.ts.Close)
 	old := pollEvery
 	pollEvery = 10 * time.Millisecond
@@ -540,7 +541,7 @@ func small(t *testing.T, n int64) {
 func TestSendStopsEarly(t *testing.T) {
 	full := startTower(t, 0, func(o *server.Options) { o.DiskFree = func(string) (int64, bool) { return 70 << 20, true } })
 	sess, _ := full.store.CreateWith(session.CreateParams{JoinersAdmin: true})
-	job := quietJob(t, full.ts.URL+"/"+sess.ID+"#t="+sess.Token, "too-big.bin", noiseBytes(8<<20, 9), 0x3)
+	job := quietJob(t, full.ts.URL+"/"+sess.ID+"#t="+sess.Token(), "too-big.bin", noiseBytes(8<<20, 9), 0x3)
 	err := job.run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "the tower refused the upload request: the tower has room for") {
 		t.Fatalf("a full tower: %v", err)

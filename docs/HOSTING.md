@@ -35,15 +35,23 @@ mid-transfer — the infra README's "Deploying airlift" has the steps.
 | config (`public_url`, `listen=0.0.0.0:8443`, `trusted_proxies=10.42.0.0/16`) | the HelmRelease `values.configFile` in `apps/airlift.yaml`, mounted as `$AIRLIFT_HOME/config` (a `subPath` mount) |
 | admin token | the env var `AIRLIFT_ADMIN_TOKEN`, a `secretKeyRef` to key `ADMIN_PASSWORD` of the `projects-admin` Secret — the shared admin credential, owned by the projects-hub release (SOPS file `apps/secrets/projects-admin.enc.yaml`) and rendered into the `airlift` namespace |
 | TLS | Traefik + cert-manager (Let's Encrypt) on the default `TLSStore`; `infrastructure/` in the infra repo |
-| session data | a 50 Gi `longhorn-static` PVC (Longhorn, Delete-reclaim, thin-provisioned) holding `data_dir`: room for several streamed `airlift beam -s` uploads of up to `max_upload_bytes` (5 GiB) each, kept as sent, beside the QR beams (ADR 0024); the tower refuses an upload its free space cannot hold. Emptied on start regardless — memory-only sessions, ADR 0005 |
+| session data | a 50 Gi `longhorn-static` PVC (Longhorn, Delete-reclaim, thin-provisioned) holding `data_dir`: room for several streamed `airlift beam -s` uploads of up to `max_upload_bytes` (5 GiB) each, kept as sent, beside the QR beams (ADR 0024); the tower refuses an upload its free space cannot hold. Each session is written down there (`state.json`) and restored on start (ADR 0025) |
 
 ## Restarts
 
 Every restart — a deploy, a config or token change, a node reboot — goes through
 `Recreate`: the old pod stops before the new one starts, because the RWO volume
 holds `data_dir` and only one tower may write it. Keep it that way: a rolling
-overlap would mount the volume in two pods on the one node, and each tower keeps
-its own sessions.
+overlap would mount the volume in two pods on the one node, and each tower would
+hold its own copy of the sessions.
+
+A restart is a pause (ADR 0025). The stopping tower writes every session down;
+the new one restores them from the volume before it serves. Links, passwords,
+participants, clocks, pending requests and READY files carry over; dashboards
+reconnect on their own; `airlift beam -s` waits out the gap (within `--wait`,
+default 10 minutes) and resumes its upload where the tower's copy ends. What a
+restart still interrupts: a QR beam mid-scan starts again from its next
+MANIFEST, and a download in flight is asked for again from the dashboard.
 
 On SIGTERM the tower **drains** (docs/API.md "Stopping: the drain"): `GET /readyz`
 answers 503, new sessions, upload requests, first upload parts and new event

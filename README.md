@@ -118,7 +118,7 @@ to disk. The link decides how it gets in: a share link carries the
 token; a password session's link makes it ask for the password (typed without
 echo); a public session's bare id makes it knock and wait to be let in. Quote
 the link — its `#` and `&` mean something to a shell. `--wait 5m` changes how
-long it waits for an admin (default 3m). If the run ends early for any reason —
+long it waits for an admin, and for a tower that restarts mid-send (default 10m). If the run ends early for any reason —
 the wait runs out, Ctrl-C, a lost connection — the request is withdrawn and a
 half-sent beam discarded; it exits 0 only when the beam is READY on the tower.
 The approval is the admins' say over what the command line adds, not a lock:

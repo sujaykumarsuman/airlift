@@ -1,6 +1,8 @@
 # ADR 0016 — Per-beam on-disk layout and download serving
 
-Status: accepted (Phase 6.4, prompt 002)
+Status: accepted (Phase 6.4, prompt 002). Superseded in part by ADR 0025:
+`data_dir` is no longer emptied on start; sessions are written down there and
+restored.
 
 Refines prompt-002 point 9's file-writing for the multi-beam place model (ADR
 0015). The keep-versus-delete lifecycle (terminate, review, `terminated_ttl`)

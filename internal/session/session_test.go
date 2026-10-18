@@ -94,10 +94,10 @@ func TestCreateGetDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ValidID(s.ID) || len(s.Token) != 22 {
-		t.Fatalf("id %q token %q", s.ID, s.Token)
+	if !ValidID(s.ID) || len(s.Token()) != 22 {
+		t.Fatalf("id %q token %q", s.ID, s.Token())
 	}
-	if !s.TokenMatches(s.Token) || s.TokenMatches(s.Token[:21]+"x") || s.TokenMatches("") {
+	if !s.TokenMatches(s.Token()) || s.TokenMatches(s.Token()[:21]+"x") || s.TokenMatches("") {
 		t.Fatal("token comparison")
 	}
 	if got, ok := st.Get(s.ID); !ok || got != s {
@@ -768,10 +768,10 @@ func TestResumeKeyAcrossAddresses(t *testing.T) {
 	st, _ := newStore(t, time.Hour, 32)
 	s, _ := st.Create()
 	a, _ := s.RegisterClient("10.0.0.1", "alice", true, "", "")
-	if len(a.ResumeKey()) < 20 {
-		t.Fatalf("resume key %q", a.ResumeKey())
+	if len(s.ResumeKey(a)) < 20 {
+		t.Fatalf("resume key %q", s.ResumeKey(a))
 	}
-	back, ok := s.RegisterClient("10.0.0.9", "ignored", false, a.ID, a.ResumeKey())
+	back, ok := s.RegisterClient("10.0.0.9", "ignored", false, a.ID, s.ResumeKey(a))
 	if !ok || back != a || a.Addr != "10.0.0.9" || a.Name != "alice" || !a.SessionAdmin {
 		t.Fatalf("resume by key from a new address: ok=%v %+v", ok, back)
 	}
@@ -785,7 +785,7 @@ func TestResumeKeyAcrossAddresses(t *testing.T) {
 		t.Fatal("a keyless resume from elsewhere must not")
 	}
 	// The client tier: a matching key passes from anywhere and re-binds.
-	if !s.VerifyClient(a, "10.0.0.7", a.ResumeKey()) || a.Addr != "10.0.0.7" {
+	if !s.VerifyClient(a, "10.0.0.7", s.ResumeKey(a)) || a.Addr != "10.0.0.7" {
 		t.Fatalf("verify by key: addr %q", a.Addr)
 	}
 	if s.VerifyClient(a, "10.0.0.8", "") || s.VerifyClient(a, "10.0.0.7", "bad") {
@@ -796,7 +796,7 @@ func TestResumeKeyAcrossAddresses(t *testing.T) {
 	}
 	// The key is never in the place document.
 	blob, _ := json.Marshal(s.Snapshot())
-	if strings.Contains(string(blob), a.ResumeKey()) {
+	if strings.Contains(string(blob), s.ResumeKey(a)) {
 		t.Fatal("the snapshot leaks the resume key")
 	}
 }
@@ -819,7 +819,7 @@ func TestIdleClientsPark(t *testing.T) {
 	if n := len(s.Snapshot().Clients); n != 0 {
 		t.Fatalf("%d clients shown after parking, want 0", n)
 	}
-	if !s.VerifyClient(a, "10.0.0.5", a.ResumeKey()) {
+	if !s.VerifyClient(a, "10.0.0.5", s.ResumeKey(a)) {
 		t.Fatal("verify")
 	}
 	snap := s.Snapshot().Clients
@@ -829,7 +829,7 @@ func TestIdleClientsPark(t *testing.T) {
 	// A register with the key un-parks too; bob stays parked.
 	c.t = c.t.Add(ClientIdleTTL + time.Second)
 	s.ParkIdleClients(c.t)
-	if back, _ := s.RegisterClient("10.0.0.6", "", false, a.ID, a.ResumeKey()); back != a {
+	if back, _ := s.RegisterClient("10.0.0.6", "", false, a.ID, s.ResumeKey(a)); back != a {
 		t.Fatal("register did not un-park")
 	}
 	if snap := s.Snapshot().Clients; len(snap) != 1 || snap[0].Name != "alice" {

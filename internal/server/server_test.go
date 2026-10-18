@@ -61,6 +61,7 @@ func start(t *testing.T, tweak func(*Options)) *harness {
 	if opts.PublicBase == "" {
 		h.srv.opts.PublicBase = h.ts.URL
 	}
+	t.Cleanup(h.srv.SaveAll) // runs after ts.Close and before data_dir is removed: no late state write
 	t.Cleanup(h.ts.Close)
 	return h
 }
@@ -1645,7 +1646,7 @@ func TestServesUnderPathPrefix(t *testing.T) {
 	// A headless session has no creator client; register one through the proxy,
 	// then post frames as a client — both must route through the stripped prefix.
 	reg, _ := http.NewRequest("POST", front.URL+prefix+"/api/sessions/"+s.ID+"/clients", strings.NewReader(`{"role":"relay"}`))
-	reg.Header.Set("Authorization", "Bearer "+s.Token)
+	reg.Header.Set("Authorization", "Bearer "+s.Token())
 	rr, err := http.DefaultClient.Do(reg)
 	if err != nil || rr.StatusCode != 200 {
 		t.Fatalf("register through the stripping proxy: %v status %v", err, rr)
@@ -1656,7 +1657,7 @@ func TestServesUnderPathPrefix(t *testing.T) {
 	json.NewDecoder(rr.Body).Decode(&client)
 	rr.Body.Close()
 	req, _ := http.NewRequest("POST", front.URL+prefix+"/api/sessions/"+s.ID+"/frames", strings.NewReader(`{"frames":[]}`))
-	req.Header.Set("Authorization", "Bearer "+s.Token)
+	req.Header.Set("Authorization", "Bearer "+s.Token())
 	req.Header.Set("X-Airlift-Client", client.ClientID)
 	r2, err := http.DefaultClient.Do(req)
 	if err != nil || r2.StatusCode != 200 {
