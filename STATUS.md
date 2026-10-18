@@ -681,6 +681,23 @@ GHCR as the registry.
   real beam of long paths through a local tower at 375 / 768 / 1000 / 1400 px:
   no entry past its column, no horizontal overflow.
 
+## Phase 17.1 — a stopping tower drains (done, 2026-10-18)
+
+- A stop signal used to cut every request within milliseconds: `hs.Shutdown` ran
+  in a goroutine, `Serve` returned at once and `main` exited (a 3 s timeout that
+  was never waited on). `serve()` now drains and returns only when it is done:
+  `GET /readyz` (new) answers 503; a new session, upload request, first upload
+  part or event stream gets `503` + `Retry-After: 30`; open event streams (the
+  dashboard's and the admin console's) end; the requests in flight get up to the
+  new restart-only key `drain_timeout` (default 25 s) with the listener still open,
+  and whatever outlasts it is cut. An idle tower stops at once.
+- `docs/HOSTING.md`: the infra values should set `terminationGracePeriodSeconds`
+  60–120 s and `probes.readinessPath: /readyz`; corrected — a config or token
+  change does not roll the pod (no checksum, `subPath` mount, env read at start),
+  the admin token is the shared `projects-admin` Secret (there is no
+  `airlift-admin`), the admin console is on `ops`, and tags are bumped by hand.
+- Still memory-only: a restart drains cleanly but every session goes with it.
+
 ## Phase 5 — One `airlift` binary, two commands: built and verified
 
 - `cmd/airlift` exposes only `beam` and `tower` (ADR 0010). The Python sender

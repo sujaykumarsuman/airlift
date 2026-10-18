@@ -23,6 +23,9 @@ import (
 // names the beam and its size so the admin knows what is coming; the sender
 // u32 lets the approval be spent when that beam finishes.
 func (srv *Server) requestUpload(w http.ResponseWriter, r *http.Request, s *session.Session, c *session.Client) {
+	if srv.refuseDraining(w) {
+		return
+	}
 	if !s.Status().Live() {
 		writeError(w, http.StatusConflict, "session is not open")
 		return

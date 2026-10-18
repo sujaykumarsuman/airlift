@@ -54,6 +54,7 @@ type Config struct {
 	AdminToken     string // "" = admin disabled
 	DataDir        string // absolute
 	TrustedProxies []string
+	DrainTimeout   time.Duration // how long a stopping tower lets in-flight requests finish
 	Sessions       int
 	MaxBeams       int
 	MaxGzBytes     int64 // per-beam gzip ceiling for a beam carried in frames (a QR scan)
@@ -247,6 +248,8 @@ func assign(c *Config, name string, val any) {
 		if v, ok := val.([]string); ok {
 			c.TrustedProxies = v
 		}
+	case "drain_timeout":
+		c.DrainTimeout = val.(time.Duration)
 	case "sessions":
 		c.Sessions = val.(int)
 	case "max_beams":

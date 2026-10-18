@@ -53,6 +53,7 @@ DELETE /api/sessions/{sid}/clients/{cid}  s-admin → evict a client's address
 DELETE /api/sessions/{sid}/beams/{bid}    s-admin → remove a beam and its files
 DELETE /api/sessions/{sid}[?hard]     s-admin → soft-terminate (freeze, keep files), or ?hard purge now
 GET    /api/info                      public → {version, public_url, base_path, admin_enabled, caps}
+GET    /readyz                        public → 200 {status:"ready"}, or 503 + Retry-After while the tower drains
 
 GET    /api/admin/config              a-admin → {keys:[{name,value,source,live},…]} (secrets masked)
 PATCH  /api/admin/config              a-admin → body {changes:{key:value,…}} → the fresh dump
@@ -76,6 +77,20 @@ GET    /legal                         MIT licence, terms of use, privacy notes (
 exists) and never logged; `caps` carries `{max_gz_bytes, max_upload_bytes,
 idle_ttl, max_age, sessions}` (the `*_ttl`/`max_age` in seconds; `max_upload_bytes`
 is `0` when the tower keeps no `data_dir` and so takes no streamed upload).
+
+## Stopping: the drain
+
+On SIGTERM (or ^C) the tower drains before it exits. `GET /readyz` answers
+`503` so a proxy stops sending it traffic (liveness stays on `/api/info`, which
+a draining tower still answers). New work is refused with `503` and
+`Retry-After: 30`: `POST /api/sessions`, `POST …/uploads`, the first part of a
+streamed upload, and a new event stream. Open event streams end, so the pages
+reconnect to whichever tower answers next. Requests already in flight — an
+upload part, a frames POST, a download — and the later parts of an upload
+already under way are served for up to `drain_timeout` (restart-only, default
+25 s); the tower keeps listening until they are done, then stops, and cuts
+whatever is still open at the deadline. The process exits only once that is
+done.
 
 ## Client address and X-Forwarded-For
 
@@ -199,6 +214,7 @@ Session expiry is no longer refreshed by every call — see Lifecycle.
 | Wrong admin-token rate | `rate_admin` (per address, charged only on a failed compare) | `429` + `Retry-After` |
 | Malformed JSON body | — | `400` |
 | Create option over its cap | — | `400` naming the cap |
+| A tower that is stopping (draining) | up to `drain_timeout` (default 25 s) | `503` + `Retry-After: 30` on create, an upload request, the first part of an upload and a new event stream |
 
 Rate budgets come from the config `rate_*` keys (a zero budget disables that
 limit); the frames rate check runs before the body is read.
@@ -414,7 +430,7 @@ masked (`****`). `source` is the winning layer (`flag` > `env` > `overrides` >
 `PATCH /api/admin/config {changes:{key:value,…}}` merges live-key changes into the
 tower's `overrides` file (atomic, mode 0600) and applies them without a restart,
 returning the fresh dump. Restart-only keys (`public_url`, `listen`, `admin_token`,
-`data_dir`, `trusted_proxies`) and unknown keys are rejected with `400`, and an
+`data_dir`, `trusted_proxies`, `drain_timeout`) and unknown keys are rejected with `400`, and an
 invalid value with `400`. The cap, the rate budgets, `max_body` and the
 warning/review windows take effect on the next request; the per-session clocks and
 beam ceilings bind **new** sessions (existing sessions keep what they were created
